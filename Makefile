@@ -28,8 +28,8 @@ setup-client: ## Install client node deps
 # ---------------------------------------------------------------- build
 .PHONY: build build-server build-client build-shared
 build: build-server build-client ## Build everything
-build-shared: ## Build shared protocol crate + emit TS bindings
-	$(CARGO) test -p agent-manage-shared export_bindings
+build-shared: ## Build shared protocol crate + emit TS bindings into client/src/protocol
+	TS_RS_EXPORT_DIR="$(CURDIR)" $(CARGO) test -p agent-manage-shared
 build-server: ## Build the hosting service (release)
 	$(CARGO) build -p agent-manage-server --release
 build-client: build-shared ## Build the Tauri client
@@ -49,8 +49,8 @@ run-client: build-shared ## Run the Tauri client in dev mode
 # ---------------------------------------------------------------- test
 .PHONY: test test-shared test-server test-client test-live
 test: test-shared test-server test-client ## Run all (non-live) tests
-test-shared: ## Test shared protocol crate
-	$(CARGO) test -p agent-manage-shared
+test-shared: ## Test shared protocol crate (also regenerates TS bindings)
+	TS_RS_EXPORT_DIR="$(CURDIR)" $(CARGO) test -p agent-manage-shared
 test-server: ## Test hosting service
 	$(CARGO) test -p agent-manage-server
 test-client: ## Test client (vitest)

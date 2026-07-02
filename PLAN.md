@@ -148,8 +148,10 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
 
 - ✅ **P0 — Planning + scaffold**: PLAN.md, layout, workspace, Makefile/README
   skeleton, .gitignore. *Test:* `cargo metadata` resolves; tree correct.
-- ⬜ **P1 — Shared protocol**: serde enums + ts-rs export. *Test:* `cargo test`
-  round-trips JSON; TS bindings generated.
+- ✅ **P1 — Shared protocol**: serde tagged unions (`ClientMsg`/`ServerMsg`) +
+  `AgentEvent`/`TaskInfo`/`ServiceInfo`; ts-rs exports to `client/src/protocol/`
+  (base dir via `TS_RS_EXPORT_DIR`, seq/millis annotated `number`). *Test:* 11
+  passing crate tests (serde round-trips + binding export). ✅
 - ⬜ **P2 — Server core**: axum, bearer auth, health/info, SQLite schema+store,
   task model. *Test:* unit tests for store seq/cursor; `curl` health/info.
 - ⬜ **P3 — Agent adapter**: spawn CLI, stream stdin/stdout, backpressure,

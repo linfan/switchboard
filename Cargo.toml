@@ -17,4 +17,4 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-ts-rs = "10"
+ts-rs = { version = "10", features = ["serde-json-impl"] }
