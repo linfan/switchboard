@@ -152,8 +152,11 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   `AgentEvent`/`TaskInfo`/`ServiceInfo`; ts-rs exports to `client/src/protocol/`
   (base dir via `TS_RS_EXPORT_DIR`, seq/millis annotated `number`). *Test:* 11
   passing crate tests (serde round-trips + binding export). ✅
-- ⬜ **P2 — Server core**: axum, bearer auth, health/info, SQLite schema+store,
-  task model. *Test:* unit tests for store seq/cursor; `curl` health/info.
+- ✅ **P2 — Server core**: axum router, bearer-auth middleware + `token_valid`,
+  `/health` + `/api/info` + task CRUD, SQLite `Store` (tasks/messages/cursors,
+  atomic seq via `RETURNING`), `TaskManager`, tool discovery. *Test:* 4 store
+  unit tests (seq monotonic, replay window, cursor no-regress, CRUD) + live curl
+  smoke (401/info/create/400/list). ✅
 - ⬜ **P3 — Agent adapter**: spawn CLI, stream stdin/stdout, backpressure,
   lifecycle. *Test:* live run against `claude`/`qodercli` echoing a prompt.
 - ⬜ **P4 — Server WS**: sync loop, seq store, delivery cursor, replay,

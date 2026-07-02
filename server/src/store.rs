@@ -1,0 +1,294 @@
+//! SQLite-backed durable store: tasks, sequenced messages, and per-client
+//! delivery cursors. This is what makes gap-free replay survive restarts.
+
+use std::path::Path;
+use std::str::FromStr;
+
+use agent_manage_shared::{now_millis, AgentEvent, TaskInfo, TaskStatus};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+
+use crate::error::AppResult;
+
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS tasks (
+    id          TEXT PRIMARY KEY,
+    tool        TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    last_seq    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    task_id     TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
+    event       TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (task_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS delivery_cursors (
+    client_id   TEXT NOT NULL,
+    task_id     TEXT NOT NULL,
+    last_seq    INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (client_id, task_id)
+);
+"#;
+
+/// Durable store. Cheaply cloneable (the pool is reference-counted).
+#[derive(Clone)]
+pub struct Store {
+    pool: SqlitePool,
+}
+
+impl Store {
+    /// Open (creating if needed) the SQLite database at `path` and apply schema.
+    pub async fn connect(path: &str) -> AppResult<Self> {
+        if let Some(parent) = Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).ok();
+            }
+        }
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
+            .map_err(sqlx::Error::from)?
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(opts)
+            .await?;
+        sqlx::query(SCHEMA).execute(&pool).await?;
+        Ok(Self { pool })
+    }
+
+    /// In-memory store for tests.
+    #[cfg(test)]
+    pub async fn memory() -> AppResult<Self> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::query(SCHEMA).execute(&pool).await?;
+        Ok(Self { pool })
+    }
+
+    // ---- tasks ----------------------------------------------------------
+
+    pub async fn create_task(&self, task: &TaskInfo) -> AppResult<()> {
+        sqlx::query(
+            "INSERT INTO tasks (id, tool, title, status, created_at, last_seq)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&task.id)
+        .bind(&task.tool)
+        .bind(&task.title)
+        .bind(serde_json::to_string(&task.status)?)
+        .bind(task.created_at)
+        .bind(task.last_seq as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_tasks(&self) -> AppResult<Vec<TaskInfo>> {
+        let rows: Vec<TaskRow> = sqlx::query_as(
+            "SELECT id, tool, title, status, created_at, last_seq
+             FROM tasks ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(TaskRow::into_info).collect()
+    }
+
+    pub async fn get_task(&self, id: &str) -> AppResult<Option<TaskInfo>> {
+        let row: Option<TaskRow> = sqlx::query_as(
+            "SELECT id, tool, title, status, created_at, last_seq FROM tasks WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(TaskRow::into_info).transpose()
+    }
+
+    pub async fn update_status(&self, id: &str, status: &TaskStatus) -> AppResult<()> {
+        sqlx::query("UPDATE tasks SET status = ? WHERE id = ?")
+            .bind(serde_json::to_string(status)?)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ---- messages -------------------------------------------------------
+
+    /// Atomically assign the next monotonic seq for `task_id` and persist the
+    /// event. Returns the assigned seq. The seq is allocated under the same
+    /// transaction as the insert, so concurrent writers can never collide.
+    pub async fn append_message(&self, task_id: &str, event: &AgentEvent) -> AppResult<u64> {
+        let event_json = serde_json::to_string(event)?;
+        let mut tx = self.pool.begin().await?;
+        let (seq,): (i64,) =
+            sqlx::query_as("UPDATE tasks SET last_seq = last_seq + 1 WHERE id = ? RETURNING last_seq")
+                .bind(task_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        sqlx::query("INSERT INTO messages (task_id, seq, event, created_at) VALUES (?, ?, ?, ?)")
+            .bind(task_id)
+            .bind(seq)
+            .bind(&event_json)
+            .bind(now_millis())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(seq as u64)
+    }
+
+    /// All events for `task_id` with `seq > after`, in order — the replay window.
+    pub async fn messages_after(
+        &self,
+        task_id: &str,
+        after: u64,
+    ) -> AppResult<Vec<(u64, AgentEvent)>> {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT seq, event FROM messages WHERE task_id = ? AND seq > ? ORDER BY seq ASC",
+        )
+        .bind(task_id)
+        .bind(after as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(seq, event)| Ok((seq as u64, serde_json::from_str(&event)?)))
+            .collect()
+    }
+
+    // ---- delivery cursors ----------------------------------------------
+
+    /// Advance the durable delivery cursor for (client, task). Never moves
+    /// backwards, so stale/out-of-order acks are harmless.
+    pub async fn set_cursor(&self, client_id: &str, task_id: &str, last_seq: u64) -> AppResult<()> {
+        sqlx::query(
+            "INSERT INTO delivery_cursors (client_id, task_id, last_seq, updated_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(client_id, task_id) DO UPDATE SET
+                last_seq = MAX(last_seq, excluded.last_seq),
+                updated_at = excluded.updated_at",
+        )
+        .bind(client_id)
+        .bind(task_id)
+        .bind(last_seq as i64)
+        .bind(now_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_cursor(&self, client_id: &str, task_id: &str) -> AppResult<u64> {
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT last_seq FROM delivery_cursors WHERE client_id = ? AND task_id = ?")
+                .bind(client_id)
+                .bind(task_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(s,)| s as u64).unwrap_or(0))
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct TaskRow {
+    id: String,
+    tool: String,
+    title: String,
+    status: String,
+    created_at: i64,
+    last_seq: i64,
+}
+
+impl TaskRow {
+    fn into_info(self) -> AppResult<TaskInfo> {
+        Ok(TaskInfo {
+            id: self.id,
+            tool: self.tool,
+            title: self.title,
+            status: serde_json::from_str(&self.status)?,
+            created_at: self.created_at,
+            last_seq: self.last_seq as u64,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(text: &str) -> AgentEvent {
+        AgentEvent {
+            kind: "assistant".into(),
+            text: Some(text.into()),
+            raw: serde_json::json!({ "text": text }),
+        }
+    }
+
+    fn task(id: &str) -> TaskInfo {
+        TaskInfo {
+            id: id.into(),
+            tool: "claude".into(),
+            title: "t".into(),
+            status: TaskStatus::Running,
+            created_at: now_millis(),
+            last_seq: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn seq_is_monotonic_and_gap_free() {
+        let s = Store::memory().await.unwrap();
+        s.create_task(&task("t1")).await.unwrap();
+        let a = s.append_message("t1", &ev("a")).await.unwrap();
+        let b = s.append_message("t1", &ev("b")).await.unwrap();
+        let c = s.append_message("t1", &ev("c")).await.unwrap();
+        assert_eq!((a, b, c), (1, 2, 3));
+        let got = s.get_task("t1").await.unwrap().unwrap();
+        assert_eq!(got.last_seq, 3);
+    }
+
+    #[tokio::test]
+    async fn messages_after_is_the_replay_window() {
+        let s = Store::memory().await.unwrap();
+        s.create_task(&task("t1")).await.unwrap();
+        for t in ["a", "b", "c", "d"] {
+            s.append_message("t1", &ev(t)).await.unwrap();
+        }
+        let after1 = s.messages_after("t1", 1).await.unwrap();
+        assert_eq!(after1.len(), 3);
+        assert_eq!(after1[0].0, 2);
+        assert_eq!(after1[0].1.text.as_deref(), Some("b"));
+        let after_all = s.messages_after("t1", 4).await.unwrap();
+        assert!(after_all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cursor_never_moves_backwards() {
+        let s = Store::memory().await.unwrap();
+        s.create_task(&task("t1")).await.unwrap();
+        assert_eq!(s.get_cursor("c1", "t1").await.unwrap(), 0);
+        s.set_cursor("c1", "t1", 5).await.unwrap();
+        assert_eq!(s.get_cursor("c1", "t1").await.unwrap(), 5);
+        // A stale ack for a lower seq must not regress the cursor.
+        s.set_cursor("c1", "t1", 3).await.unwrap();
+        assert_eq!(s.get_cursor("c1", "t1").await.unwrap(), 5);
+        s.set_cursor("c1", "t1", 9).await.unwrap();
+        assert_eq!(s.get_cursor("c1", "t1").await.unwrap(), 9);
+    }
+
+    #[tokio::test]
+    async fn task_crud_round_trips() {
+        let s = Store::memory().await.unwrap();
+        s.create_task(&task("t1")).await.unwrap();
+        s.update_status("t1", &TaskStatus::Terminated).await.unwrap();
+        let got = s.get_task("t1").await.unwrap().unwrap();
+        assert_eq!(got.status, TaskStatus::Terminated);
+        assert_eq!(s.list_tasks().await.unwrap().len(), 1);
+    }
+}
