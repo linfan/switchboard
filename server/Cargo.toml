@@ -1,0 +1,22 @@
+[package]
+name = "agent-manage-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Agent-manage hosting service: supervises CLI agent tasks and syncs to clients"
+
+[[bin]]
+name = "agent-manage-server"
+path = "src/main.rs"
+
+[dependencies]
+agent-manage-shared = { path = "../shared" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

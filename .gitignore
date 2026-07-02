@@ -1,0 +1,29 @@
+# Rust
+/target
+**/target
+Cargo.lock
+
+# Node / client
+node_modules
+client/dist
+client/.vite
+client/src-tauri/target
+client/src-tauri/gen
+
+# SQLite runtime data
+*.db
+*.db-shm
+*.db-wal
+/data
+server/data
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+*.log
+.idea
+.vscode

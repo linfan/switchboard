@@ -1,0 +1,80 @@
+# Agent-Manage — unified build/test/run/deploy
+# Run `make help` for a summary of targets.
+
+SHELL := /bin/bash
+.DEFAULT_GOAL := help
+
+CARGO ?= cargo
+NPM ?= npm
+SERVER_BIN ?= agent-manage-server
+SERVER_ADDR ?= 127.0.0.1:8787
+SERVER_TOKEN ?= dev-token
+SERVER_DATA ?= server/data/agent-manage.db
+
+# ---------------------------------------------------------------- meta
+.PHONY: help
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+
+# ---------------------------------------------------------------- setup
+.PHONY: setup setup-server setup-client
+setup: setup-server setup-client ## Install all toolchains/deps
+setup-server: ## Fetch Rust deps
+	$(CARGO) fetch
+setup-client: ## Install client node deps
+	cd client && $(NPM) install
+
+# ---------------------------------------------------------------- build
+.PHONY: build build-server build-client build-shared
+build: build-server build-client ## Build everything
+build-shared: ## Build shared protocol crate + emit TS bindings
+	$(CARGO) test -p agent-manage-shared export_bindings
+build-server: ## Build the hosting service (release)
+	$(CARGO) build -p agent-manage-server --release
+build-client: build-shared ## Build the Tauri client
+	cd client && $(NPM) run build
+
+# ---------------------------------------------------------------- run
+.PHONY: run-server run-client
+run-server: ## Run hosting service (SERVER_ADDR, SERVER_TOKEN, SERVER_DATA overridable)
+	AGENT_MANAGE_ADDR=$(SERVER_ADDR) \
+	AGENT_MANAGE_TOKEN=$(SERVER_TOKEN) \
+	AGENT_MANAGE_DB=$(SERVER_DATA) \
+	RUST_LOG=$${RUST_LOG:-info} \
+	$(CARGO) run -p agent-manage-server
+run-client: build-shared ## Run the Tauri client in dev mode
+	cd client && $(NPM) run tauri dev
+
+# ---------------------------------------------------------------- test
+.PHONY: test test-shared test-server test-client test-live
+test: test-shared test-server test-client ## Run all (non-live) tests
+test-shared: ## Test shared protocol crate
+	$(CARGO) test -p agent-manage-shared
+test-server: ## Test hosting service
+	$(CARGO) test -p agent-manage-server
+test-client: ## Test client (vitest)
+	cd client && $(NPM) test --silent
+test-live: ## Run live agent-CLI tests (needs claude/qodercli auth)
+	AGENT_LIVE=1 $(CARGO) test -p agent-manage-server -- --ignored --nocapture
+
+# ---------------------------------------------------------------- quality
+.PHONY: fmt lint
+fmt: ## Format Rust + client
+	$(CARGO) fmt
+	cd client && $(NPM) run fmt --if-present
+lint: ## Lint Rust (clippy) + client
+	$(CARGO) clippy --all-targets -- -D warnings
+	cd client && $(NPM) run lint --if-present
+
+# ---------------------------------------------------------------- deploy
+.PHONY: deploy-server package-client clean
+deploy-server: build-server ## Produce a self-contained server release artifact
+	@mkdir -p dist
+	cp target/release/$(SERVER_BIN) dist/ 2>/dev/null || true
+	@echo "Server binary staged in ./dist"
+package-client: build-client ## Package the desktop client (Tauri bundles)
+	cd client && $(NPM) run tauri build
+clean: ## Remove build artifacts
+	$(CARGO) clean
+	rm -rf client/dist client/node_modules dist
