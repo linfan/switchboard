@@ -184,6 +184,10 @@ impl Store {
         Ok(())
     }
 
+    /// Read the durable delivery cursor. Part of the store's public surface and
+    /// exercised by tests; the WS path treats the client-supplied cursor as
+    /// authoritative, so this isn't on the hot path.
+    #[allow(dead_code)]
     pub async fn get_cursor(&self, client_id: &str, task_id: &str) -> AppResult<u64> {
         let row: Option<(i64,)> =
             sqlx::query_as("SELECT last_seq FROM delivery_cursors WHERE client_id = ? AND task_id = ?")

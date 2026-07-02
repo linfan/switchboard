@@ -9,6 +9,9 @@ mod http;
 mod state;
 mod store;
 mod task;
+mod ws;
+#[cfg(test)]
+mod ws_test;
 
 use std::sync::Arc;
 
@@ -27,7 +30,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %config.addr, db = %config.db_path, name = %config.service_name, "starting hosting service");
 
     let store = Store::connect(&config.db_path).await?;
-    let tasks = TaskManager::new(store.clone());
+    let tasks = TaskManager::new(store.clone(), config.agent_permission_mode.clone());
+    tasks.reconcile_orphans().await?;
     let state: state::SharedState = Arc::new(AppState {
         config: config.clone(),
         store,

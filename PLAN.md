@@ -163,9 +163,13 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   handle-drop-vs-terminate bug (channel close must not kill). *Test:* 5 codec
   unit tests + fake-agent stream/exit test + **live claude round-trip**
   (system→assistant("pong")→result→exit0). ✅
-- ⬜ **P4 — Server WS**: sync loop, seq store, delivery cursor, replay,
-  heartbeat. *Test:* integration test — connect, stream, drop, reconnect,
-  assert gap-free replay + dedup.
+- ✅ **P4 — Server WS**: `ws.rs` sync loop (Hello handshake, Welcome, per-task
+  replay of `seq > cursor`, live broadcast fan-out, Ping/Pong, Ack→cursor,
+  create/input/terminate), durable delivery cursors, broadcast Lagged→resync via
+  store replay from `last_sent`. *Test:* 5 integration tests over a real
+  tokio-tungstenite client + in-process axum server — full replay, cursor-scoped
+  replay, live streaming, gap-free reconnect (drop→inject→reconnect replays only
+  missed seqs), ping/pong. 15 server tests green. ✅
 - ⬜ **P5 — Client scaffold**: Tauri2+Vite+React+Zustand, layout, TS types.
   *Test:* `npm run build` + dev boot.
 - ⬜ **P6 — Client connection mgr**: reconnect/backoff, heartbeat, sleep/online

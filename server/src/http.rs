@@ -18,6 +18,7 @@ use crate::{
     error::AppResult,
     state::SharedState,
     task::CreateParams,
+    ws,
 };
 
 /// Build the full application router (REST now; the WS route is added in P4).
@@ -33,6 +34,7 @@ pub fn router(state: SharedState) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/ws", get(ws::ws_handler))
         .nest("/api", api)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
