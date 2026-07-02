@@ -184,8 +184,13 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   tests (mock socket + fake timers): handshake/ack, backoff growth, manual
   reconnect, heartbeat death/recovery, offline-suppression, sleep force-reconnect,
   and store dedup/cursor-scoping. ✅
-- ⬜ **P7 — Client UI**: add-service, create-task, sidebar, conversation panel,
-  terminate/monitor, reconnect controls. *Test:* manual UI pass + component tests.
+- ✅ **P7 — Client UI**: add-service dialog, new-task dialog (pick service +
+  agent tool from the service's reported tools, cwd, first message), sidebar with
+  per-service status dot / reconnect / remove and a live conversation list, and a
+  conversation panel with streaming, an Enter-to-send composer, and terminate.
+  Pool wired into the app lifecycle. *Test:* `npm run build` (tsc + vite) green;
+  16 vitest tests green; dev boot 200. Interactive click-through deferred to the
+  P8 end-to-end (no GUI browser in this env). ✅
 - ⬜ **P8 — E2E + docs**: full flow incl. reconnect replay; finalize README +
   Makefile. *Test:* scripted E2E; `make test` green.
 
