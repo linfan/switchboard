@@ -1,6 +1,7 @@
 //! Agent-manage hosting service entrypoint.
 
 mod agent;
+mod agent_proc;
 mod auth;
 mod config;
 mod error;

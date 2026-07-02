@@ -11,6 +11,10 @@ pub struct Config {
     pub db_path: String,
     /// Operator-facing service name advertised to clients.
     pub service_name: String,
+    /// `--permission-mode` passed to launched agent CLIs. Headless hosts that
+    /// want fully autonomous tasks typically use `acceptEdits` or
+    /// `bypassPermissions`; the default is the CLI's interactive `default`.
+    pub agent_permission_mode: String,
 }
 
 impl Config {
@@ -23,11 +27,13 @@ impl Config {
             .filter(|s| !s.is_empty())
             .or_else(|| std::env::var("HOSTNAME").ok())
             .unwrap_or_else(|| "agent-host".to_string());
+        let agent_permission_mode = env("AGENT_MANAGE_PERMISSION_MODE", "default");
         Self {
             addr,
             token,
             db_path,
             service_name,
+            agent_permission_mode,
         }
     }
 }

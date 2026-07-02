@@ -157,8 +157,12 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   atomic seq via `RETURNING`), `TaskManager`, tool discovery. *Test:* 4 store
   unit tests (seq monotonic, replay window, cursor no-regress, CRUD) + live curl
   smoke (401/info/create/400/list). ✅
-- ⬜ **P3 — Agent adapter**: spawn CLI, stream stdin/stdout, backpressure,
-  lifecycle. *Test:* live run against `claude`/`qodercli` echoing a prompt.
+- ✅ **P3 — Agent adapter**: `agent.rs` argv builder + JSONL codec
+  (`parse_line`/`user_turn_json`/text projection); `agent_proc.rs` supervisor
+  (4 tasks: stdout/stderr readers, stdin writer, waiter/killer). Fixed a
+  handle-drop-vs-terminate bug (channel close must not kill). *Test:* 5 codec
+  unit tests + fake-agent stream/exit test + **live claude round-trip**
+  (system→assistant("pong")→result→exit0). ✅
 - ⬜ **P4 — Server WS**: sync loop, seq store, delivery cursor, replay,
   heartbeat. *Test:* integration test — connect, stream, drop, reconnect,
   assert gap-free replay + dedup.
