@@ -1,3 +1,7 @@
+# Standalone workspace: keep this crate out of the root Cargo workspace
+# (which only builds the server/shared crates) so `tauri` tooling resolves it.
+[workspace]
+
 [package]
 name = "agent-manage-client"
 version = "0.1.0"
