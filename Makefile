@@ -18,12 +18,14 @@ help: ## Show this help
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
 # ---------------------------------------------------------------- setup
-.PHONY: setup setup-server setup-client
-setup: setup-server setup-client ## Install all toolchains/deps
+.PHONY: setup setup-server setup-client setup-e2e
+setup: setup-server setup-client setup-e2e ## Install all toolchains/deps
 setup-server: ## Fetch Rust deps
 	$(CARGO) fetch
 setup-client: ## Install client node deps
 	cd client && $(NPM) install
+setup-e2e: ## Install e2e harness deps
+	cd e2e && $(NPM) install
 
 # ---------------------------------------------------------------- build
 .PHONY: build build-server build-client build-shared
@@ -47,14 +49,18 @@ run-client: build-shared ## Run the Tauri client in dev mode
 	cd client && $(NPM) run tauri dev
 
 # ---------------------------------------------------------------- test
-.PHONY: test test-shared test-server test-client test-live
-test: test-shared test-server test-client ## Run all (non-live) tests
+.PHONY: test test-all test-shared test-server test-client test-e2e test-live
+test: test-shared test-server test-client ## Run all fast (non-live, non-e2e) tests
+test-all: test test-e2e ## Run everything incl. the end-to-end integration test
 test-shared: ## Test shared protocol crate (also regenerates TS bindings)
 	TS_RS_EXPORT_DIR="$(CURDIR)" $(CARGO) test -p agent-manage-shared
 test-server: ## Test hosting service
 	$(CARGO) test -p agent-manage-server
 test-client: ## Test client (vitest)
 	cd client && $(NPM) test --silent
+test-e2e: ## End-to-end: real server binary + WS clients + fake agent (gap-free reconnect)
+	$(CARGO) build -p agent-manage-server
+	cd e2e && $(NPM) install --silent && $(NPM) test
 test-live: ## Run live agent-CLI tests (needs claude/qodercli auth)
 	AGENT_LIVE=1 $(CARGO) test -p agent-manage-server -- --ignored --nocapture
 
@@ -77,4 +83,4 @@ package-client: build-client ## Package the desktop client (Tauri bundles)
 	cd client && $(NPM) run tauri build
 clean: ## Remove build artifacts
 	$(CARGO) clean
-	rm -rf client/dist client/node_modules dist
+	rm -rf client/dist client/node_modules e2e/node_modules dist

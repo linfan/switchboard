@@ -1,0 +1,13 @@
+{
+  "name": "agent-manage-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end test: real server binary + real WS client + fake agent",
+  "scripts": {
+    "test": "node e2e.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

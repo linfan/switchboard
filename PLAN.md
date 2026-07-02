@@ -191,8 +191,14 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   Pool wired into the app lifecycle. *Test:* `npm run build` (tsc + vite) green;
   16 vitest tests green; dev boot 200. Interactive click-through deferred to the
   P8 end-to-end (no GUI browser in this env). ✅
-- ⬜ **P8 — E2E + docs**: full flow incl. reconnect replay; finalize README +
-  Makefile. *Test:* scripted E2E; `make test` green.
+- ✅ **P8 — E2E + docs**: `e2e/` harness spawns the real server binary
+  supervising a deterministic fake agent on `PATH`, drives real WebSocket
+  clients through create→stream→drop→reconnect→terminate, and asserts the
+  reconnect replays *exactly* the missed seqs (gap-free, no loss, no dupes).
+  Makefile gains `setup-e2e`/`test-e2e`/`test-all`; README expanded with
+  architecture, durability/replay model, reconnection/liveness, protocol, agent
+  integration, config, testing, and rationale. *Test:* `make test` green
+  (shared 11 + server 15 + client 16) and `make test-e2e` green. ✅
 
 Each phase ends with an atomic conventional commit and a PLAN.md update.
 
