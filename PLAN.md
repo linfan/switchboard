@@ -170,8 +170,11 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   tokio-tungstenite client + in-process axum server — full replay, cursor-scoped
   replay, live streaming, gap-free reconnect (drop→inject→reconnect replays only
   missed seqs), ping/pong. 15 server tests green. ✅
-- ⬜ **P5 — Client scaffold**: Tauri2+Vite+React+Zustand, layout, TS types.
-  *Test:* `npm run build` + dev boot.
+- ✅ **P5 — Client scaffold**: Vite+React+TS+Zustand app with a persisted store
+  (services + reconnect cursors) and a pure `applyServerMsg` reducer (dedup by
+  seq, cursor advance); two-pane layout (service/conversation sidebar + streaming
+  panel); Tauri 2 shell (`src-tauri`, capabilities, icons). *Test:* `npm run
+  build` (tsc + vite) green; dev server boots (HTTP 200). ✅
 - ⬜ **P6 — Client connection mgr**: reconnect/backoff, heartbeat, sleep/online
   detection, dedup/ack. *Test:* vitest unit tests w/ mock socket + fake timers.
 - ⬜ **P7 — Client UI**: add-service, create-task, sidebar, conversation panel,
