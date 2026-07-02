@@ -175,8 +175,15 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   seq, cursor advance); two-pane layout (service/conversation sidebar + streaming
   panel); Tauri 2 shell (`src-tauri`, capabilities, icons). *Test:* `npm run
   build` (tsc + vite) green; dev server boots (HTTP 200). ✅
-- ⬜ **P6 — Client connection mgr**: reconnect/backoff, heartbeat, sleep/online
-  detection, dedup/ack. *Test:* vitest unit tests w/ mock socket + fake timers.
+- ✅ **P6 — Client connection mgr**: `net/connection.ts` per-service manager —
+  Hello handshake with fresh cursors on every (re)connect, Ping/Pong heartbeat
+  watchdog, exponential-backoff auto-reconnect + manual `reconnectNow`, network
+  online/offline handling, and resume-from-sleep detection via a clock-drift
+  watchdog; acks each message. `net/pool.ts` wires managers to the store +
+  browser events. Dedup/cursor-advance in the store reducer. *Test:* 16 vitest
+  tests (mock socket + fake timers): handshake/ack, backoff growth, manual
+  reconnect, heartbeat death/recovery, offline-suppression, sleep force-reconnect,
+  and store dedup/cursor-scoping. ✅
 - ⬜ **P7 — Client UI**: add-service, create-task, sidebar, conversation panel,
   terminate/monitor, reconnect controls. *Test:* manual UI pass + component tests.
 - ⬜ **P8 — E2E + docs**: full flow incl. reconnect replay; finalize README +
