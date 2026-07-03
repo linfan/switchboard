@@ -126,3 +126,44 @@ describe("applyMsg", () => {
     expect(patch.conversations?.[convKey("s1", "t1")]).toBeTruthy();
   });
 });
+
+describe("removeService", () => {
+  it("removes the service and all associated state", () => {
+    const st = useStore.getState();
+    st.addService({ id: "s1", name: "S1", url: "http://a", token: "t" });
+    st.addService({ id: "s2", name: "S2", url: "http://b", token: "t" });
+    st.applyServerMsg("s1", {
+      type: "welcome",
+      service: { name: "h", version: "1", tools: [] },
+      tasks: [
+        { id: "t1", tool: "claude", title: "T1", status: { state: "running" }, created_at: 0, last_seq: 0 },
+      ],
+    });
+    st.setCursor("s1", "t1", 5);
+    st.select(convKey("s1", "t1"));
+
+    useStore.getState().removeService("s1");
+
+    const s = useStore.getState();
+    expect(s.services.find((sv) => sv.id === "s1")).toBeUndefined();
+    expect(s.services.find((sv) => sv.id === "s2")).toBeTruthy();
+    expect(s.runtime["s1"]).toBeUndefined();
+    expect(s.conversations[convKey("s1", "t1")]).toBeUndefined();
+    expect(s.cursors[convKey("s1", "t1")]).toBeUndefined();
+    expect(s.selectedKey).toBeUndefined();
+  });
+
+  it("does not clear selectedKey when it points to a different service", () => {
+    const st = useStore.getState();
+    st.addService({ id: "s1", name: "S1", url: "http://a", token: "t" });
+    st.addService({ id: "s2", name: "S2", url: "http://b", token: "t" });
+    st.applyServerMsg("s2", {
+      type: "task_created",
+      task: { id: "t2", tool: "claude", title: "T2", status: { state: "running" }, created_at: 0, last_seq: 0 },
+    });
+    st.select(convKey("s2", "t2"));
+
+    useStore.getState().removeService("s1");
+    expect(useStore.getState().selectedKey).toBe(convKey("s2", "t2"));
+  });
+});

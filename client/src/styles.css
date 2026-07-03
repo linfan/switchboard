@@ -241,6 +241,10 @@ body {
 .icon-btn--sm {
   padding: 0 5px;
 }
+.icon-btn--danger {
+  color: #f85149;
+  border-color: #f85149;
+}
 
 /* --- panel header --- */
 .panel__spacer {

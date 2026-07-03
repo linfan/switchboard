@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from "react";
+
 import { pool } from "../net/pool";
 import { useStore } from "../store/store";
 import { convKey, type Conversation, type Service } from "../store/types";
@@ -63,6 +65,21 @@ function ServiceGroup({
   const select = useStore((s) => s.select);
   const removeService = useStore((s) => s.removeService);
   const status = rt?.status ?? "offline";
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const confirmTimer = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => () => clearTimeout(confirmTimer.current), []);
+
+  const handleRemoveClick = () => {
+    if (confirmRemove) {
+      clearTimeout(confirmTimer.current);
+      setConfirmRemove(false);
+      removeService(service.id);
+    } else {
+      setConfirmRemove(true);
+      confirmTimer.current = setTimeout(() => setConfirmRemove(false), 3000);
+    }
+  };
 
   return (
     <section className="service">
@@ -78,11 +95,11 @@ function ServiceGroup({
           ↻
         </button>
         <button
-          className="icon-btn icon-btn--sm"
-          title="Remove service"
-          onClick={() => removeService(service.id)}
+          className={`icon-btn icon-btn--sm${confirmRemove ? " icon-btn--danger" : ""}`}
+          title={confirmRemove ? "Click again to confirm removal" : "Remove service"}
+          onClick={handleRemoveClick}
         >
-          ×
+          {confirmRemove ? "Sure?" : "×"}
         </button>
       </div>
       {status !== "online" && (
