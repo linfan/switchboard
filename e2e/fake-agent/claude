@@ -1,27 +1,19 @@
 #!/usr/bin/env node
-// Deterministic fake "claude" for end-to-end tests. Speaks the same
-// stream-json contract as the real CLI: reads one JSON user turn per stdin
-// line and emits exactly one assistant event per turn. Emits nothing on
-// startup, so message production is fully driven by user input.
+// Deterministic fake interactive "claude" for PTY end-to-end tests. It runs as
+// an ordinary terminal program (the v2 contract): print a banner on startup,
+// then echo each submitted line back as `reply:<line>`. There is no stream-json
+// — the pseudo-terminal is the entire integration surface.
 import readline from "node:readline";
 
+process.stdout.write("AGENT-READY\r\n");
+
 const rl = readline.createInterface({ input: process.stdin });
-
 rl.on("line", (line) => {
-  const trimmed = line.trim();
-  if (trimmed === "") return;
-  let text = trimmed;
-  try {
-    const turn = JSON.parse(trimmed);
-    text = turn?.message?.content?.[0]?.text ?? trimmed;
-  } catch {
-    // non-JSON stdin: echo the raw line
+  const t = line.trim();
+  if (t === "") return;
+  if (t === "quit") {
+    process.exit(0);
   }
-  const event = {
-    type: "assistant",
-    message: { role: "assistant", content: [{ type: "text", text: `reply:${text}` }] },
-  };
-  process.stdout.write(JSON.stringify(event) + "\n");
+  process.stdout.write(`reply:${t}\r\n`);
 });
-
 rl.on("close", () => process.exit(0));

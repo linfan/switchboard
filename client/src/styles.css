@@ -154,7 +154,7 @@ body {
 .panel__title {
   font-weight: 600;
 }
-.terminal {
+.term-pane {
   flex: 1;
   min-height: 0;
   overflow: hidden;

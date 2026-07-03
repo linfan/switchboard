@@ -8,21 +8,26 @@ Each task is an independent conversation with its own isolated context.
 ## Highlights
 - **One client, many hosts, many tasks.** Add hosting services at runtime; run
   many concurrent agent conversations per host.
-- **Real-time streaming** over a persistent WebSocket.
-- **No message loss.** Every agent event is sequenced and persisted server-side;
-  reconnects replay undelivered events gap-free, with client-side dedup by seq.
+- **Real interactive terminals.** Each task is a CLI agent running on a
+  server-side PTY; the client renders it with xterm.js and answers prompts
+  (trust dialogs, permission y/N) live.
+- **Hybrid transport** over one persistent WebSocket: a JSON control plane
+  (typed `ClientMsg`/`ServerMsg`) alongside a binary terminal data plane.
+- **No output loss.** Terminal bytes are sequenced and persisted server-side; a
+  reconnecting client is fast-forwarded exactly the bytes it missed, or handed a
+  screen snapshot when the backlog is large.
 - **Resilient client.** Exponential-backoff auto-reconnect + manual trigger;
   detects network drops *and* system resume-from-sleep; heartbeat watchdog.
 
 ## Repository layout
 | Path       | What |
 |------------|------|
-| `shared/`  | Rust protocol crate (serde) → generates TypeScript bindings via `ts-rs` |
-| `server/`  | Rust hosting service (axum, SQLite, agent process supervisor) |
-| `client/`  | Tauri 2 + React + Zustand desktop client |
-| `e2e/`     | End-to-end harness: real server binary + WS clients + fake agent |
+| `shared/`  | Rust protocol crate: serde control-plane types (→ TS via `ts-rs`) + the binary frame codec |
+| `server/`  | Rust hosting service (axum, SQLite, PTY supervisor + vt100 emulator) |
+| `client/`  | Tauri 2 + React + Zustand desktop client with xterm.js terminals |
+| `e2e/`     | End-to-end harness: real server binary + WS clients + fake PTY agent |
 | `Makefile` | Unified build/test/run/deploy |
-| `PLAN.md`  | Architecture + phased plan + progress |
+| `PLAN.md` / `PTY-SPEC.md` | Architecture, phased plan, progress, and the v2 PTY design |
 
 ## Architecture
 
@@ -30,44 +35,47 @@ Each task is an independent conversation with its own isolated context.
 ┌──────────────────────────────┐         ┌────────────────────────────────────┐
 │  Desktop client (Tauri/React)│         │  Hosting service (Rust / axum)       │
 │                              │  WS/WSS  │                                      │
-│  ConnectionPool              │◀────────▶│  /ws  ── sync loop ──┐               │
-│   └ ConnectionManager (×N)   │  + REST  │                      ▼               │
-│       • Hello + cursors      │          │   TaskManager ── broadcast bus       │
-│       • heartbeat watchdog   │          │      │                               │
-│       • backoff reconnect    │          │      ├─ AgentProc (spawn CLI) ─┐     │
-│       • sleep/online detect  │          │      │    stdin/stdout JSONL   │     │
-│  Zustand store               │          │      ▼                        ▼     │
-│   • services (persisted)     │          │   SQLite Store          claude / …   │
-│   • conversations (by seq)   │          │    • tasks              qodercli      │
-│   • cursors (persisted)      │          │    • messages (seq)                  │
-└──────────────────────────────┘         │    • delivery_cursors                │
-                                          └────────────────────────────────────┘
+│  ConnectionPool              │◀────────▶│  /ws ── control + data planes ─┐     │
+│   └ ConnectionManager (×N)   │  + REST  │                      ▼         │     │
+│       • Hello + cursors      │          │   TaskManager ── broadcast bus │     │
+│       • heartbeat watchdog   │  JSON ctl│      │                         │     │
+│       • backoff reconnect    │  + binary│      ├─ PtyProc (spawn CLI) ───┤     │
+│       • sleep/online detect  │  frames  │      │    PTY master r/w       │     │
+│  xterm.js terminals (×N)     │          │      ├─ vt100 emulator         ▼     │
+│  Zustand store               │          │      ▼                  claude / …   │
+│   • services (persisted)     │          │   SQLite Store          qodercli     │
+│   • cursors (persisted)      │          │    • tasks · pty_chunks (seq)        │
+└──────────────────────────────┘         └────────────────────────────────────┘
 ```
 
 - The **client** is a pure web app inside a thin Tauri shell; it talks WebSocket
   directly to each hosting service. All reconnect/liveness logic is in the
-  frontend so it works identically in a browser or the desktop build.
-- The **hosting service** owns durability. It assigns every message a monotonic
-  per-task sequence number, persists it to SQLite *before* broadcasting, and
-  tracks per-client delivery cursors so a reconnecting client is replayed only
-  what it missed.
+  frontend so it works identically in a browser or the desktop build. Each task
+  is an xterm.js `Terminal` kept in a registry outside React, so switching the
+  selected conversation never loses scrollback.
+- The **hosting service** owns durability. Every PTY output chunk gets a
+  monotonic per-task sequence number, is persisted to SQLite *before*
+  broadcasting, and is also fed to a server-side vt100 emulator that can redraw
+  the current screen on demand.
 
 ### Durability & gap-free replay (the core guarantee)
 
-1. Each task has a monotonic `last_seq`. Appending a message allocates the next
+1. Each task has a monotonic `last_seq`. Appending a PTY chunk allocates the next
    seq and inserts the row in **one transaction** (`UPDATE … RETURNING` + insert),
    so concurrent writers can never collide or leave gaps.
-2. A message is **persisted before it is broadcast**. If the server crashes
-   between persist and broadcast, the message is still replayable.
-3. Every client keeps a **durable cursor** per task (`highest applied seq`),
-   persisted locally (and mirrored server-side via `Ack`). On (re)connect the
-   client sends `Hello { cursors }`; the server replays exactly the rows with
-   `seq > cursor`, in order, then a `ReplayDone`.
-4. The client **dedups by seq** in the store reducer — a replayed message at or
-   below the cursor is ignored — so at-least-once delivery becomes
-   exactly-once application. No loss, no duplicates, no gaps.
-5. If the in-memory broadcast bus lags a slow consumer, the writer **resyncs
-   from the store** instead of dropping messages.
+2. A chunk is **persisted before it is broadcast**, and only then fed to the
+   emulator. If the server crashes between persist and broadcast, it is still
+   replayable.
+3. Every client keeps a **durable cursor** per task (`highest applied chunk
+   seq`), persisted locally. On (re)connect it sends `Hello { cursors }`; per
+   task the server either **byte fast-forwards** the chunks with `seq > cursor`
+   in order, or — when the backlog exceeds a threshold — sends a single **screen
+   snapshot** (the emulator's `contents_formatted()`) at the tail seq. Either way
+   it finishes with a `ReplayDone`.
+4. Live delivery **dedups by seq**, so a client that just replayed never double-
+   applies an in-flight chunk. No loss, no duplicates, no gaps.
+5. The `INPUT` data-plane frame carries raw keystrokes straight to the PTY;
+   `Resize` (control plane) keeps the PTY's window size in sync with xterm.
 
 ### Reconnection & liveness (client)
 
@@ -83,22 +91,34 @@ Each task is an independent conversation with its own isolated context.
 
 ### Wire protocol
 
-Types are defined once in Rust (`shared/`) and exported to TypeScript via `ts-rs`
-(`client/src/protocol/`), so client and server can never drift.
+The **control plane** is JSON: types are defined once in Rust (`shared/`) and
+exported to TypeScript via `ts-rs` (`client/src/protocol/`), so client and server
+can never drift.
 
-- `ClientMsg`: `hello` · `create_task` · `user_input` · `terminate_task` ·
-  `ack` · `ping`
-- `ServerMsg`: `welcome` · `task_created` · `task_state` · `message` ·
-  `replay_done` · `pong` · `error`
+- `ClientMsg`: `hello` · `create_task` (with `cols`/`rows`) · `resize` ·
+  `terminate_task` · `ack` · `ping`
+- `ServerMsg`: `welcome` · `task_created` · `task_state` · `replay_done` ·
+  `pong` · `error`
+
+The **data plane** is binary (`shared/src/frame.rs`, mirrored in
+`client/src/net/frame.ts`, round-trip tested on both sides). Frames are
+big-endian with a 16-byte raw-UUID task id:
+
+| Frame | Layout | Direction |
+|-------|--------|-----------|
+| `OUTPUT` | `[0x01][task_id:16][seq:u64][data]` | server → client |
+| `SNAPSHOT` | `[0x02][task_id:16][seq:u64][data]` | server → client |
+| `INPUT` | `[0x10][task_id:16][data]` | client → server |
 
 ### Agent integration
 
-Both `claude` and `qodercli` share one streaming contract:
-`<bin> -p --input-format stream-json --output-format stream-json --verbose
---permission-mode <mode>`. The supervisor writes one JSON user turn per line to
-stdin and parses one JSON event per line from stdout; non-JSON lines are wrapped
-as `stdout` events so nothing is ever dropped. Adding a new CLI agent is one
-registry entry in `server/src/agent.rs`.
+In PTY mode each tool runs as an ordinary interactive terminal program (no `-p`,
+no stream-json) on a server-side pseudo-terminal; the PTY *is* the integration
+surface, so the agent answers its own trust/permission prompts live. The
+supervisor (`server/src/pty_proc.rs`) bridges the synchronous `portable-pty`
+master to tokio, and a vt100 emulator (`server/src/terminal.rs`) tracks the
+screen for snapshots. Adding a new CLI agent is one registry entry in
+`server/src/agent.rs`.
 
 ## Prerequisites
 - Rust (stable) + Cargo
@@ -115,7 +135,8 @@ make run-server             # start a hosting service on 127.0.0.1:8787
 make run-client             # launch the desktop client (Tauri dev)
 ```
 In the client: **+svc** → name it, URL `http://127.0.0.1:8787`, token
-`dev-token` → **+task** → pick the service + agent tool → chat. Use the ↻ button
+`dev-token` → **+task** → pick the service + agent tool → **Create**. Click the
+task to open its live terminal and type straight into the agent. Use the ↻ button
 to reconnect a service, and **Terminate** to stop a task.
 
 Prefer the browser during development? `cd client && npm run dev` serves the same
@@ -140,20 +161,26 @@ TLS-terminating reverse proxy for remote hosts.
 ## Testing
 ```bash
 make test          # fast: shared + server + client unit/integration tests
-make test-e2e      # full stack: real server + WS clients + fake agent
-make test-all      # test + test-e2e
+make test-e2e      # full stack: real server + WS clients + fake PTY agent
+make test-web      # browser E2E (Playwright): live server + Vite + xterm terminal
+make test-all      # test + test-e2e + test-web
 make test-live     # live agent-CLI round-trip (needs claude/qodercli auth)
 ```
 - **Server** integration tests drive a real axum server over `tokio-tungstenite`,
-  asserting welcome/replay, cursor-scoped replay, live streaming, gap-free
-  reconnect, and ping/pong.
+  asserting welcome, full/cursor-scoped byte replay, live streaming, gap-free
+  reconnect, snapshot-on-large-backlog, multi-viewer convergence, and ping/pong;
+  the PTY supervisor and vt100 emulator have their own unit tests.
 - **Client** vitest tests exercise the connection manager with a mock socket and
-  fake timers (handshake/ack, backoff, manual reconnect, heartbeat death/recovery,
-  offline suppression, sleep-triggered reconnect) and the store dedup/cursor logic.
-- **End-to-end** (`e2e/`) spawns the real server binary supervising a fake agent
-  on `PATH`, connects real WebSocket clients, and proves the crown-jewel
-  guarantee: after a disconnect a reconnecting client is replayed *exactly* the
-  messages it missed — gap-free, no loss, no duplicates.
+  fake timers (handshake, binary transport, backoff, manual reconnect, heartbeat
+  death/recovery, offline suppression, sleep-triggered reconnect), the store
+  cursor logic, and the binary frame codec round-trip.
+- **End-to-end** (`e2e/`) spawns the real server binary supervising a fake PTY
+  agent on `PATH`, connects real WebSocket clients, and proves the crown-jewel
+  guarantee: after a disconnect a reconnecting client is fast-forwarded *exactly*
+  the terminal bytes it missed — gap-free, no loss, no duplicates.
+- **Browser E2E** (`client/tests-e2e/`, Playwright) boots the real server + the
+  Vite dev app and drives a live xterm.js terminal: renders PTY output, types
+  input, and verifies the display survives a forced reconnect.
 
 ## Build & package
 ```bash
@@ -163,7 +190,12 @@ make package-client    # Tauri desktop bundles
 ```
 
 ## Design rationale
-- **WebSocket over polling/SSE**: bidirectional (user turns up, agent events
+- **PTY over stream-json**: running each agent as a real interactive terminal
+  means new CLIs work with zero adapter code and users answer trust/permission
+  prompts exactly as they would locally.
+- **Hybrid transport**: raw terminal bytes ride a compact binary data plane while
+  structured events stay typed JSON — one socket, no base64 bloat, no drift.
+- **WebSocket over polling/SSE**: bidirectional (keystrokes up, terminal output
   down) on one persistent connection with natural backpressure.
 - **SQLite over in-memory**: durability across restarts is what makes gap-free
   replay real; a single-file DB keeps hosts self-contained and easy to deploy.

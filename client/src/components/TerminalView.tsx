@@ -31,5 +31,5 @@ export function TerminalView({
     };
   }, [serviceId, taskId]);
 
-  return <div className="terminal" ref={hostRef} />;
+  return <div className="term-pane" ref={hostRef} />;
 }

@@ -7,6 +7,16 @@ and supervise multiple CLI-based agent tasks (Claude Code, Qoder CLI, …).
 This document is the single source of truth for scope, architecture, and
 progress. It is updated at the end of every phase.
 
+> **v2 pivot (P9): PTY mode.** After P8 the integration surface moved from the
+> stream-json contract to a real **pseudo-terminal** per task: every agent runs
+> as an ordinary interactive CLI on a server-side PTY, the client renders it with
+> xterm.js, and transport became **hybrid** (JSON control plane + a binary
+> terminal data plane). Durability shifted from per-message rows to sequenced
+> **PTY output chunks** plus a server-side vt100 emulator for snapshots. The full
+> v2 design lives in **`PTY-SPEC.md`**; sections 2/4/5 below describe the
+> superseded v1 stream-json model and are kept for history. See §6 P9 for the
+> current state.
+
 ---
 
 ## 1. Goals & Requirements (from spec)
@@ -199,6 +209,38 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   architecture, durability/replay model, reconnection/liveness, protocol, agent
   integration, config, testing, and rationale. *Test:* `make test` green
   (shared 11 + server 15 + client 16) and `make test-e2e` green. ✅
+
+### v2 — PTY mode (see `PTY-SPEC.md`)
+
+- ✅ **P9.1 — Spec + frame codec**: `PTY-SPEC.md`; binary `Frame` codec
+  (`OUTPUT`/`SNAPSHOT`/`INPUT`) in `shared/src/frame.rs` with a byte-for-byte TS
+  mirror in `client/src/net/frame.ts`. *Test:* Rust + vitest round-trip tests. ✅
+- ✅ **P9.2 — PTY supervisor**: `server/src/pty_proc.rs` bridges the synchronous
+  `portable-pty` master to tokio via dedicated std threads (reader/writer/waiter,
+  resize, kill; channel-close must not kill); `server/src/terminal.rs` wraps a
+  `vt100` parser (`process`/`resize`/`snapshot`/`contents`). *Test:* PTY spawn +
+  echo/resize/exit-code tests and emulator unit tests. ✅
+- ✅ **P9.3 — Server data plane**: dropped stream-json; `store.rs` gains
+  `pty_chunks` (atomic seq via `RETURNING`) + `chunks_after`; `TaskManager`
+  spawns PTYs, feeds an emulator, and broadcasts an `Outbound` bus (control +
+  Pty); `ws.rs` handshake replays via **byte fast-forward** or a **snapshot** when
+  the backlog exceeds `SNAPSHOT_THRESHOLD`, decodes `INPUT` frames to the PTY, and
+  handles `Resize`. *Test:* rewritten `ws_test.rs` — full/cursor-scoped replay,
+  live streaming, gap-free reconnect, snapshot-on-large-backlog, multi-viewer,
+  ping/pong (server 19 + shared 19 green). ✅
+- ✅ **P9.4 — Client terminal**: xterm.js terminals in a registry outside React
+  (`net/terminals.ts`) so scrollback survives task switches; `TerminalView`
+  re-parents the persistent element; `connection.ts` gains binary transport
+  (`binaryType`, text/binary branch, `sendBytes`); `pool.ts` decodes frames →
+  writes terminal + advances cursor, and routes keystrokes/resizes back; store
+  drops the message log, keeping task metadata + durable cursors. *Test:* `tsc`
+  + `vite build` green; 29 vitest tests (incl. binary transport + cursor). ✅
+- ✅ **P9.5 — E2E + Playwright + docs**: `e2e/` fake agent is now an interactive
+  PTY program; `e2e.mjs` speaks the binary plane and proves gap-free byte
+  fast-forward on reconnect. Playwright suite (`client/tests-e2e/`) boots the real
+  server + Vite and drives a live xterm terminal (render/type/reconnect). Makefile
+  gains `test-web`; README + PLAN updated for PTY mode. *Test:* `make test-e2e`
+  green and `npm run test:e2e` (2 Playwright tests) green. ✅
 
 Each phase ends with an atomic conventional commit and a PLAN.md update.
 

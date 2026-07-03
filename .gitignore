@@ -14,6 +14,11 @@ client/.vite
 client/src-tauri/target
 client/src-tauri/gen
 
+# Playwright (browser E2E) artifacts
+client/test-results
+client/playwright-report
+client/tests-e2e/.server.json
+
 # SQLite runtime data
 *.db
 *.db-shm

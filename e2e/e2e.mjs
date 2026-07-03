@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// End-to-end test of the full stack: a real server binary supervising a real
-// (fake) agent process, driven by real WebSocket clients. Proves the crown-jewel
-// guarantee: after a disconnect, a reconnecting client receives EXACTLY the
-// messages it missed — gap-free, no loss, no duplicates.
+// End-to-end test of the full v2 stack: a real server binary supervising a real
+// (fake) agent on a PTY, driven by real WebSocket clients speaking the hybrid
+// transport (JSON control plane + binary data plane). Proves the crown-jewel
+// guarantee: after a disconnect, a reconnecting client is fast-forwarded EXACTLY
+// the terminal bytes it missed — gap-free, nothing at or below its cursor.
 import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,17 +45,52 @@ function eq(a, b, msg) {
   if (as !== bs) fail(`${msg}: expected ${bs}, got ${as}`);
 }
 
+// --- binary data-plane codec (mirror of shared/src/frame.rs) ----------------
+const KIND_OUTPUT = 0x01;
+const KIND_SNAPSHOT = 0x02;
+const KIND_INPUT = 0x10;
+
+function uuidToBytes(uuid) {
+  const hex = uuid.replace(/-/g, "");
+  const out = Buffer.alloc(16);
+  for (let i = 0; i < 16; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+function bytesToUuid(buf) {
+  const h = Buffer.from(buf).toString("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+function decodeFrame(buf) {
+  const kind = buf[0];
+  if (kind === KIND_OUTPUT || kind === KIND_SNAPSHOT) {
+    const taskId = bytesToUuid(buf.subarray(1, 17));
+    const seq = buf.readUInt32BE(17) * 2 ** 32 + buf.readUInt32BE(21);
+    const data = buf.subarray(25);
+    return { kind: kind === KIND_OUTPUT ? "output" : "snapshot", taskId, seq, data };
+  }
+  return null; // client never receives INPUT frames
+}
+function encodeInput(taskId, text) {
+  return Buffer.concat([Buffer.from([KIND_INPUT]), uuidToBytes(taskId), Buffer.from(text)]);
+}
+
 class Client {
   constructor(url) {
     this.ws = new WebSocket(url);
-    this.msgs = [];
+    this.text = [];
+    this.frames = [];
     this.pending = [];
     this.opened = new Promise((res, rej) => {
       this.ws.on("open", res);
       this.ws.on("error", rej);
     });
-    this.ws.on("message", (data) => {
-      this.msgs.push(JSON.parse(data.toString()));
+    this.ws.on("message", (data, isBinary) => {
+      if (isBinary) {
+        const f = decodeFrame(data);
+        if (f) this.frames.push(f);
+      } else {
+        this.text.push(JSON.parse(data.toString()));
+      }
       this.pending = this.pending.filter((p) => {
         if (p.pred()) {
           p.res();
@@ -69,6 +105,9 @@ class Client {
   }
   send(obj) {
     this.ws.send(JSON.stringify(obj));
+  }
+  sendInput(taskId, text) {
+    this.ws.send(encodeInput(taskId, text));
   }
   close() {
     return new Promise((res) => {
@@ -87,13 +126,24 @@ class Client {
       }, timeout);
     });
   }
-  seqsFor(taskId) {
-    return this.msgs
-      .filter((m) => m.type === "message" && m.task_id === taskId)
-      .map((m) => m.seq);
+  hasText(pred) {
+    return this.text.some(pred);
   }
-  has(pred) {
-    return this.msgs.some(pred);
+  dataFrames(taskId) {
+    return this.frames.filter((f) => f.taskId === taskId);
+  }
+  seqs(taskId) {
+    return this.dataFrames(taskId).map((f) => f.seq);
+  }
+  maxSeq(taskId) {
+    const s = this.seqs(taskId);
+    return s.length ? Math.max(...s) : 0;
+  }
+  // Concatenated bytes of all data-plane frames for a task, as text.
+  screen(taskId) {
+    return Buffer.concat(this.dataFrames(taskId).map((f) => Buffer.from(f.data))).toString(
+      "utf8",
+    );
   }
 }
 
@@ -137,11 +187,11 @@ async function main() {
     await waitForHealth();
     log("server healthy");
 
-    // 1. First client: handshake + create a task.
+    // 1. First client: handshake + create an interactive PTY task.
     const c1 = new Client(WS_URL);
     await c1.open();
     c1.send({ type: "hello", client_id: "c1", cursors: {} });
-    await c1.waitUntil(() => c1.has((m) => m.type === "welcome"), "c1 welcome");
+    await c1.waitUntil(() => c1.hasText((m) => m.type === "welcome"), "c1 welcome");
     log("c1 welcomed");
 
     c1.send({
@@ -149,70 +199,74 @@ async function main() {
       tool: "claude",
       title: "E2E",
       cwd: null,
-      initial_prompt: null,
+      cols: 80,
+      rows: 24,
     });
-    await c1.waitUntil(
-      () => c1.has((m) => m.type === "task_created"),
-      "task_created",
-    );
-    const taskId = c1.msgs.find((m) => m.type === "task_created").task.id;
+    await c1.waitUntil(() => c1.hasText((m) => m.type === "task_created"), "task_created");
+    const taskId = c1.text.find((m) => m.type === "task_created").task.id;
     log(`task created: ${taskId}`);
 
-    // 2. Two user turns -> 4 sequenced messages (echo + reply each).
-    c1.send({ type: "user_input", task_id: taskId, text: "m1" });
-    await c1.waitUntil(() => c1.seqsFor(taskId).length >= 2, "m1 round-trip");
-    c1.send({ type: "user_input", task_id: taskId, text: "m2" });
-    await c1.waitUntil(() => c1.seqsFor(taskId).length >= 4, "m2 round-trip");
+    // 2. The PTY program prints its banner as terminal output.
+    await c1.waitUntil(() => c1.screen(taskId).includes("AGENT-READY"), "agent banner");
+    log("c1 saw the agent banner over the data plane");
 
-    const seqs = c1.seqsFor(taskId);
-    eq(seqs, [1, 2, 3, 4], "c1 must see gap-free seq 1..4");
-    const cursor = Math.max(...seqs);
-    log(`c1 durably applied up to seq ${cursor}`);
+    // 3. Drive two turns; each reply is more terminal output.
+    c1.sendInput(taskId, "m1\r");
+    await c1.waitUntil(() => c1.screen(taskId).includes("reply:m1"), "reply m1");
+    c1.sendInput(taskId, "m2\r");
+    await c1.waitUntil(() => c1.screen(taskId).includes("reply:m2"), "reply m2");
+    const cursor = c1.maxSeq(taskId);
+    log(`c1 durably applied up to chunk seq ${cursor}`);
 
-    // 3. Drop c1 (simulate network loss / app close).
+    // 4. Drop c1 (simulate network loss / app close).
     await c1.close();
     log("c1 disconnected");
 
-    // 4. While c1 is gone, another client drives more output on the same task.
+    // 5. While c1 is gone, another client drives more output on the same task.
     const c2 = new Client(WS_URL);
     await c2.open();
     c2.send({ type: "hello", client_id: "c2", cursors: {} });
-    await c2.waitUntil(() => c2.has((m) => m.type === "welcome"), "c2 welcome");
-    c2.send({ type: "user_input", task_id: taskId, text: "m3" });
+    await c2.waitUntil(() => c2.hasText((m) => m.type === "welcome"), "c2 welcome");
     await c2.waitUntil(
-      () =>
-        c2.seqsFor(taskId).includes(cursor + 1) &&
-        c2.seqsFor(taskId).includes(cursor + 2),
-      "m3 produced while c1 offline",
+      () => c2.hasText((m) => m.type === "replay_done" && m.task_id === taskId),
+      "c2 replay_done",
     );
-    log(`produced seq ${cursor + 1}, ${cursor + 2} while c1 offline`);
+    c2.sendInput(taskId, "m3\r");
+    await c2.waitUntil(() => c2.screen(taskId).includes("reply:m3"), "reply m3 while c1 offline");
+    log("produced reply:m3 while c1 offline");
 
-    // 5. Reconnect c1 with its durable cursor. It MUST replay only the missed
-    //    messages, gap-free, nothing at or below the cursor.
+    // 6. Reconnect c1 with its durable cursor. It MUST be fast-forwarded only the
+    //    bytes it missed: gap-free seqs strictly above the cursor, nothing at or
+    //    below it, and the missed reply present.
     const c1b = new Client(WS_URL);
     await c1b.open();
     c1b.send({ type: "hello", client_id: "c1", cursors: { [taskId]: cursor } });
     await c1b.waitUntil(
-      () => c1b.has((m) => m.type === "replay_done" && m.task_id === taskId),
+      () => c1b.hasText((m) => m.type === "replay_done" && m.task_id === taskId),
       "c1 reconnect replay_done",
     );
-    const replayed = c1b.seqsFor(taskId);
-    eq(
-      replayed,
-      [cursor + 1, cursor + 2],
-      "reconnect must replay exactly the missed messages",
-    );
+    const replayed = c1b.seqs(taskId);
+    assert(replayed.length > 0, "reconnect must replay the missed bytes");
     assert(
       replayed.every((s) => s > cursor),
-      "no message at or below the cursor may be replayed",
+      `no chunk at or below the cursor may be replayed (got ${replayed.join(",")}, cursor ${cursor})`,
     );
-    log(`reconnect replayed exactly [${replayed.join(", ")}] — no loss, no dupes`);
+    for (let i = 1; i < replayed.length; i++) {
+      assert(replayed[i] === replayed[i - 1] + 1, `replay must be gap-free (got ${replayed.join(",")})`);
+    }
+    assert(
+      replayed[0] === cursor + 1,
+      `replay must start at cursor+1 (got ${replayed[0]}, cursor ${cursor})`,
+    );
+    assert(c1b.screen(taskId).includes("reply:m3"), "reconnect must include the missed reply:m3");
+    assert(!c1b.screen(taskId).includes("reply:m1"), "reconnect must NOT re-send bytes at/below cursor");
+    log(`reconnect fast-forwarded exactly [${replayed.join(", ")}] — no loss, no dupes`);
 
-    // 6. Terminate the task and observe the terminal state.
+    // 7. Terminate the task and observe the terminal state transition.
     c1b.send({ type: "terminate_task", task_id: taskId });
     await c1b.waitUntil(
       () =>
-        c1b.has(
+        c1b.hasText(
           (m) =>
             m.type === "task_state" &&
             m.task_id === taskId &&

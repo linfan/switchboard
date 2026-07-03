@@ -49,18 +49,20 @@ run-client: build-shared ## Run the Tauri client in dev mode
 	cd client && $(NPM) run tauri dev
 
 # ---------------------------------------------------------------- test
-.PHONY: test test-all test-shared test-server test-client test-e2e test-live
+.PHONY: test test-all test-shared test-server test-client test-e2e test-web test-live
 test: test-shared test-server test-client ## Run all fast (non-live, non-e2e) tests
-test-all: test test-e2e ## Run everything incl. the end-to-end integration test
+test-all: test test-e2e test-web ## Run everything incl. end-to-end + browser tests
 test-shared: ## Test shared protocol crate (also regenerates TS bindings)
 	TS_RS_EXPORT_DIR="$(CURDIR)" $(CARGO) test -p agent-manage-shared
 test-server: ## Test hosting service
 	$(CARGO) test -p agent-manage-server
 test-client: ## Test client (vitest)
 	cd client && $(NPM) test --silent
-test-e2e: ## End-to-end: real server binary + WS clients + fake agent (gap-free reconnect)
+test-e2e: ## End-to-end: real server binary + WS clients + fake PTY agent (gap-free reconnect)
 	$(CARGO) build -p agent-manage-server
 	cd e2e && $(NPM) install --silent && $(NPM) test
+test-web: ## Browser E2E (Playwright): live server + Vite + xterm terminal render/type/reconnect
+	cd client && $(NPM) install --silent && $(NPM) exec -- playwright install chromium && $(NPM) run test:e2e
 test-live: ## Run live agent-CLI tests (needs claude/qodercli auth)
 	AGENT_LIVE=1 $(CARGO) test -p agent-manage-server -- --ignored --nocapture
 
@@ -84,3 +86,4 @@ package-client: build-client ## Package the desktop client (Tauri bundles)
 clean: ## Remove build artifacts
 	$(CARGO) clean
 	rm -rf client/dist client/node_modules e2e/node_modules dist
+	rm -rf client/test-results client/playwright-report client/tests-e2e/.server.json
