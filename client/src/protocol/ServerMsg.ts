@@ -6,4 +6,4 @@ import type { TaskStatus } from "./TaskStatus";
 /**
  * Messages the hosting service sends to the client over the WebSocket.
  */
-export type ServerMsg = { "type": "welcome", service: ServiceInfo, tasks: Array<TaskInfo>, } | { "type": "task_created", task: TaskInfo, } | { "type": "task_state", task_id: string, status: TaskStatus, } | { "type": "replay_done", task_id: string, last_seq: number, } | { "type": "pong", ts: number, } | { "type": "error", task_id: string | null, code: string | null, message: string, };
+export type ServerMsg = { "type": "welcome", service: ServiceInfo, tasks: Array<TaskInfo>, } | { "type": "task_created", task: TaskInfo, } | { "type": "task_state", task_id: string, status: TaskStatus, } | { "type": "task_deleted", task_id: string, } | { "type": "replay_done", task_id: string, last_seq: number, } | { "type": "pong", ts: number, } | { "type": "error", task_id: string | null, code: string | null, message: string, };

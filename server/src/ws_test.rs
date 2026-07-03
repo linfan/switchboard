@@ -193,6 +193,39 @@ async fn live_streaming_after_replay() {
 }
 
 #[tokio::test]
+async fn delete_task_removes_state_and_notifies_clients() {
+    let (addr, state) = start_server().await;
+    seed(&state, T1).await;
+    state.tasks.inject_chunk(T1, b"a").await.unwrap();
+
+    let mut ws = connect(addr).await;
+    hello(&mut ws, HashMap::new()).await;
+    read_through_replay(&mut ws, T1).await;
+
+    send(&mut ws, &ClientMsg::DeleteTask { task_id: T1.into() }).await;
+
+    // The connected client is told the task is gone.
+    loop {
+        if let Rx::Ctrl(ServerMsg::TaskDeleted { task_id }) = next_rx(&mut ws).await {
+            assert_eq!(task_id, T1);
+            break;
+        }
+    }
+
+    // Durable state is gone, and a fresh connection's welcome no longer lists it.
+    assert!(state.store.get_task(T1).await.unwrap().is_none());
+    assert!(state.store.chunks_after(T1, 0).await.unwrap().is_empty());
+    let mut ws2 = connect(addr).await;
+    hello(&mut ws2, HashMap::new()).await;
+    match next_rx(&mut ws2).await {
+        Rx::Ctrl(ServerMsg::Welcome { tasks, .. }) => {
+            assert!(tasks.iter().all(|t| t.id != T1));
+        }
+        other => panic!("expected welcome, got something else: {}", matches!(other, Rx::Bin(_))),
+    }
+}
+
+#[tokio::test]
 async fn reconnect_replays_only_missed_bytes() {
     let (addr, state) = start_server().await;
     seed(&state, T1).await;

@@ -121,6 +121,26 @@ impl Store {
         Ok(())
     }
 
+    /// Permanently remove a task and all its durable state (chunks + delivery
+    /// cursors) in one transaction, so no orphaned rows survive a delete.
+    pub async fn delete_task(&self, id: &str) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM pty_chunks WHERE task_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM delivery_cursors WHERE task_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM tasks WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     // ---- pty chunks -----------------------------------------------------
 
     /// Atomically assign the next monotonic seq for `task_id` and persist a
@@ -282,5 +302,21 @@ mod tests {
         let got = s.get_task("t1").await.unwrap().unwrap();
         assert_eq!(got.status, TaskStatus::Terminated);
         assert_eq!(s.list_tasks().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_task_removes_all_durable_state() {
+        let s = Store::memory().await.unwrap();
+        s.create_task(&task("t1")).await.unwrap();
+        s.append_chunk("t1", b"a").await.unwrap();
+        s.append_chunk("t1", b"b").await.unwrap();
+        s.set_cursor("c1", "t1", 2).await.unwrap();
+
+        s.delete_task("t1").await.unwrap();
+
+        assert!(s.get_task("t1").await.unwrap().is_none());
+        assert!(s.chunks_after("t1", 0).await.unwrap().is_empty());
+        assert_eq!(s.get_cursor("c1", "t1").await.unwrap(), 0);
+        assert!(s.list_tasks().await.unwrap().is_empty());
     }
 }

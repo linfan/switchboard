@@ -96,9 +96,14 @@ exported to TypeScript via `ts-rs` (`client/src/protocol/`), so client and serve
 can never drift.
 
 - `ClientMsg`: `hello` · `create_task` (with `cols`/`rows`) · `resize` ·
-  `terminate_task` · `ack` · `ping`
-- `ServerMsg`: `welcome` · `task_created` · `task_state` · `replay_done` ·
-  `pong` · `error`
+  `terminate_task` · `delete_task` · `ack` · `ping`
+- `ServerMsg`: `welcome` · `task_created` · `task_state` · `task_deleted` ·
+  `replay_done` · `pong` · `error`
+
+`terminate_task` stops a task's process but keeps its history (so it can still be
+replayed); `delete_task` terminates it *and* removes the task plus all its
+persisted terminal chunks and delivery cursors from the host, then broadcasts
+`task_deleted` so every client drops it.
 
 The **data plane** is binary (`shared/src/frame.rs`, mirrored in
 `client/src/net/frame.ts`, round-trip tested on both sides). Frames are

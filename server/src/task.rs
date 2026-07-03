@@ -52,6 +52,9 @@ pub struct TaskManager {
     /// Tasks explicitly terminated (so a later process Exit is reported as
     /// `Terminated` rather than `Exited`).
     terminating: Arc<Mutex<HashSet<String>>>,
+    /// Tasks being deleted (so the pump's final Exit is swallowed rather than
+    /// broadcasting a lifecycle state for an already-removed task).
+    deleting: Arc<Mutex<HashSet<String>>>,
 }
 
 impl TaskManager {
@@ -63,6 +66,7 @@ impl TaskManager {
             running: Arc::new(Mutex::new(HashMap::new())),
             terminals: Arc::new(Mutex::new(HashMap::new())),
             terminating: Arc::new(Mutex::new(HashSet::new())),
+            deleting: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -211,6 +215,27 @@ impl TaskManager {
         Ok(())
     }
 
+    /// Delete a task entirely: kill its process if running, drop its in-memory
+    /// screen/handles, remove all persisted state, and tell every client to drop
+    /// it. Idempotent-ish: deleting an unknown task is a `NotFound`.
+    pub async fn delete(&self, id: &str) -> AppResult<()> {
+        if self.store.get_task(id).await?.is_none() {
+            return Err(AppError::NotFound(format!("task {id}")));
+        }
+        // Mark deleting so the pump's later Exit doesn't broadcast a stray state.
+        self.deleting.lock().unwrap().insert(id.to_string());
+        if let Some(handle) = self.running.lock().unwrap().remove(id) {
+            handle.terminate();
+        }
+        self.terminating.lock().unwrap().remove(id);
+        self.terminals.lock().unwrap().remove(id);
+        self.store.delete_task(id).await?;
+        let _ = self.events.send(Outbound::Control(ServerMsg::TaskDeleted {
+            task_id: id.to_string(),
+        }));
+        Ok(())
+    }
+
     /// Test-only: register an authoritative screen for a task without a real
     /// PTY, so the WS binary plane can be exercised deterministically.
     #[cfg(test)]
@@ -242,6 +267,7 @@ impl TaskManager {
         let running = self.running.clone();
         let terminals = self.terminals.clone();
         let terminating = self.terminating.clone();
+        let deleting = self.deleting.clone();
         tokio::spawn(async move {
             while let Some(item) = out_rx.recv().await {
                 match item {
@@ -260,6 +286,11 @@ impl TaskManager {
                     },
                     PtyOutput::Exited(code) => {
                         running.lock().unwrap().remove(&task_id);
+                        // A delete already removed the row + told clients; don't
+                        // resurrect it with a lifecycle update.
+                        if deleting.lock().unwrap().remove(&task_id) {
+                            break;
+                        }
                         let was_terminated = terminating.lock().unwrap().remove(&task_id);
                         let status = if was_terminated {
                             TaskStatus::Terminated

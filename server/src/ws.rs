@@ -282,6 +282,15 @@ async fn handle_client_msg(
                 });
             }
         }
+        ClientMsg::DeleteTask { task_id } => {
+            if let Err(e) = state.tasks.delete(&task_id).await {
+                let _ = direct_tx.send(ServerMsg::Error {
+                    task_id: Some(task_id),
+                    code: Some("delete_failed".into()),
+                    message: e.to_string(),
+                });
+            }
+        }
     }
 }
 

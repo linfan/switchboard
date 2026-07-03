@@ -2,7 +2,7 @@
 //! Zustand store and to browser network/wake signals. This is the glue the UI
 //! talks to — it never touches sockets directly.
 
-import type { ClientMsg } from "../protocol";
+import type { ClientMsg, ServerMsg } from "../protocol";
 import { useStore } from "../store/store";
 import { ConnectionManager } from "./connection";
 import { decode, encodeInput } from "./frame";
@@ -54,7 +54,7 @@ export class ConnectionPool {
           url: svc.url,
           token: svc.token,
           getCursors: () => useStore.getState().cursorsFor(svc.id),
-          onMessage: (msg) => useStore.getState().applyServerMsg(svc.id, msg),
+          onMessage: (msg) => this.onControl(svc.id, msg),
           onBinary: (bytes) => this.onBinary(svc.id, bytes),
           onStatus: (status, meta) =>
             useStore.getState().setRuntime(svc.id, {
@@ -95,6 +95,14 @@ export class ConnectionPool {
 
   private send(serviceId: string, msg: ClientMsg): boolean {
     return this.managers.get(serviceId)?.send(msg) ?? false;
+  }
+
+  /** Apply a control message, disposing a deleted task's terminal first. */
+  private onControl(serviceId: string, msg: ServerMsg): void {
+    if (msg.type === "task_deleted") {
+      terminals.dispose(serviceId, msg.task_id);
+    }
+    useStore.getState().applyServerMsg(serviceId, msg);
   }
 
   /** Decode a data-plane frame, paint its terminal, and advance the cursor. */
@@ -141,6 +149,11 @@ export class ConnectionPool {
 
   terminateTask(serviceId: string, taskId: string): boolean {
     return this.send(serviceId, { type: "terminate_task", task_id: taskId });
+  }
+
+  /** Delete a task: terminate its process and drop all its data on the host. */
+  deleteTask(serviceId: string, taskId: string): boolean {
+    return this.send(serviceId, { type: "delete_task", task_id: taskId });
   }
 
   private onOnline = () => {

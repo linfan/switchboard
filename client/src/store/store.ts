@@ -197,6 +197,16 @@ export function applyMsg(
       const key = convKey(serviceId, msg.task_id);
       return { conversations: setStatus(s.conversations, key, msg.status) };
     }
+    case "task_deleted": {
+      const key = convKey(serviceId, msg.task_id);
+      if (!(key in s.conversations) && !(key in s.cursors)) return {};
+      const conversations = { ...s.conversations };
+      delete conversations[key];
+      const cursors = { ...s.cursors };
+      delete cursors[key];
+      const selectedKey = s.selectedKey === key ? undefined : s.selectedKey;
+      return { conversations, cursors, selectedKey };
+    }
     case "replay_done":
     case "pong":
     case "error":

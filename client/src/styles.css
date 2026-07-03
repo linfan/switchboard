@@ -114,6 +114,19 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.conv__meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.conv__del {
+  visibility: hidden;
+}
+.conv:hover .conv__del,
+.conv--active .conv__del {
+  visibility: visible;
+}
 
 .badge {
   font-size: 11px;

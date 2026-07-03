@@ -106,6 +106,9 @@ pub enum ClientMsg {
     },
     /// Terminate a task's process.
     TerminateTask { task_id: String },
+    /// Delete a task entirely: terminate its process if running, then remove the
+    /// task and all its persisted terminal data from the host.
+    DeleteTask { task_id: String },
     /// Acknowledge durable receipt of messages up to `seq` for a task.
     Ack {
         task_id: String,
@@ -137,6 +140,9 @@ pub enum ServerMsg {
     TaskCreated { task: TaskInfo },
     /// A task changed lifecycle state.
     TaskState { task_id: String, status: TaskStatus },
+    /// A task was deleted (by this or another client); clients drop it and its
+    /// terminal/cursor state.
+    TaskDeleted { task_id: String },
     /// All backlog for a task has been replayed; live streaming resumes.
     ///
     /// Terminal OUTPUT/SNAPSHOT bytes travel as binary WS frames (see

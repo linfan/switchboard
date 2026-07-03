@@ -1,8 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 
 import { pool } from "../net/pool";
 import { useStore } from "../store/store";
 import { convKey, type Conversation, type Service } from "../store/types";
+import { ConfirmDialog } from "./ConfirmDialog";
+
+/** What the sidebar is currently asking the user to confirm removing. */
+type Pending =
+  | { kind: "service" }
+  | { kind: "task"; taskId: string; title: string };
 
 export function Sidebar({
   onAddService,
@@ -65,21 +71,7 @@ function ServiceGroup({
   const select = useStore((s) => s.select);
   const removeService = useStore((s) => s.removeService);
   const status = rt?.status ?? "offline";
-  const [confirmRemove, setConfirmRemove] = useState(false);
-  const confirmTimer = useRef<ReturnType<typeof setTimeout>>();
-
-  useEffect(() => () => clearTimeout(confirmTimer.current), []);
-
-  const handleRemoveClick = () => {
-    if (confirmRemove) {
-      clearTimeout(confirmTimer.current);
-      setConfirmRemove(false);
-      removeService(service.id);
-    } else {
-      setConfirmRemove(true);
-      confirmTimer.current = setTimeout(() => setConfirmRemove(false), 3000);
-    }
-  };
+  const [pending, setPending] = useState<Pending | null>(null);
 
   return (
     <section className="service">
@@ -95,11 +87,11 @@ function ServiceGroup({
           ↻
         </button>
         <button
-          className={`icon-btn icon-btn--sm${confirmRemove ? " icon-btn--danger" : ""}`}
-          title={confirmRemove ? "Click again to confirm removal" : "Remove service"}
-          onClick={handleRemoveClick}
+          className="icon-btn icon-btn--sm"
+          title="Remove service"
+          onClick={() => setPending({ kind: "service" })}
         >
-          {confirmRemove ? "Sure?" : "×"}
+          ×
         </button>
       </div>
       {status !== "online" && (
@@ -120,14 +112,48 @@ function ServiceGroup({
                 onClick={() => select(key)}
               >
                 <span className="conv__title">{c.task.title}</span>
-                <span className={`badge badge--${c.task.status.state}`}>
-                  {c.task.status.state}
+                <span className="conv__meta">
+                  <span className={`badge badge--${c.task.status.state}`}>
+                    {c.task.status.state}
+                  </span>
+                  <button
+                    className="icon-btn icon-btn--sm conv__del"
+                    title="Delete task"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPending({
+                        kind: "task",
+                        taskId: c.task.id,
+                        title: c.task.title,
+                      });
+                    }}
+                  >
+                    ×
+                  </button>
                 </span>
               </li>
             );
           })
         )}
       </ul>
+      {pending?.kind === "service" && (
+        <ConfirmDialog
+          title="Remove service"
+          message={`Remove "${service.name}"? This forgets the host and its conversations on this client. Tasks keep running on the host.`}
+          confirmLabel="Remove"
+          onConfirm={() => removeService(service.id)}
+          onClose={() => setPending(null)}
+        />
+      )}
+      {pending?.kind === "task" && (
+        <ConfirmDialog
+          title="Delete task"
+          message={`Delete "${pending.title}"? This terminates the process and permanently removes its terminal history on the host.`}
+          confirmLabel="Delete"
+          onConfirm={() => pool.deleteTask(service.id, pending.taskId)}
+          onClose={() => setPending(null)}
+        />
+      )}
     </section>
   );
 }

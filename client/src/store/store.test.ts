@@ -61,6 +61,31 @@ describe("applyServerMsg", () => {
     const c = useStore.getState().conversations[convKey(svc, "t1")];
     expect(c.task.status.state).toBe("exited");
   });
+
+  it("task_deleted drops the conversation, cursor, and selection", () => {
+    const svc = "s1";
+    const st = useStore.getState();
+    st.applyServerMsg(svc, {
+      type: "task_created",
+      task: {
+        id: "t1",
+        tool: "claude",
+        title: "T1",
+        status: { state: "running" },
+        created_at: 0,
+        last_seq: 0,
+      },
+    });
+    st.setCursor(svc, "t1", 4);
+    st.select(convKey(svc, "t1"));
+
+    st.applyServerMsg(svc, { type: "task_deleted", task_id: "t1" });
+
+    const s = useStore.getState();
+    expect(s.conversations[convKey(svc, "t1")]).toBeUndefined();
+    expect(s.cursors[convKey(svc, "t1")]).toBeUndefined();
+    expect(s.selectedKey).toBeUndefined();
+  });
 });
 
 describe("setCursor", () => {
