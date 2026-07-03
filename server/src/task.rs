@@ -271,19 +271,33 @@ impl TaskManager {
         tokio::spawn(async move {
             while let Some(item) = out_rx.recv().await {
                 match item {
-                    PtyOutput::Chunk(bytes) => match store.append_chunk(&task_id, &bytes).await {
-                        Ok(seq) => {
-                            if let Some(t) = terminals.lock().unwrap().get_mut(&task_id) {
-                                t.process(&bytes);
-                            }
-                            let _ = events.send(Outbound::Pty {
-                                task_id: task_id.clone(),
-                                seq,
-                                bytes: Arc::new(bytes),
-                            });
+                    PtyOutput::Chunk(bytes) => {
+                        // A delete removes the task row; any output still buffered
+                        // from the process (e.g. its final burst after terminate)
+                        // must not be persisted or it would fail against a missing
+                        // row. Wait for the Exited event to tear the pump down.
+                        if deleting.lock().unwrap().contains(&task_id) {
+                            continue;
                         }
-                        Err(e) => tracing::error!(%task_id, error = %e, "failed to persist chunk"),
-                    },
+                        match store.append_chunk(&task_id, &bytes).await {
+                            Ok(seq) => {
+                                if let Some(t) = terminals.lock().unwrap().get_mut(&task_id) {
+                                    t.process(&bytes);
+                                }
+                                let _ = events.send(Outbound::Pty {
+                                    task_id: task_id.clone(),
+                                    seq,
+                                    bytes: Arc::new(bytes),
+                                });
+                            }
+                            // A concurrent delete may have removed the row between
+                            // the check above and this write — expected, not an error.
+                            Err(e) if !deleting.lock().unwrap().contains(&task_id) => {
+                                tracing::error!(%task_id, error = %e, "failed to persist chunk")
+                            }
+                            Err(_) => {}
+                        }
+                    }
                     PtyOutput::Exited(code) => {
                         running.lock().unwrap().remove(&task_id);
                         // A delete already removed the row + told clients; don't
