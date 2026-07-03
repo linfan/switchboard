@@ -39,11 +39,16 @@ export class ConnectionPool {
     );
     const sync = (services: { id: string; url: string; token: string }[]) => {
       const live = new Set(services.map((s) => s.id));
-      // Drop managers for removed services.
+      // Drop managers for removed services. Delete from the map *before*
+      // stopping: `mgr.stop()` fires an `onStatus("offline")` that writes to the
+      // store, which re-enters this subscriber synchronously. If the manager
+      // were still mapped at that point the re-entrant pass would stop it again,
+      // recursing until the stack overflows — which aborts the `removeService`
+      // reducer before persistence runs, resurrecting the service on reload.
       for (const [sid, mgr] of this.managers) {
         if (!live.has(sid)) {
-          mgr.stop();
           this.managers.delete(sid);
+          mgr.stop();
         }
       }
       // Spin up managers for new services.
