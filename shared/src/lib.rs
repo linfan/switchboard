@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod frame;
+
 /// Identifier for an agent CLI tool a hosting service can run (e.g. `claude`).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "client/src/protocol/")]

@@ -3,6 +3,10 @@
 **/target
 Cargo.lock
 
+# Stray ts-rs export dir (created if `cargo test -p agent-manage-shared` runs
+# without TS_RS_EXPORT_DIR; the Makefile sets it so bindings land in client/).
+shared/bindings/
+
 # Node / client
 node_modules
 client/dist
