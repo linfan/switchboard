@@ -26,6 +26,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 futures = "0.3"
 portable-pty = "0.9"
+vt100 = "0.15"
 
 [dev-dependencies]
 tokio = { workspace = true }

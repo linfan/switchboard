@@ -6,9 +6,15 @@ mod auth;
 mod config;
 mod error;
 mod http;
+// PTY data plane (P9.2): standalone tested modules; wired into the task/ws
+// pipeline in P9.3. `allow(dead_code)` until then keeps the binary warning-free.
+#[allow(dead_code)]
+mod pty_proc;
 mod state;
 mod store;
 mod task;
+#[allow(dead_code)]
+mod terminal;
 mod ws;
 #[cfg(test)]
 mod ws_test;

@@ -86,6 +86,14 @@ pub fn argv(_spec: &AgentSpec, permission_mode: &str) -> Vec<String> {
     ]
 }
 
+/// Command-line arguments to launch `spec` in its **native interactive** mode
+/// (no `-p`, no stream-json). This is the PTY data plane: the CLI runs as a
+/// normal terminal program and answers prompts (trust dialogs, permission y/N)
+/// live. Both known CLIs take no extra flags to start interactively.
+pub fn interactive_argv(_spec: &AgentSpec) -> Vec<String> {
+    Vec::new()
+}
+
 /// Encode a user turn as a single stdin JSONL line (no trailing newline).
 pub fn user_turn_json(text: &str) -> String {
     serde_json::json!({
