@@ -15,7 +15,9 @@ class FakeSocket implements WebSocketLike {
     return FakeSocket.instances[FakeSocket.instances.length - 1];
   }
   sent: string[] = [];
+  sentBinary: Uint8Array[] = [];
   readyState = 0;
+  binaryType = "blob";
   onopen: (() => void) | null = null;
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
@@ -24,8 +26,13 @@ class FakeSocket implements WebSocketLike {
   constructor(public url: string) {
     FakeSocket.instances.push(this);
   }
-  send(data: string): void {
-    this.sent.push(data);
+  send(data: string | ArrayBufferLike | ArrayBufferView): void {
+    if (typeof data === "string") this.sent.push(data);
+    else if (data instanceof Uint8Array) this.sentBinary.push(data);
+    else if (ArrayBuffer.isView(data)) {
+      const v = data as ArrayBufferView;
+      this.sentBinary.push(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+    } else this.sentBinary.push(new Uint8Array(data as ArrayBufferLike));
   }
   close(): void {
     this.readyState = 3;
@@ -37,6 +44,9 @@ class FakeSocket implements WebSocketLike {
   }
   emitMessage(obj: unknown): void {
     this.onmessage?.({ data: JSON.stringify(obj) });
+  }
+  emitBinary(bytes: Uint8Array): void {
+    this.onmessage?.({ data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) });
   }
   emitClose(): void {
     this.readyState = 3;
@@ -61,6 +71,7 @@ function makeDeps(over: {
   now?: () => number;
 }) {
   const messages: ServerMsg[] = [];
+  const binaries: Uint8Array[] = [];
   const statuses: ConnStatus[] = [];
   const cursors = over.cursors ?? {};
   const deps = {
@@ -69,6 +80,7 @@ function makeDeps(over: {
     token: "tok",
     getCursors: () => cursors,
     onMessage: (m: ServerMsg) => messages.push(m),
+    onBinary: (b: Uint8Array) => binaries.push(b),
     onStatus: (s: ConnStatus) => statuses.push(s),
     wsFactory: (u: string) => new FakeSocket(u) as unknown as WebSocketLike,
     now: over.now ?? (() => 1000),
@@ -76,7 +88,7 @@ function makeDeps(over: {
     heartbeat: { intervalMs: 15000, timeoutMs: 10000 },
     wake: { checkMs: 2000, driftMs: 5000 },
   };
-  return { deps, messages, statuses };
+  return { deps, messages, binaries, statuses };
 }
 
 beforeEach(() => {
@@ -112,19 +124,33 @@ describe("handshake", () => {
     mgr.stop();
   });
 
-  it("acks each message it receives", () => {
-    const { mgr, messages } = mkManager();
+  it("sets binaryType to arraybuffer on the socket", () => {
+    const { mgr } = mkManager();
+    mgr.start();
+    expect(FakeSocket.last().binaryType).toBe("arraybuffer");
+    mgr.stop();
+  });
+
+  it("delivers binary data-plane frames via onBinary", () => {
+    const { mgr, binaries, messages } = mkManager();
     mgr.start();
     const s = FakeSocket.last();
     s.emitOpen();
-    s.emitMessage({
-      type: "message",
-      task_id: "t1",
-      seq: 6,
-      event: { kind: "assistant", text: "hi", raw: {} },
-    });
-    expect(messages).toHaveLength(1);
-    expect(s.find("ack")).toEqual({ type: "ack", task_id: "t1", seq: 6 });
+    s.emitBinary(new Uint8Array([1, 2, 3, 4]));
+    expect(messages).toHaveLength(0);
+    expect(binaries).toHaveLength(1);
+    expect(Array.from(binaries[0])).toEqual([1, 2, 3, 4]);
+    mgr.stop();
+  });
+
+  it("sends raw bytes over the socket via sendBytes", () => {
+    const { mgr } = mkManager();
+    mgr.start();
+    const s = FakeSocket.last();
+    s.emitOpen();
+    expect(mgr.sendBytes(new Uint8Array([9, 8, 7]))).toBe(true);
+    expect(s.sentBinary).toHaveLength(1);
+    expect(Array.from(s.sentBinary[0])).toEqual([9, 8, 7]);
     mgr.stop();
   });
 });

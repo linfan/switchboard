@@ -5,6 +5,8 @@
 import type { ClientMsg } from "../protocol";
 import { useStore } from "../store/store";
 import { ConnectionManager } from "./connection";
+import { decode, encodeInput } from "./frame";
+import * as terminals from "./terminals";
 
 let clientId = "";
 
@@ -30,6 +32,11 @@ export class ConnectionPool {
   /** Start managing all current services and follow future add/remove. */
   start(): void {
     const id = ensureClientId();
+    // Route keystrokes/resizes from any terminal back to its owning service.
+    terminals.setSinks(
+      (sid, tid, bytes) => this.sendInput(sid, tid, bytes),
+      (sid, tid, cols, rows) => this.sendResize(sid, tid, cols, rows),
+    );
     const sync = (services: { id: string; url: string; token: string }[]) => {
       const live = new Set(services.map((s) => s.id));
       // Drop managers for removed services.
@@ -48,6 +55,7 @@ export class ConnectionPool {
           token: svc.token,
           getCursors: () => useStore.getState().cursorsFor(svc.id),
           onMessage: (msg) => useStore.getState().applyServerMsg(svc.id, msg),
+          onBinary: (bytes) => this.onBinary(svc.id, bytes),
           onStatus: (status, meta) =>
             useStore.getState().setRuntime(svc.id, {
               status,
@@ -89,24 +97,46 @@ export class ConnectionPool {
     return this.managers.get(serviceId)?.send(msg) ?? false;
   }
 
+  /** Decode a data-plane frame, paint its terminal, and advance the cursor. */
+  private onBinary(serviceId: string, bytes: Uint8Array): void {
+    let frame;
+    try {
+      frame = decode(bytes);
+    } catch {
+      return;
+    }
+    terminals.write(serviceId, frame.taskId, frame);
+    if (frame.kind === "output" || frame.kind === "snapshot") {
+      useStore.getState().setCursor(serviceId, frame.taskId, frame.seq);
+    }
+  }
+
   createTask(
     serviceId: string,
     tool: string,
     title: string | null,
     cwd: string | null,
-    initialPrompt: string | null,
+    cols = 80,
+    rows = 24,
   ): boolean {
     return this.send(serviceId, {
       type: "create_task",
       tool,
       title,
       cwd,
-      initial_prompt: initialPrompt,
+      cols,
+      rows,
     });
   }
 
-  sendUserInput(serviceId: string, taskId: string, text: string): boolean {
-    return this.send(serviceId, { type: "user_input", task_id: taskId, text });
+  /** Send raw keystrokes as an INPUT data-plane frame. */
+  sendInput(serviceId: string, taskId: string, bytes: Uint8Array): boolean {
+    return this.managers.get(serviceId)?.sendBytes(encodeInput(taskId, bytes)) ?? false;
+  }
+
+  /** Report a terminal geometry change so the server PTY resizes. */
+  sendResize(serviceId: string, taskId: string, cols: number, rows: number): boolean {
+    return this.send(serviceId, { type: "resize", task_id: taskId, cols, rows });
   }
 
   terminateTask(serviceId: string, taskId: string): boolean {

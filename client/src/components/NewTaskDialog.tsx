@@ -12,7 +12,6 @@ export function NewTaskDialog({ onClose }: { onClose: () => void }) {
   const [tool, setTool] = useState("");
   const [title, setTitle] = useState("");
   const [cwd, setCwd] = useState("");
-  const [prompt, setPrompt] = useState("");
 
   const rt = runtime[serviceId];
   const online = rt?.status === "online";
@@ -29,13 +28,7 @@ export function NewTaskDialog({ onClose }: { onClose: () => void }) {
 
   const submit = () => {
     if (!valid) return;
-    pool.createTask(
-      serviceId,
-      tool,
-      title.trim() || null,
-      cwd.trim() || null,
-      prompt.trim() || null,
-    );
+    pool.createTask(serviceId, tool, title.trim() || null, cwd.trim() || null);
     onClose();
   };
 
@@ -105,14 +98,6 @@ export function NewTaskDialog({ onClose }: { onClose: () => void }) {
               value={cwd}
               placeholder="/path/to/project"
               onChange={(e) => setCwd(e.target.value)}
-            />
-          </label>
-          <label className="field">
-            <span>First message (optional)</span>
-            <textarea
-              rows={3}
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
             />
           </label>
           {!online && (

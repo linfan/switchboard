@@ -13,13 +13,14 @@ import type { ConnStatus } from "../store/types";
 
 /** Minimal WebSocket surface we depend on (injectable for tests). */
 export interface WebSocketLike {
-  send(data: string): void;
+  send(data: string | ArrayBufferLike | ArrayBufferView): void;
   close(code?: number, reason?: string): void;
   onopen: (() => void) | null;
   onclose: (() => void) | null;
   onerror: (() => void) | null;
   onmessage: ((ev: { data: unknown }) => void) | null;
   readyState: number;
+  binaryType?: string;
 }
 
 export type WebSocketFactory = (url: string) => WebSocketLike;
@@ -66,6 +67,8 @@ export interface ConnectionDeps {
   getCursors: () => Record<string, number>;
   /** Deliver a parsed server message (non-Pong) to the app. */
   onMessage: (msg: ServerMsg) => void;
+  /** Deliver a raw binary data-plane frame (terminal output/snapshot). */
+  onBinary: (bytes: Uint8Array) => void;
   /** Report a connection status transition. */
   onStatus: (status: ConnStatus, meta?: StatusMeta) => void;
   wsFactory?: WebSocketFactory;
@@ -170,6 +173,15 @@ export class ConnectionManager {
     return false;
   }
 
+  /** Send a raw binary data-plane frame (e.g. an INPUT keystroke frame). */
+  sendBytes(bytes: Uint8Array): boolean {
+    if (this.ws && this.ws.readyState === WS_OPEN) {
+      this.ws.send(bytes);
+      return true;
+    }
+    return false;
+  }
+
   /** Wire this to the browser `online` event. */
   notifyOnline(): void {
     if (this.stopped) return;
@@ -209,6 +221,8 @@ export class ConnectionManager {
       return;
     }
     this.ws = ws;
+    // Data-plane frames arrive as binary; receive them as ArrayBuffer.
+    ws.binaryType = "arraybuffer";
 
     ws.onopen = () => this.onOpen();
     ws.onclose = () => this.onClose("socket closed");
@@ -230,6 +244,16 @@ export class ConnectionManager {
   }
 
   private onData(data: unknown): void {
+    // Binary frames are the terminal data plane; hand them off untouched.
+    if (data instanceof ArrayBuffer) {
+      this.d.onBinary(new Uint8Array(data));
+      return;
+    }
+    if (ArrayBuffer.isView(data)) {
+      const v = data as ArrayBufferView;
+      this.d.onBinary(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+      return;
+    }
     if (typeof data !== "string") return;
     let msg: ServerMsg;
     try {
@@ -242,11 +266,6 @@ export class ConnectionManager {
       return;
     }
     this.d.onMessage(msg);
-    // Acknowledge durable receipt so the server can advance its cursor even if
-    // the client later restarts without replaying its persisted cursor.
-    if (msg.type === "message") {
-      this.send({ type: "ack", task_id: msg.task_id, seq: msg.seq });
-    }
   }
 
   private onClose(reason: string): void {

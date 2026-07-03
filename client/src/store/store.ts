@@ -33,8 +33,10 @@ export interface AppState {
   setRuntime: (id: string, patch: Partial<ServiceRuntime>) => void;
 
   // --- sync application ----------------------------------------------------
-  /** Apply one server message for a given service to the store. */
+  /** Apply one server (control-plane) message for a given service. */
   applyServerMsg: (serviceId: string, msg: ServerMsg) => void;
+  /** Advance a task's durable cursor as data-plane frames are applied. */
+  setCursor: (serviceId: string, taskId: string, seq: number) => void;
 
   // --- selection -----------------------------------------------------------
   select: (key: string | undefined) => void;
@@ -106,6 +108,17 @@ export const useStore = create<AppState>()(
       applyServerMsg: (serviceId, msg) =>
         set((s) => applyMsg(s, serviceId, msg)),
 
+      setCursor: (serviceId, taskId, seq) =>
+        set((s) => {
+          const key = convKey(serviceId, taskId);
+          if (seq <= (s.cursors[key] ?? 0)) return {};
+          const conv = s.conversations[key];
+          const conversations = conv
+            ? { ...s.conversations, [key]: { ...conv, cursor: seq } }
+            : s.conversations;
+          return { conversations, cursors: { ...s.cursors, [key]: seq } };
+        }),
+
       select: (key) => set({ selectedKey: key }),
 
       cursorsFor: (serviceId) => {
@@ -137,7 +150,7 @@ function ensureConv(
     ...s.conversations,
     [key]: existing
       ? { ...existing, task }
-      : { serviceId, task, messages: [], cursor: s.cursors[key] ?? 0 },
+      : { serviceId, task, cursor: s.cursors[key] ?? 0 },
   };
 }
 
@@ -184,42 +197,8 @@ export function applyMsg(
       const key = convKey(serviceId, msg.task_id);
       return { conversations: setStatus(s.conversations, key, msg.status) };
     }
-    case "message": {
-      const key = convKey(serviceId, msg.task_id);
-      const conv = s.conversations[key];
-      // Message can arrive before Welcome lists the task; create a stub.
-      const base: Conversation =
-        conv ??
-        {
-          serviceId,
-          task: {
-            id: msg.task_id,
-            tool: "",
-            title: msg.task_id,
-            status: { state: "running" } as TaskStatus,
-            created_at: 0,
-            last_seq: 0,
-          },
-          messages: [],
-          cursor: s.cursors[key] ?? 0,
-        };
-      // Dedup + gap-awareness: ignore anything at or below the cursor.
-      if (msg.seq <= base.cursor) return {};
-      const messages = [...base.messages, { seq: msg.seq, event: msg.event }];
-      const updated: Conversation = {
-        ...base,
-        messages,
-        cursor: msg.seq,
-        task: { ...base.task, last_seq: Math.max(base.task.last_seq, msg.seq) },
-      };
-      return {
-        conversations: { ...s.conversations, [key]: updated },
-        cursors: { ...s.cursors, [key]: msg.seq },
-      };
-    }
     case "replay_done":
     case "pong":
-      return {};
     case "error":
       return {};
   }

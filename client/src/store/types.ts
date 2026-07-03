@@ -1,4 +1,4 @@
-import type { AgentEvent, ServiceInfo, TaskInfo, TaskStatus } from "../protocol";
+import type { ServiceInfo, TaskInfo, TaskStatus } from "../protocol";
 
 /** Liveness of a single hosting-service connection. */
 export type ConnStatus =
@@ -31,18 +31,11 @@ export interface ServiceRuntime {
   attempt: number;
 }
 
-/** One sequenced agent event as applied to a conversation. */
-export interface AppliedMessage {
-  seq: number;
-  event: AgentEvent;
-}
-
 /** A conversation === one agent task on one service. */
 export interface Conversation {
   serviceId: string;
   task: TaskInfo;
-  messages: AppliedMessage[];
-  /** Highest seq durably applied — sent back as the reconnect cursor. */
+  /** Highest PTY chunk seq durably applied — sent back as the reconnect cursor. */
   cursor: number;
 }
 
@@ -51,4 +44,4 @@ export function convKey(serviceId: string, taskId: string): string {
   return `${serviceId}::${taskId}`;
 }
 
-export type { AgentEvent, ServiceInfo, TaskInfo, TaskStatus };
+export type { ServiceInfo, TaskInfo, TaskStatus };
