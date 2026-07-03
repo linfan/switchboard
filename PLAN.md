@@ -242,6 +242,17 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   gains `test-web`; README + PLAN updated for PTY mode. *Test:* `make test-e2e`
   green and `npm run test:e2e` (2 Playwright tests) green. ✅
 
+### v2 — fixes & polish
+
+- ✅ **P10 — Task deletion + durable persistence**: `delete_task` (protocol +
+  server process-kill + transactional DB cleanup of chunks/cursors + broadcast
+  `task_deleted`; client drops the conversation and disposes its terminal);
+  inline two-click "Sure?" confirm (`ConfirmButton`) for service removal and
+  task delete; and a durable persist backend (`store/storage.ts`) using
+  `tauri-plugin-store` (fsync per write, localStorage fallback in-browser) so
+  removed services no longer reappear after an abrupt webview shutdown.
+  *Test:* server 21 + client 32 + shared 19 green; Tauri crate `cargo check`. ✅
+
 Each phase ends with an atomic conventional commit and a PLAN.md update.
 
 ---
