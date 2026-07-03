@@ -1,7 +1,8 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 
 import type { ServerMsg } from "../protocol";
+import { persistStorage } from "./storage";
 import {
   convKey,
   type Conversation,
@@ -132,6 +133,7 @@ export const useStore = create<AppState>()(
     }),
     {
       name: "agent-manage",
+      storage: createJSONStorage(() => persistStorage),
       partialize: (s) => ({ services: s.services, cursors: s.cursors }),
     },
   ),
