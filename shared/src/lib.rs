@@ -65,24 +65,9 @@ pub struct TaskInfo {
     /// Unix millis when the task was created.
     #[ts(type = "number")]
     pub created_at: i64,
-    /// Highest message seq currently persisted for this task.
+    /// Highest PTY chunk seq currently persisted for this task.
     #[ts(type = "number")]
     pub last_seq: u64,
-}
-
-/// A single event produced by an agent process. `raw` preserves the original
-/// JSONL line from the CLI; `kind`/`text` are convenience projections for the UI.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "client/src/protocol/")]
-pub struct AgentEvent {
-    /// Coarse category: `system`, `assistant`, `user`, `tool_use`, `tool_result`,
-    /// `result`, `stdout`, `stderr`, `error`, or `raw` if unclassified.
-    pub kind: String,
-    /// Best-effort human-readable text extracted for rendering, if any.
-    pub text: Option<String>,
-    /// Full original payload (parsed JSON, or a string wrapper for raw lines).
-    #[ts(type = "unknown")]
-    pub raw: serde_json::Value,
 }
 
 // --------------------------------------------------------------------------
@@ -102,17 +87,23 @@ pub enum ClientMsg {
         #[ts(type = "Record<string, number>")]
         cursors: HashMap<String, u64>,
     },
-    /// Create a new task (conversation) running the given tool.
+    /// Create a new task (conversation) running the given tool on a PTY sized
+    /// `cols` × `rows` (the client's initial terminal size).
     CreateTask {
         tool: String,
         title: Option<String>,
         /// Working directory for the agent process (server-validated).
         cwd: Option<String>,
-        /// Optional first user turn to send immediately after start.
-        initial_prompt: Option<String>,
+        cols: u16,
+        rows: u16,
     },
-    /// Send a user turn into a running task.
-    UserInput { task_id: String, text: String },
+    /// Resize a task's PTY (and the server's authoritative screen) to match the
+    /// client's terminal viewport.
+    Resize {
+        task_id: String,
+        cols: u16,
+        rows: u16,
+    },
     /// Terminate a task's process.
     TerminateTask { task_id: String },
     /// Acknowledge durable receipt of messages up to `seq` for a task.
@@ -146,14 +137,10 @@ pub enum ServerMsg {
     TaskCreated { task: TaskInfo },
     /// A task changed lifecycle state.
     TaskState { task_id: String, status: TaskStatus },
-    /// A sequenced agent event for a task. Monotonic `seq` per task.
-    Message {
-        task_id: String,
-        #[ts(type = "number")]
-        seq: u64,
-        event: AgentEvent,
-    },
     /// All backlog for a task has been replayed; live streaming resumes.
+    ///
+    /// Terminal OUTPUT/SNAPSHOT bytes travel as binary WS frames (see
+    /// `frame.rs`), not as members of this enum.
     ReplayDone {
         task_id: String,
         #[ts(type = "number")]
@@ -200,26 +187,33 @@ mod tests {
     }
 
     #[test]
-    fn server_message_tag_is_snake_case() {
-        let msg = ServerMsg::Message {
+    fn server_replay_done_tag_is_snake_case() {
+        let msg = ServerMsg::ReplayDone {
             task_id: "t1".into(),
-            seq: 7,
-            event: AgentEvent {
-                kind: "assistant".into(),
-                text: Some("hi".into()),
-                raw: serde_json::json!({"a": 1}),
-            },
+            last_seq: 7,
         };
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"message\""));
-        assert!(json.contains("\"seq\":7"));
+        assert!(json.contains("\"type\":\"replay_done\""));
+        assert!(json.contains("\"last_seq\":7"));
         let back: ServerMsg = serde_json::from_str(&json).unwrap();
-        if let ServerMsg::Message { seq, event, .. } = back {
-            assert_eq!(seq, 7);
-            assert_eq!(event.kind, "assistant");
+        if let ServerMsg::ReplayDone { last_seq, .. } = back {
+            assert_eq!(last_seq, 7);
         } else {
             panic!("wrong variant");
         }
+    }
+
+    #[test]
+    fn resize_round_trips() {
+        let msg = ClientMsg::Resize {
+            task_id: "t1".into(),
+            cols: 120,
+            rows: 40,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"resize\""));
+        let back: ClientMsg = serde_json::from_str(&json).unwrap();
+        matches!(back, ClientMsg::Resize { .. });
     }
 
     #[test]

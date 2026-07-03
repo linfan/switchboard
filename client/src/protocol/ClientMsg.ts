@@ -7,8 +7,4 @@ export type ClientMsg = { "type": "hello", client_id: string, cursors: Record<st
 /**
  * Working directory for the agent process (server-validated).
  */
-cwd: string | null, 
-/**
- * Optional first user turn to send immediately after start.
- */
-initial_prompt: string | null, } | { "type": "user_input", task_id: string, text: string, } | { "type": "terminate_task", task_id: string, } | { "type": "ack", task_id: string, seq: number, } | { "type": "ping", ts: number, };
+cwd: string | null, cols: number, rows: number, } | { "type": "resize", task_id: string, cols: number, rows: number, } | { "type": "terminate_task", task_id: string, } | { "type": "ack", task_id: string, seq: number, } | { "type": "ping", ts: number, };

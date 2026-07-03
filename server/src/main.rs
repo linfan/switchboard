@@ -1,19 +1,14 @@
 //! Agent-manage hosting service entrypoint.
 
 mod agent;
-mod agent_proc;
 mod auth;
 mod config;
 mod error;
 mod http;
-// PTY data plane (P9.2): standalone tested modules; wired into the task/ws
-// pipeline in P9.3. `allow(dead_code)` until then keeps the binary warning-free.
-#[allow(dead_code)]
 mod pty_proc;
 mod state;
 mod store;
 mod task;
-#[allow(dead_code)]
 mod terminal;
 mod ws;
 #[cfg(test)]
@@ -36,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %config.addr, db = %config.db_path, name = %config.service_name, "starting hosting service");
 
     let store = Store::connect(&config.db_path).await?;
-    let tasks = TaskManager::new(store.clone(), config.agent_permission_mode.clone());
+    let tasks = TaskManager::new(store.clone());
     tasks.reconcile_orphans().await?;
     let state: state::SharedState = Arc::new(AppState {
         config: config.clone(),

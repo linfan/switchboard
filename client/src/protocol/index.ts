@@ -5,6 +5,5 @@ export type { AgentTool } from "./AgentTool";
 export type { ServiceInfo } from "./ServiceInfo";
 export type { TaskStatus } from "./TaskStatus";
 export type { TaskInfo } from "./TaskInfo";
-export type { AgentEvent } from "./AgentEvent";
 export type { ClientMsg } from "./ClientMsg";
 export type { ServerMsg } from "./ServerMsg";

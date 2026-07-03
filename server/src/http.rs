@@ -63,7 +63,9 @@ struct CreateTaskBody {
     tool: String,
     title: Option<String>,
     cwd: Option<String>,
-    initial_prompt: Option<String>,
+    /// Initial PTY size; defaults to 80×24 if the REST caller omits them.
+    cols: Option<u16>,
+    rows: Option<u16>,
 }
 
 async fn create_task(
@@ -76,7 +78,8 @@ async fn create_task(
             tool: body.tool,
             title: body.title,
             cwd: body.cwd,
-            initial_prompt: body.initial_prompt,
+            cols: body.cols.unwrap_or(80),
+            rows: body.rows.unwrap_or(24),
         })
         .await?;
     Ok((StatusCode::CREATED, Json(info)))

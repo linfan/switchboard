@@ -1,14 +1,17 @@
 //! WebSocket endpoint: the persistent, real-time sync channel.
 //!
-//! Flow: client connects with `?token=`, sends `Hello{client_id, cursors}`; the
-//! server replies `Welcome`, replays every persisted message with `seq > cursor`
-//! per task (gap-free), then streams live events from the broadcast bus. A
-//! writer loop owns the socket sink and multiplexes replay, live broadcast, and
-//! point-to-point replies (Pong/Error); a reader task handles inbound frames.
+//! Hybrid transport: JSON control plane on **text** frames, raw terminal bytes
+//! on **binary** frames (see `shared/src/frame.rs`). Flow: client connects with
+//! `?token=`, sends `Hello{client_id, cursors}`; the server replies `Welcome`,
+//! then per task reconstructs the client's terminal — a **snapshot** when the
+//! backlog is large, otherwise a **byte fast-forward** of chunks past the
+//! cursor — and finally streams live output. A writer loop owns the socket sink
+//! and multiplexes replay, live broadcast, and point-to-point replies; a reader
+//! task handles inbound text control + binary INPUT frames.
 
 use std::collections::HashMap;
 
-use agent_manage_shared::{ClientMsg, ServerMsg};
+use agent_manage_shared::{frame::Frame, ClientMsg, ServerMsg};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -20,8 +23,17 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
 
-use crate::{auth, state::SharedState, task::CreateParams};
+use crate::{
+    auth,
+    state::SharedState,
+    task::{CreateParams, Outbound},
+};
+
+/// Backlog size (in chunks) above which reconnect prefers a screen snapshot over
+/// replaying every raw chunk.
+const SNAPSHOT_THRESHOLD: u64 = 256;
 
 #[derive(Deserialize)]
 pub struct WsQuery {
@@ -50,7 +62,7 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
     };
     tracing::info!(%client_id, "client connected");
 
-    // 2. Subscribe BEFORE replay so events produced during replay aren't missed.
+    // 2. Subscribe BEFORE replay so output produced during replay isn't missed.
     let mut broadcast_rx = state.tasks.subscribe();
     let (direct_tx, mut direct_rx) = mpsc::unbounded_channel::<ServerMsg>();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
@@ -63,12 +75,19 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
         tokio::spawn(async move {
             while let Some(Ok(msg)) = stream.next().await {
                 match msg {
-                    Message::Text(t) => {
-                        match serde_json::from_str::<ClientMsg>(t.as_str()) {
-                            Ok(cm) => handle_client_msg(cm, &state, &client_id, &direct_tx).await,
-                            Err(e) => tracing::warn!(%client_id, error=%e, "bad client message"),
+                    Message::Text(t) => match serde_json::from_str::<ClientMsg>(t.as_str()) {
+                        Ok(cm) => handle_client_msg(cm, &state, &client_id, &direct_tx).await,
+                        Err(e) => tracing::warn!(%client_id, error=%e, "bad client message"),
+                    },
+                    Message::Binary(b) => match Frame::decode(&b) {
+                        Ok(Frame::Input { task_id, data }) => {
+                            if let Err(e) = state.tasks.send_input(&task_id.to_string(), &data) {
+                                tracing::warn!(%client_id, %task_id, error=%e, "input dropped");
+                            }
                         }
-                    }
+                        Ok(_) => tracing::warn!(%client_id, "unexpected server-bound binary frame"),
+                        Err(e) => tracing::warn!(%client_id, error=%e, "bad binary frame"),
+                    },
                     Message::Close(_) => break,
                     _ => {}
                 }
@@ -77,12 +96,12 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
         });
     }
 
-    // 4. Welcome + replay.
+    // 4. Welcome + per-task reconstruction.
     let welcome = ServerMsg::Welcome {
         service: state.service_info(),
         tasks: state.tasks.list().await.unwrap_or_default(),
     };
-    if !send(&mut sink, &welcome).await {
+    if !send_control(&mut sink, &welcome).await {
         return;
     }
     let mut last_sent: HashMap<String, u64> = HashMap::new();
@@ -95,18 +114,25 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
         tokio::select! {
             _ = &mut shutdown_rx => break,
             Some(m) = direct_rx.recv() => {
-                if !send(&mut sink, &m).await { break; }
+                if !send_control(&mut sink, &m).await { break; }
             }
             r = broadcast_rx.recv() => match r {
-                Ok(m) => {
-                    if let ServerMsg::Message { task_id, seq, .. } = &m {
-                        last_sent.insert(task_id.clone(), *seq);
+                Ok(Outbound::Control(m)) => {
+                    if !send_control(&mut sink, &m).await { break; }
+                }
+                Ok(Outbound::Pty { task_id, seq, bytes }) => {
+                    if last_sent.get(&task_id).is_some_and(|&s| seq <= s) {
+                        continue; // already delivered via replay/snapshot
                     }
-                    if !send(&mut sink, &m).await { break; }
+                    last_sent.insert(task_id.clone(), seq);
+                    if let Ok(uuid) = Uuid::parse_str(&task_id) {
+                        let frame = Frame::Output { task_id: uuid, seq, data: bytes.to_vec() };
+                        if !send_binary(&mut sink, frame.encode()).await { break; }
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(%client_id, skipped = n, "broadcast lagged; resyncing from store");
-                    let from: HashMap<String, u64> = last_sent.clone();
+                    let from = last_sent.clone();
                     if !replay(&mut sink, &state, &client_id, &from, &mut last_sent).await { break; }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -136,10 +162,11 @@ async fn read_hello(
     None
 }
 
-/// Replay, for every current task, all persisted messages with `seq` greater
-/// than the client's cursor (or `last_sent` on a lag-resync), followed by a
-/// `ReplayDone`. Advances the durable server-side cursor to the client's
-/// position.
+/// Reconstruct every task's terminal for a (re)connecting client, then send a
+/// `ReplayDone`. Large backlogs are collapsed to a screen SNAPSHOT; small ones
+/// are byte fast-forwarded so scrollback continuity is preserved. Either path
+/// leaves `last_sent` at the highest seq the client now holds, so live dedup is
+/// exact. Advances the durable server-side cursor to the client's position.
 async fn replay(
     sink: &mut futures::stream::SplitSink<WebSocket, Message>,
     state: &SharedState,
@@ -157,24 +184,39 @@ async fn replay(
     for task in &tasks {
         let after = cursors.get(&task.id).copied().unwrap_or(0);
         let _ = state.store.set_cursor(client_id, &task.id, after).await;
-        if let Ok(msgs) = state.store.messages_after(&task.id, after).await {
-            for (seq, event) in msgs {
-                last_sent.insert(task.id.clone(), seq);
-                let m = ServerMsg::Message {
-                    task_id: task.id.clone(),
-                    seq,
-                    event,
-                };
-                if !send(sink, &m).await {
+        let tail = task.last_seq;
+        let uuid = match Uuid::parse_str(&task.id) {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+        last_sent.insert(task.id.clone(), after);
+
+        let gap = tail.saturating_sub(after);
+        let snapshot = (gap > SNAPSHOT_THRESHOLD)
+            .then(|| state.tasks.snapshot(&task.id))
+            .flatten();
+
+        if let Some(screen) = snapshot {
+            let frame = Frame::Snapshot { task_id: uuid, seq: tail, data: screen };
+            if !send_binary(sink, frame.encode()).await {
+                return false;
+            }
+            last_sent.insert(task.id.clone(), tail);
+        } else if let Ok(chunks) = state.tasks.chunks_after(&task.id, after).await {
+            for (seq, data) in chunks {
+                let frame = Frame::Output { task_id: uuid, seq, data };
+                if !send_binary(sink, frame.encode()).await {
                     return false;
                 }
+                last_sent.insert(task.id.clone(), seq);
             }
         }
+
         let done = ServerMsg::ReplayDone {
             task_id: task.id.clone(),
-            last_seq: task.last_seq,
+            last_seq: tail,
         };
-        if !send(sink, &done).await {
+        if !send_control(sink, &done).await {
             return false;
         }
     }
@@ -197,20 +239,21 @@ async fn handle_client_msg(
                 tracing::warn!(%client_id, %task_id, error=%e, "ack failed");
             }
         }
-        ClientMsg::UserInput { task_id, text } => {
-            if let Err(e) = state.tasks.send_input(&task_id, &text).await {
-                let _ = direct_tx.send(ServerMsg::Error {
-                    task_id: Some(task_id),
-                    code: Some("input_failed".into()),
-                    message: e.to_string(),
-                });
+        ClientMsg::Resize {
+            task_id,
+            cols,
+            rows,
+        } => {
+            if let Err(e) = state.tasks.resize(&task_id, cols, rows) {
+                tracing::warn!(%client_id, %task_id, error=%e, "resize failed");
             }
         }
         ClientMsg::CreateTask {
             tool,
             title,
             cwd,
-            initial_prompt,
+            cols,
+            rows,
         } => {
             if let Err(e) = state
                 .tasks
@@ -218,7 +261,8 @@ async fn handle_client_msg(
                     tool,
                     title,
                     cwd,
-                    initial_prompt,
+                    cols,
+                    rows,
                 })
                 .await
             {
@@ -241,7 +285,10 @@ async fn handle_client_msg(
     }
 }
 
-async fn send(sink: &mut futures::stream::SplitSink<WebSocket, Message>, msg: &ServerMsg) -> bool {
+async fn send_control(
+    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    msg: &ServerMsg,
+) -> bool {
     match serde_json::to_string(msg) {
         Ok(json) => sink.send(Message::Text(json.into())).await.is_ok(),
         Err(e) => {
@@ -249,4 +296,11 @@ async fn send(sink: &mut futures::stream::SplitSink<WebSocket, Message>, msg: &S
             true
         }
     }
+}
+
+async fn send_binary(
+    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    bytes: Vec<u8>,
+) -> bool {
+    sink.send(Message::Binary(bytes.into())).await.is_ok()
 }

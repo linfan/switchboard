@@ -18,6 +18,6 @@ title: string, status: TaskStatus,
  */
 created_at: number, 
 /**
- * Highest message seq currently persisted for this task.
+ * Highest PTY chunk seq currently persisted for this task.
  */
 last_seq: number, };

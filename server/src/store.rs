@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use agent_manage_shared::{now_millis, AgentEvent, TaskInfo, TaskStatus};
+use agent_manage_shared::{now_millis, TaskInfo, TaskStatus};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
 use crate::error::AppResult;
@@ -19,10 +19,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     last_seq    INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS messages (
+CREATE TABLE IF NOT EXISTS pty_chunks (
     task_id     TEXT NOT NULL,
     seq         INTEGER NOT NULL,
-    event       TEXT NOT NULL,
+    bytes       BLOB NOT NULL,
     created_at  INTEGER NOT NULL,
     PRIMARY KEY (task_id, seq)
 );
@@ -121,23 +121,24 @@ impl Store {
         Ok(())
     }
 
-    // ---- messages -------------------------------------------------------
+    // ---- pty chunks -----------------------------------------------------
 
-    /// Atomically assign the next monotonic seq for `task_id` and persist the
-    /// event. Returns the assigned seq. The seq is allocated under the same
-    /// transaction as the insert, so concurrent writers can never collide.
-    pub async fn append_message(&self, task_id: &str, event: &AgentEvent) -> AppResult<u64> {
-        let event_json = serde_json::to_string(event)?;
+    /// Atomically assign the next monotonic seq for `task_id` and persist a
+    /// chunk of raw terminal bytes. Returns the assigned seq. The seq is
+    /// allocated under the same transaction as the insert, so concurrent writers
+    /// can never collide. Persist-before-broadcast is what makes reconnect
+    /// gap-free.
+    pub async fn append_chunk(&self, task_id: &str, bytes: &[u8]) -> AppResult<u64> {
         let mut tx = self.pool.begin().await?;
         let (seq,): (i64,) =
             sqlx::query_as("UPDATE tasks SET last_seq = last_seq + 1 WHERE id = ? RETURNING last_seq")
                 .bind(task_id)
                 .fetch_one(&mut *tx)
                 .await?;
-        sqlx::query("INSERT INTO messages (task_id, seq, event, created_at) VALUES (?, ?, ?, ?)")
+        sqlx::query("INSERT INTO pty_chunks (task_id, seq, bytes, created_at) VALUES (?, ?, ?, ?)")
             .bind(task_id)
             .bind(seq)
-            .bind(&event_json)
+            .bind(bytes)
             .bind(now_millis())
             .execute(&mut *tx)
             .await?;
@@ -145,22 +146,17 @@ impl Store {
         Ok(seq as u64)
     }
 
-    /// All events for `task_id` with `seq > after`, in order — the replay window.
-    pub async fn messages_after(
-        &self,
-        task_id: &str,
-        after: u64,
-    ) -> AppResult<Vec<(u64, AgentEvent)>> {
-        let rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT seq, event FROM messages WHERE task_id = ? AND seq > ? ORDER BY seq ASC",
+    /// All chunks for `task_id` with `seq > after`, in order — the byte
+    /// fast-forward replay window.
+    pub async fn chunks_after(&self, task_id: &str, after: u64) -> AppResult<Vec<(u64, Vec<u8>)>> {
+        let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT seq, bytes FROM pty_chunks WHERE task_id = ? AND seq > ? ORDER BY seq ASC",
         )
         .bind(task_id)
         .bind(after as i64)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|(seq, event)| Ok((seq as u64, serde_json::from_str(&event)?)))
-            .collect()
+        Ok(rows.into_iter().map(|(seq, b)| (seq as u64, b)).collect())
     }
 
     // ---- delivery cursors ----------------------------------------------
@@ -226,14 +222,6 @@ impl TaskRow {
 mod tests {
     use super::*;
 
-    fn ev(text: &str) -> AgentEvent {
-        AgentEvent {
-            kind: "assistant".into(),
-            text: Some(text.into()),
-            raw: serde_json::json!({ "text": text }),
-        }
-    }
-
     fn task(id: &str) -> TaskInfo {
         TaskInfo {
             id: id.into(),
@@ -249,26 +237,26 @@ mod tests {
     async fn seq_is_monotonic_and_gap_free() {
         let s = Store::memory().await.unwrap();
         s.create_task(&task("t1")).await.unwrap();
-        let a = s.append_message("t1", &ev("a")).await.unwrap();
-        let b = s.append_message("t1", &ev("b")).await.unwrap();
-        let c = s.append_message("t1", &ev("c")).await.unwrap();
+        let a = s.append_chunk("t1", b"a").await.unwrap();
+        let b = s.append_chunk("t1", b"b").await.unwrap();
+        let c = s.append_chunk("t1", b"c").await.unwrap();
         assert_eq!((a, b, c), (1, 2, 3));
         let got = s.get_task("t1").await.unwrap().unwrap();
         assert_eq!(got.last_seq, 3);
     }
 
     #[tokio::test]
-    async fn messages_after_is_the_replay_window() {
+    async fn chunks_after_is_the_replay_window() {
         let s = Store::memory().await.unwrap();
         s.create_task(&task("t1")).await.unwrap();
-        for t in ["a", "b", "c", "d"] {
-            s.append_message("t1", &ev(t)).await.unwrap();
+        for t in [b"a".as_slice(), b"b", b"c", b"d"] {
+            s.append_chunk("t1", t).await.unwrap();
         }
-        let after1 = s.messages_after("t1", 1).await.unwrap();
+        let after1 = s.chunks_after("t1", 1).await.unwrap();
         assert_eq!(after1.len(), 3);
         assert_eq!(after1[0].0, 2);
-        assert_eq!(after1[0].1.text.as_deref(), Some("b"));
-        let after_all = s.messages_after("t1", 4).await.unwrap();
+        assert_eq!(after1[0].1, b"b");
+        let after_all = s.chunks_after("t1", 4).await.unwrap();
         assert!(after_all.is_empty());
     }
 

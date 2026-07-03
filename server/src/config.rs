@@ -11,9 +11,9 @@ pub struct Config {
     pub db_path: String,
     /// Operator-facing service name advertised to clients.
     pub service_name: String,
-    /// `--permission-mode` passed to launched agent CLIs. Headless hosts that
-    /// want fully autonomous tasks typically use `acceptEdits` or
-    /// `bypassPermissions`; the default is the CLI's interactive `default`.
+    /// `--permission-mode` for launched CLIs. Unused in PTY mode (prompts are
+    /// answered live in the terminal); retained for a future opt-in preset.
+    #[allow(dead_code)]
     pub agent_permission_mode: String,
 }
 
