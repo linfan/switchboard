@@ -253,6 +253,18 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   removed services no longer reappear after an abrupt webview shutdown.
   *Test:* server 21 + client 32 + shared 19 green; Tauri crate `cargo check`. ✅
 
+- ✅ **P11 — Fix "deleted service reappears on reload"**: the durable backend in
+  P10 did not resolve the report. Root cause was a synchronous recursion, not a
+  storage flush: removing a service notified the store subscriber, which called
+  `mgr.stop()`; its `onStatus("offline")` wrote back to the store and re-entered
+  the same subscriber while the manager was still mapped, so it stopped again —
+  recursing until the stack overflowed and aborting the `removeService` reducer
+  *before* the persist middleware wrote. Fix: delete the manager from the pool
+  map before stopping it (`net/pool.ts`), breaking the re-entrant loop.
+  *Test:* Playwright regression (`persistence.spec.ts`: delete survives reload)
+  + persist round-trip unit test (`store/persist.test.ts`); client 33 + e2e 3
+  green, `tsc` + build clean. ✅
+
 Each phase ends with an atomic conventional commit and a PLAN.md update.
 
 ---
