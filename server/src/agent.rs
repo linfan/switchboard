@@ -55,7 +55,11 @@ pub fn available_tools() -> Vec<AgentTool> {
 pub fn which(bin: &str) -> Option<String> {
     if bin.contains('/') {
         let p = Path::new(bin);
-        return if p.is_file() { Some(bin.to_string()) } else { None };
+        return if p.is_file() {
+            Some(bin.to_string())
+        } else {
+            None
+        };
     }
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {

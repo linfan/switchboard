@@ -8,12 +8,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use switchboard_shared::{frame::Frame, now_millis, ClientMsg, ServerMsg, TaskInfo, TaskStatus};
 use futures::{SinkExt, StreamExt};
+use switchboard_shared::{frame::Frame, now_millis, ClientMsg, ServerMsg, TaskInfo, TaskStatus};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::{config::Config, state::AppState, store::Store, task::TaskManager, terminal::TerminalEmulator};
+use crate::{
+    config::Config, state::AppState, store::Store, task::TaskManager, terminal::TerminalEmulator,
+};
 
 const TOKEN: &str = "test-token";
 // Two fixed v4-shaped UUIDs so the 16-byte frame headers parse.
@@ -71,7 +73,7 @@ async fn connect(addr: SocketAddr) -> WsStream {
 }
 
 async fn send(ws: &mut WsStream, msg: &ClientMsg) {
-    ws.send(WsMessage::Text(serde_json::to_string(msg).unwrap().into()))
+    ws.send(WsMessage::Text(serde_json::to_string(msg).unwrap()))
         .await
         .unwrap();
 }
@@ -171,7 +173,10 @@ async fn byte_replay_respects_client_cursor() {
 
     let frames = read_through_replay(&mut ws, T1).await;
     // Cursor at 2 => only seq 3 and 4 fast-forwarded, gap-free.
-    assert_eq!(outputs(&frames), vec![(3, b"c".to_vec()), (4, b"d".to_vec())]);
+    assert_eq!(
+        outputs(&frames),
+        vec![(3, b"c".to_vec()), (4, b"d".to_vec())]
+    );
 }
 
 #[tokio::test]
@@ -221,7 +226,10 @@ async fn delete_task_removes_state_and_notifies_clients() {
         Rx::Ctrl(ServerMsg::Welcome { tasks, .. }) => {
             assert!(tasks.iter().all(|t| t.id != T1));
         }
-        other => panic!("expected welcome, got something else: {}", matches!(other, Rx::Bin(_))),
+        other => panic!(
+            "expected welcome, got something else: {}",
+            matches!(other, Rx::Bin(_))
+        ),
     }
 }
 
@@ -271,7 +279,10 @@ async fn large_backlog_uses_snapshot() {
     let frames = read_through_replay(&mut ws, T1).await;
 
     // One SNAPSHOT (at the tail seq), and no raw OUTPUT replay.
-    assert!(outputs(&frames).is_empty(), "should not byte-replay a large backlog");
+    assert!(
+        outputs(&frames).is_empty(),
+        "should not byte-replay a large backlog"
+    );
     let snap = frames
         .iter()
         .find_map(|f| match f {
@@ -284,7 +295,10 @@ async fn large_backlog_uses_snapshot() {
     // The snapshot must reconstruct the current screen.
     let mut replay = TerminalEmulator::new(80, 24);
     replay.process(&snap.1);
-    assert!(replay.contents().contains("FINAL"), "snapshot must redraw the screen");
+    assert!(
+        replay.contents().contains("FINAL"),
+        "snapshot must redraw the screen"
+    );
 }
 
 #[tokio::test]

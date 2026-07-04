@@ -13,14 +13,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use switchboard_shared::{FsListing, ServiceInfo, TaskInfo};
 
-use crate::{
-    auth,
-    error::AppResult,
-    fs,
-    state::SharedState,
-    task::CreateParams,
-    ws,
-};
+use crate::{auth, error::AppResult, fs, state::SharedState, task::CreateParams, ws};
 
 /// Build the full application router (REST now; the WS route is added in P4).
 pub fn router(state: SharedState) -> Router {

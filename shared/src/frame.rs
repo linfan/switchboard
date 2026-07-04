@@ -234,8 +234,14 @@ mod tests {
     #[test]
     fn rejects_too_short() {
         // OUTPUT with a truncated header (missing seq + part of uuid).
-        assert_eq!(Frame::decode(&[KIND_OUTPUT, 0, 0, 0]), Err(FrameError::TooShort));
+        assert_eq!(
+            Frame::decode(&[KIND_OUTPUT, 0, 0, 0]),
+            Err(FrameError::TooShort)
+        );
         // INPUT with a truncated uuid.
-        assert_eq!(Frame::decode(&[KIND_INPUT, 0, 0]), Err(FrameError::TooShort));
+        assert_eq!(
+            Frame::decode(&[KIND_INPUT, 0, 0]),
+            Err(FrameError::TooShort)
+        );
     }
 }

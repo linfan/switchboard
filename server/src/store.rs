@@ -4,8 +4,8 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use switchboard_shared::{now_millis, TaskInfo, TaskStatus};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use switchboard_shared::{now_millis, TaskInfo, TaskStatus};
 
 use crate::error::AppResult;
 
@@ -50,8 +50,7 @@ impl Store {
                 std::fs::create_dir_all(parent).ok();
             }
         }
-        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
-            .map_err(sqlx::Error::from)?
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))?
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .busy_timeout(std::time::Duration::from_secs(5));
@@ -150,11 +149,12 @@ impl Store {
     /// gap-free.
     pub async fn append_chunk(&self, task_id: &str, bytes: &[u8]) -> AppResult<u64> {
         let mut tx = self.pool.begin().await?;
-        let (seq,): (i64,) =
-            sqlx::query_as("UPDATE tasks SET last_seq = last_seq + 1 WHERE id = ? RETURNING last_seq")
-                .bind(task_id)
-                .fetch_one(&mut *tx)
-                .await?;
+        let (seq,): (i64,) = sqlx::query_as(
+            "UPDATE tasks SET last_seq = last_seq + 1 WHERE id = ? RETURNING last_seq",
+        )
+        .bind(task_id)
+        .fetch_one(&mut *tx)
+        .await?;
         sqlx::query("INSERT INTO pty_chunks (task_id, seq, bytes, created_at) VALUES (?, ?, ?, ?)")
             .bind(task_id)
             .bind(seq)
@@ -205,12 +205,13 @@ impl Store {
     /// authoritative, so this isn't on the hot path.
     #[allow(dead_code)]
     pub async fn get_cursor(&self, client_id: &str, task_id: &str) -> AppResult<u64> {
-        let row: Option<(i64,)> =
-            sqlx::query_as("SELECT last_seq FROM delivery_cursors WHERE client_id = ? AND task_id = ?")
-                .bind(client_id)
-                .bind(task_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT last_seq FROM delivery_cursors WHERE client_id = ? AND task_id = ?",
+        )
+        .bind(client_id)
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|(s,)| s as u64).unwrap_or(0))
     }
 }
@@ -298,7 +299,9 @@ mod tests {
     async fn task_crud_round_trips() {
         let s = Store::memory().await.unwrap();
         s.create_task(&task("t1")).await.unwrap();
-        s.update_status("t1", &TaskStatus::Terminated).await.unwrap();
+        s.update_status("t1", &TaskStatus::Terminated)
+            .await
+            .unwrap();
         let got = s.get_task("t1").await.unwrap().unwrap();
         assert_eq!(got.status, TaskStatus::Terminated);
         assert_eq!(s.list_tasks().await.unwrap().len(), 1);

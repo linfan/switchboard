@@ -53,9 +53,7 @@ pub fn list_dir(path: Option<&str>) -> AppResult<FsListing> {
 
     Ok(FsListing {
         path: canonical.to_string_lossy().into_owned(),
-        parent: canonical
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned()),
+        parent: canonical.parent().map(|p| p.to_string_lossy().into_owned()),
         entries,
     })
 }
@@ -89,7 +87,11 @@ mod tests {
         assert!(alpha.is_dir);
         assert!(alpha.path.ends_with("alpha"));
 
-        let readme = listing.entries.iter().find(|e| e.name == "readme.txt").unwrap();
+        let readme = listing
+            .entries
+            .iter()
+            .find(|e| e.name == "readme.txt")
+            .unwrap();
         assert!(!readme.is_dir);
 
         // A non-root temp dir always has a parent.

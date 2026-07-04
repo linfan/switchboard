@@ -145,9 +145,9 @@ impl TaskManager {
 
         info.status = TaskStatus::Running;
         self.store.update_status(&id, &TaskStatus::Running).await?;
-        let _ = self
-            .events
-            .send(Outbound::Control(ServerMsg::TaskCreated { task: info.clone() }));
+        let _ = self.events.send(Outbound::Control(ServerMsg::TaskCreated {
+            task: info.clone(),
+        }));
 
         self.spawn_pump(id.clone(), out_rx);
         Ok(info)
@@ -201,7 +201,9 @@ impl TaskManager {
             self.terminating.lock().unwrap().insert(id.to_string());
             handle.terminate();
         }
-        self.store.update_status(id, &TaskStatus::Terminated).await?;
+        self.store
+            .update_status(id, &TaskStatus::Terminated)
+            .await?;
         let _ = self.events.send(Outbound::Control(ServerMsg::TaskState {
             task_id: id.to_string(),
             status: TaskStatus::Terminated,

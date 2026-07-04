@@ -7,6 +7,9 @@ Cargo.lock
 # without TS_RS_EXPORT_DIR; the Makefile sets it so bindings land in client/).
 shared/bindings/
 
+# Deploy artifacts (staged by `make deploy-server`)
+/dist
+
 # Node / client
 node_modules
 client/dist

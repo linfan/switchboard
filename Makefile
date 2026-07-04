@@ -85,5 +85,6 @@ package-client: build-client ## Package the desktop client (Tauri bundles)
 	cd client && $(NPM) run tauri build
 clean: ## Remove build artifacts
 	$(CARGO) clean
+	cd client/src-tauri && $(CARGO) clean
 	rm -rf client/dist client/node_modules e2e/node_modules dist
 	rm -rf client/test-results client/playwright-report client/tests-e2e/.server.json

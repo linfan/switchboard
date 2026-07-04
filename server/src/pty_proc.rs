@@ -219,7 +219,8 @@ mod tests {
     async fn emits_output_and_echoes_input() {
         // Print a marker (with an ANSI colour to prove raw bytes pass through),
         // then read a line and echo it back through the program.
-        let (handle, mut rx) = sh("printf 'READY\\033[32m\\n'; read line; printf 'GOT:%s\\n' \"$line\"");
+        let (handle, mut rx) =
+            sh("printf 'READY\\033[32m\\n'; read line; printf 'GOT:%s\\n' \"$line\"");
         wait_for(&mut rx, "READY").await;
         // The green SGR escape must survive verbatim.
         // (READY was captured above; the escape is in the same/next chunk.)

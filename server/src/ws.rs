@@ -11,7 +11,6 @@
 
 use std::collections::HashMap;
 
-use switchboard_shared::{frame::Frame, ClientMsg, ServerMsg};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -22,6 +21,7 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
+use switchboard_shared::{frame::Frame, ClientMsg, ServerMsg};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -197,14 +197,22 @@ async fn replay(
             .flatten();
 
         if let Some(screen) = snapshot {
-            let frame = Frame::Snapshot { task_id: uuid, seq: tail, data: screen };
+            let frame = Frame::Snapshot {
+                task_id: uuid,
+                seq: tail,
+                data: screen,
+            };
             if !send_binary(sink, frame.encode()).await {
                 return false;
             }
             last_sent.insert(task.id.clone(), tail);
         } else if let Ok(chunks) = state.tasks.chunks_after(&task.id, after).await {
             for (seq, data) in chunks {
-                let frame = Frame::Output { task_id: uuid, seq, data };
+                let frame = Frame::Output {
+                    task_id: uuid,
+                    seq,
+                    data,
+                };
                 if !send_binary(sink, frame.encode()).await {
                     return false;
                 }
