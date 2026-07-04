@@ -284,6 +284,24 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   shared bindings regen (21 green), store `addRecentTool`/`create_failed` unit
   tests (vitest 37 green), Playwright e2e (`new-task.spec.ts`: folder-picker
   happy path + inline not-found error; suite 5 green), `tsc` + build clean. ✅
+- ✅ **P13 — Fix "terminal screen blank/garbled after client reopen"**: reopening
+  the client recovered the service and task list, but each task's terminal came
+  back empty or garbled. Root cause: the client persisted per-task replay cursors
+  to localStorage while the xterm buffer itself lives only in memory and dies on
+  reload. On a fresh start the stale cursor (at/near the task's latest seq) told
+  the server the client was caught up, so `replay()` byte-fast-forwarded nothing
+  (→ blank) or a mid-stream slice of ANSI escapes onto an empty screen
+  (→ garbled). Fix: stop persisting `cursors` (dropped from the store's
+  `partialize`); they are now in-memory only, matching the terminal's own
+  lifetime. A reopen starts at cursor 0, so the server reconstructs each screen
+  via snapshot (established tasks) or full byte replay (small ones). Cursors
+  still advance in-memory, so in-session reconnects stay redundant-free.
+  *Test:* Playwright reload-recovery e2e (`terminal.spec.ts`: type output →
+  full page reload → screen restored) — verified RED before the fix (blank
+  `.xterm-rows`) and GREEN after; the suite's `beforeEach` now seeds localStorage
+  only when absent so reloads observe real persisted state. Store unit test
+  asserts cursors are excluded from the persisted snapshot (vitest 38 green),
+  e2e suite 6 green, `tsc` + build clean. ✅
 
 Each phase ends with an atomic conventional commit and a PLAN.md update.
 
