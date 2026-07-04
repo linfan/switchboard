@@ -16,7 +16,6 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
 use tokio::sync::mpsc;
 
-use crate::agent::{self, AgentSpec};
 use crate::error::{AppError, AppResult};
 
 /// Read chunk cap: bounds frame size / rate for the binary data plane.
@@ -59,19 +58,20 @@ impl PtyHandle {
     }
 }
 
-/// Spawn `spec` on a fresh PTY in optional working dir `cwd`, sized `cols`×`rows`.
-pub fn spawn(
-    spec: &AgentSpec,
+/// Spawn an already-resolved `bin` + `argv` on a fresh PTY in optional working
+/// dir `cwd`, sized `cols`×`rows`. Callers resolve the executable path (e.g. via
+/// [`crate::agent::resolve_command`]) before spawning.
+pub fn spawn_cmd(
+    bin: &str,
+    argv: &[String],
     cwd: Option<&str>,
     cols: u16,
     rows: u16,
 ) -> AppResult<(PtyHandle, mpsc::UnboundedReceiver<PtyOutput>)> {
-    let bin = agent::which(spec.bin)
-        .ok_or_else(|| AppError::BadRequest(format!("tool '{}' is not installed", spec.id)))?;
-    spawn_pty(&bin, &agent::interactive_argv(spec), cwd, cols, rows)
+    spawn_pty(bin, argv, cwd, cols, rows)
 }
 
-/// Core spawn used by [`spawn`] and tests (which pass an arbitrary bin+argv).
+/// Core spawn used by [`spawn_cmd`] and tests (which pass an arbitrary bin+argv).
 fn spawn_pty(
     bin: &str,
     argv: &[String],

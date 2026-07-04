@@ -4,6 +4,7 @@ mod agent;
 mod auth;
 mod config;
 mod error;
+mod fs;
 mod http;
 mod pty_proc;
 mod state;

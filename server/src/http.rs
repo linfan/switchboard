@@ -1,7 +1,7 @@
 //! REST API: health, service info, and task CRUD.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     middleware,
     routing::get,
@@ -11,11 +11,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use agent_manage_shared::{ServiceInfo, TaskInfo};
+use agent_manage_shared::{FsListing, ServiceInfo, TaskInfo};
 
 use crate::{
     auth,
     error::AppResult,
+    fs,
     state::SharedState,
     task::CreateParams,
     ws,
@@ -25,6 +26,7 @@ use crate::{
 pub fn router(state: SharedState) -> Router {
     let api = Router::new()
         .route("/info", get(info))
+        .route("/fs", get(list_dir))
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", axum::routing::delete(terminate_task))
         .route_layer(middleware::from_fn_with_state(
@@ -52,6 +54,16 @@ async fn health(State(state): State<SharedState>) -> Json<Value> {
 
 async fn info(State(state): State<SharedState>) -> Json<ServiceInfo> {
     Json(state.service_info())
+}
+
+#[derive(Deserialize)]
+struct FsQuery {
+    path: Option<String>,
+}
+
+/// List a directory on the hosting machine (for the working-dir folder picker).
+async fn list_dir(Query(q): Query<FsQuery>) -> AppResult<Json<FsListing>> {
+    Ok(Json(fs::list_dir(q.path.as_deref())?))
 }
 
 async fn list_tasks(State(state): State<SharedState>) -> AppResult<Json<Vec<TaskInfo>>> {

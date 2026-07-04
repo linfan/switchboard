@@ -116,14 +116,7 @@ impl TaskManager {
     /// Validate the tool, persist the task, open its PTY, and begin pumping raw
     /// output into the store + broadcast.
     pub async fn create(&self, params: CreateParams) -> AppResult<TaskInfo> {
-        let spec = agent::spec(&params.tool)
-            .ok_or_else(|| AppError::BadRequest(format!("unknown tool: {}", params.tool)))?;
-        if agent::which(spec.bin).is_none() {
-            return Err(AppError::BadRequest(format!(
-                "tool '{}' is not installed on this host",
-                spec.id
-            )));
-        }
+        let cmd = agent::resolve_command(&params.tool)?;
         let cols = params.cols.max(1);
         let rows = params.rows.max(1);
 
@@ -131,10 +124,10 @@ impl TaskManager {
         let title = params
             .title
             .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| format!("{} · {}", spec.display_name, &id[..8]));
+            .unwrap_or_else(|| format!("{} · {}", cmd.display_name, &id[..8]));
         let mut info = TaskInfo {
             id: id.clone(),
-            tool: spec.id.to_string(),
+            tool: cmd.tool_id.clone(),
             title,
             status: TaskStatus::Starting,
             created_at: now_millis(),
@@ -142,7 +135,8 @@ impl TaskManager {
         };
         self.store.create_task(&info).await?;
 
-        let (handle, out_rx) = pty_proc::spawn(spec, params.cwd.as_deref(), cols, rows)?;
+        let (handle, out_rx) =
+            pty_proc::spawn_cmd(&cmd.bin, &cmd.argv, params.cwd.as_deref(), cols, rows)?;
         self.running.lock().unwrap().insert(id.clone(), handle);
         self.terminals
             .lock()
