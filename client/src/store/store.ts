@@ -22,7 +22,15 @@ export interface AppState {
   runtime: Record<string, ServiceRuntime>;
   /** Conversations keyed by `serviceId::taskId`. */
   conversations: Record<string, Conversation>;
-  /** Persisted reconnect cursors keyed by `serviceId::taskId`. */
+  /**
+   * Reconnect cursors keyed by `serviceId::taskId`. In-memory only — they track
+   * what the *live* xterm buffer already holds, so an in-session reconnect
+   * replays nothing redundant. They are deliberately NOT persisted: the terminal
+   * buffer doesn't survive a full reload, so a stale cursor would tell the server
+   * the client is caught up and leave the reopened screen blank (or paint a
+   * mid-stream slice of escapes over a blank screen). Starting fresh at 0 makes
+   * the server reconstruct each screen (snapshot or full replay) on reopen.
+   */
   cursors: Record<string, number>;
   /** Recently used task commands per service (most-recent first, persisted). */
   recentTools: Record<string, string[]>;
@@ -157,7 +165,6 @@ export const useStore = create<AppState>()(
       storage: createJSONStorage(() => persistStorage),
       partialize: (s) => ({
         services: s.services,
-        cursors: s.cursors,
         recentTools: s.recentTools,
       }),
     },

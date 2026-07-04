@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { useStore } from "./store";
+import { convKey } from "./types";
 
 const KEY = "agent-manage";
 
-function persisted(): { services: unknown[] } {
+function persisted(): { services: unknown[]; cursors?: unknown } {
   return JSON.parse(localStorage.getItem(KEY) ?? '{"state":{"services":[]}}')
     .state;
 }
@@ -22,5 +23,11 @@ describe("persist round-trip through localStorage", () => {
     useStore.getState().removeService(id);
     expect(useStore.getState().services).toHaveLength(0);
     expect(persisted().services).toHaveLength(0);
+  });
+
+  it("does not persist cursors (terminal buffer is lost on reload, so a fresh start must re-sync from 0)", () => {
+    useStore.getState().setCursor("s1", "t1", 42);
+    expect(useStore.getState().cursors[convKey("s1", "t1")]).toBe(42);
+    expect(persisted().cursors).toBeUndefined();
   });
 });
