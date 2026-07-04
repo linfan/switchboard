@@ -1,4 +1,4 @@
-# Agent-Manage — PTY Mode Spec (v2 pivot)
+# Switchboard — PTY Mode Spec (v2 pivot)
 
 Status: **proposed** · Supersedes the stream-json data plane in `PLAN.md`.
 

@@ -3,7 +3,7 @@
 **/target
 Cargo.lock
 
-# Stray ts-rs export dir (created if `cargo test -p agent-manage-shared` runs
+# Stray ts-rs export dir (created if `cargo test -p switchboard-shared` runs
 # without TS_RS_EXPORT_DIR; the Makefile sets it so bindings land in client/).
 shared/bindings/
 

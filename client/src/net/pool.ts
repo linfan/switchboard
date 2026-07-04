@@ -13,7 +13,7 @@ let clientId = "";
 /** Stable per-install client id (persisted). Used in every Hello. */
 function ensureClientId(): string {
   if (clientId) return clientId;
-  const KEY = "agent-manage-client-id";
+  const KEY = "switchboard-client-id";
   const existing = globalThis.localStorage?.getItem(KEY);
   if (existing) {
     clientId = existing;

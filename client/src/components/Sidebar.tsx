@@ -16,7 +16,7 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <header className="sidebar__header">
-        <span className="sidebar__title">Agent Manage</span>
+        <span className="sidebar__title">Switchboard</span>
         <div className="sidebar__actions">
           <button className="icon-btn" title="Add service" onClick={onAddService}>
             +svc

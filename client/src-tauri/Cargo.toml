@@ -3,14 +3,14 @@
 [workspace]
 
 [package]
-name = "agent-manage-client"
+name = "switchboard-client"
 version = "0.1.0"
 edition = "2021"
-description = "Desktop client for agent-manage"
-authors = ["agent-manage"]
+description = "Desktop client for switchboard"
+authors = ["switchboard"]
 
 [lib]
-name = "agent_manage_client_lib"
+name = "switchboard_client_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

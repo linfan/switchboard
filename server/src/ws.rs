@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use agent_manage_shared::{frame::Frame, ClientMsg, ServerMsg};
+use switchboard_shared::{frame::Frame, ClientMsg, ServerMsg};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use agent_manage_shared::AgentTool;
+use switchboard_shared::AgentTool;
 
 use crate::error::{AppError, AppResult};
 

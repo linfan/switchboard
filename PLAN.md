@@ -1,4 +1,4 @@
-# Agent-Manage — Planning Document
+# Switchboard — Planning Document
 
 Cross-host, multi-agent management tool: a desktop **client** (Tauri 2 + React +
 Zustand) that connects to one or more **hosting services** (Rust) which each run
@@ -99,7 +99,7 @@ progress. It is updated at the end of every phase.
 ## 3. Repository layout
 
 ```
-agent-manage/
+switchboard/
 ├── PLAN.md            # this file
 ├── README.md
 ├── Makefile

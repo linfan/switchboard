@@ -6,7 +6,7 @@ members = ["shared", "server"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-authors = ["agent-manage contributors"]
+authors = ["switchboard contributors"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

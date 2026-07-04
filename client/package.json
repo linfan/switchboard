@@ -1,9 +1,9 @@
 {
-  "name": "agent-manage-client",
+  "name": "switchboard-client",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Desktop client for the agent-manage multi-host agent manager",
+  "description": "Desktop client for the switchboard multi-host agent manager",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

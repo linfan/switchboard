@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_manage_shared::{frame::Frame, now_millis, ClientMsg, ServerMsg, TaskInfo, TaskStatus};
+use switchboard_shared::{frame::Frame, now_millis, ClientMsg, ServerMsg, TaskInfo, TaskStatus};
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message as WsMessage;

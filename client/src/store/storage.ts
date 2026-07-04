@@ -27,7 +27,7 @@ let storePromise: Promise<TauriStore> | null = null;
 function tauriStore(): Promise<TauriStore> {
   if (!storePromise) {
     storePromise = import("@tauri-apps/plugin-store").then(({ load }) =>
-      load("agent-manage.json", { defaults: {}, autoSave: false }),
+      load("switchboard.json", { defaults: {}, autoSave: false }),
     );
   }
   return storePromise;

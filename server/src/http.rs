@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use agent_manage_shared::{FsListing, ServiceInfo, TaskInfo};
+use switchboard_shared::{FsListing, ServiceInfo, TaskInfo};
 
 use crate::{
     auth,

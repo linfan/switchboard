@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use agent_manage_shared::{now_millis, ServerMsg, TaskInfo, TaskStatus};
+use switchboard_shared::{now_millis, ServerMsg, TaskInfo, TaskStatus};
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 

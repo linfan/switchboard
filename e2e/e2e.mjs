@@ -14,8 +14,8 @@ import { WebSocket } from "ws";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BIN =
-  process.env.AGENT_MANAGE_BIN ??
-  resolve(HERE, "..", "target", "debug", "agent-manage-server");
+  process.env.SWITCHBOARD_BIN ??
+  resolve(HERE, "..", "target", "debug", "switchboard-server");
 const FAKE_AGENT_DIR = join(HERE, "fake-agent");
 
 const ADDR = "127.0.0.1:8799";
@@ -23,7 +23,7 @@ const TOKEN = "e2e-token";
 const HTTP = `http://${ADDR}`;
 const WS_URL = `ws://${ADDR}/ws?token=${TOKEN}`;
 
-const dbDir = mkdtempSync(join(tmpdir(), "agent-manage-e2e-"));
+const dbDir = mkdtempSync(join(tmpdir(), "switchboard-e2e-"));
 const serverLog = [];
 
 function log(...a) {
@@ -151,11 +151,11 @@ function startServer() {
   const child = spawn(BIN, [], {
     env: {
       ...process.env,
-      AGENT_MANAGE_ADDR: ADDR,
-      AGENT_MANAGE_TOKEN: TOKEN,
-      AGENT_MANAGE_DB: join(dbDir, "e2e.db"),
-      AGENT_MANAGE_NAME: "e2e-host",
-      AGENT_MANAGE_PERMISSION_MODE: "default",
+      SWITCHBOARD_ADDR: ADDR,
+      SWITCHBOARD_TOKEN: TOKEN,
+      SWITCHBOARD_DB: join(dbDir, "e2e.db"),
+      SWITCHBOARD_NAME: "e2e-host",
+      SWITCHBOARD_PERMISSION_MODE: "default",
       RUST_LOG: "info",
       PATH: `${FAKE_AGENT_DIR}:${process.env.PATH}`,
     },

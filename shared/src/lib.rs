@@ -1,8 +1,8 @@
-//! Shared wire protocol between the agent-manage client and hosting service.
+//! Shared wire protocol between the switchboard client and hosting service.
 //!
 //! All messages are JSON, tagged unions (`{"type": "...", ...}`). Rust is the
 //! source of truth; TypeScript bindings are generated via `ts-rs` into
-//! `client/src/protocol/` (run `cargo test -p agent-manage-shared`).
+//! `client/src/protocol/` (run `cargo test -p switchboard-shared`).
 
 use std::collections::HashMap;
 
@@ -257,7 +257,7 @@ mod tests {
     /// Regenerates the TypeScript bindings. Destination base is controlled by
     /// `TS_RS_EXPORT_DIR` (set to the workspace root by the Makefile) so files
     /// land in `client/src/protocol/`. Kept as a test so a plain
-    /// `cargo test -p agent-manage-shared` regenerates them.
+    /// `cargo test -p switchboard-shared` regenerates them.
     #[test]
     fn export_bindings() {
         ServerMsg::export_all().unwrap();

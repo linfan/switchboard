@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use agent_manage_shared::ServiceInfo;
+use switchboard_shared::ServiceInfo;
 
 use crate::{agent, config::Config, store::Store, task::TaskManager};
 

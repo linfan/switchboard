@@ -1,4 +1,4 @@
-//! Agent-manage hosting service entrypoint.
+//! Switchboard hosting service entrypoint.
 
 mod agent;
 mod auth;

@@ -6,7 +6,7 @@ import { HTTP, TOKEN } from "./constants";
 // the client (page reload), the deleted service must NOT reappear.
 test("a deleted service stays deleted across a reload", async ({ page }) => {
   await page.addInitScript((id) => {
-    localStorage.setItem("agent-manage-client-id", id);
+    localStorage.setItem("switchboard-client-id", id);
   }, "pw-persist-client");
 
   await page.goto("/");

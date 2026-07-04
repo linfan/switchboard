@@ -19,15 +19,15 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let addr = env("AGENT_MANAGE_ADDR", "127.0.0.1:8787");
-        let token = env("AGENT_MANAGE_TOKEN", "dev-token");
-        let db_path = env("AGENT_MANAGE_DB", "server/data/agent-manage.db");
-        let service_name = std::env::var("AGENT_MANAGE_NAME")
+        let addr = env("SWITCHBOARD_ADDR", "127.0.0.1:8787");
+        let token = env("SWITCHBOARD_TOKEN", "dev-token");
+        let db_path = env("SWITCHBOARD_DB", "server/data/switchboard.db");
+        let service_name = std::env::var("SWITCHBOARD_NAME")
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| std::env::var("HOSTNAME").ok())
             .unwrap_or_else(|| "agent-host".to_string());
-        let agent_permission_mode = env("AGENT_MANAGE_PERMISSION_MODE", "default");
+        let agent_permission_mode = env("SWITCHBOARD_PERMISSION_MODE", "default");
         Self {
             addr,
             token,

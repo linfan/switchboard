@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_manage_shared::{FsEntry, FsListing};
+use switchboard_shared::{FsEntry, FsListing};
 
 use crate::error::{AppError, AppResult};
 

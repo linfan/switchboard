@@ -7,7 +7,7 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript(
     ([http, token]) => {
       localStorage.setItem(
-        "agent-manage",
+        "switchboard",
         JSON.stringify({
           state: {
             services: [{ id: "pw-svc", name: "PW Host", url: http, token }],
@@ -16,7 +16,7 @@ test.beforeEach(async ({ page }) => {
           version: 0,
         }),
       );
-      localStorage.setItem("agent-manage-client-id", "pw-client");
+      localStorage.setItem("switchboard-client-id", "pw-client");
     },
     [HTTP, TOKEN],
   );

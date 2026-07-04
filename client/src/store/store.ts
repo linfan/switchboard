@@ -161,7 +161,7 @@ export const useStore = create<AppState>()(
       },
     }),
     {
-      name: "agent-manage",
+      name: "switchboard",
       storage: createJSONStorage(() => persistStorage),
       partialize: (s) => ({
         services: s.services,

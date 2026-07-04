@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use agent_manage_shared::{now_millis, TaskInfo, TaskStatus};
+use switchboard_shared::{now_millis, TaskInfo, TaskStatus};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
 use crate::error::AppResult;

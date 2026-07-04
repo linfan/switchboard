@@ -11,22 +11,22 @@ import { ADDR, HTTP, TOKEN } from "./constants";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..");
-const BIN = join(ROOT, "target", "debug", "agent-manage-server");
+const BIN = join(ROOT, "target", "debug", "switchboard-server");
 const FAKE_AGENT_DIR = join(ROOT, "e2e", "fake-agent");
 export const STATE_FILE = join(HERE, ".server.json");
 
 export default async function globalSetup() {
-  execSync("cargo build -p agent-manage-server", { cwd: ROOT, stdio: "inherit" });
+  execSync("cargo build -p switchboard-server", { cwd: ROOT, stdio: "inherit" });
 
-  const dbDir = mkdtempSync(join(tmpdir(), "agent-manage-pw-"));
+  const dbDir = mkdtempSync(join(tmpdir(), "switchboard-pw-"));
   const child = spawn(BIN, [], {
     env: {
       ...process.env,
-      AGENT_MANAGE_ADDR: ADDR,
-      AGENT_MANAGE_TOKEN: TOKEN,
-      AGENT_MANAGE_DB: join(dbDir, "pw.db"),
-      AGENT_MANAGE_NAME: "pw-host",
-      AGENT_MANAGE_PERMISSION_MODE: "default",
+      SWITCHBOARD_ADDR: ADDR,
+      SWITCHBOARD_TOKEN: TOKEN,
+      SWITCHBOARD_DB: join(dbDir, "pw.db"),
+      SWITCHBOARD_NAME: "pw-host",
+      SWITCHBOARD_PERMISSION_MODE: "default",
       RUST_LOG: "warn",
       PATH: `${FAKE_AGENT_DIR}:${process.env.PATH}`,
     },

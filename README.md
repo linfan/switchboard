@@ -1,4 +1,4 @@
-# Agent-Manage
+# Switchboard
 
 Cross-host, multi-agent management tool. A desktop **client** connects to one or
 more **hosting services**; each hosting service runs and supervises multiple
@@ -153,11 +153,11 @@ Server (environment variables):
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `AGENT_MANAGE_ADDR` | `127.0.0.1:8787` | Listen address |
-| `AGENT_MANAGE_TOKEN` | `dev-token` | Shared bearer token |
-| `AGENT_MANAGE_DB` | `server/data/agent-manage.db` | SQLite path |
-| `AGENT_MANAGE_NAME` | host name | Service display name |
-| `AGENT_MANAGE_PERMISSION_MODE` | `default` | Passed to the agent's `--permission-mode` |
+| `SWITCHBOARD_ADDR` | `127.0.0.1:8787` | Listen address |
+| `SWITCHBOARD_TOKEN` | `dev-token` | Shared bearer token |
+| `SWITCHBOARD_DB` | `server/data/switchboard.db` | SQLite path |
+| `SWITCHBOARD_NAME` | host name | Service display name |
+| `SWITCHBOARD_PERMISSION_MODE` | `default` | Passed to the agent's `--permission-mode` |
 
 Auth: REST uses `Authorization: Bearer <token>`; the WebSocket uses
 `?token=<token>` (webviews can't set custom WS headers). Use `wss://` behind a

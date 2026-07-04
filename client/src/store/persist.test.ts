@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { useStore } from "./store";
 import { convKey } from "./types";
 
-const KEY = "agent-manage";
+const KEY = "switchboard";
 
 function persisted(): { services: unknown[]; cursors?: unknown } {
   return JSON.parse(localStorage.getItem(KEY) ?? '{"state":{"services":[]}}')

@@ -10,9 +10,9 @@ test.beforeEach(async ({ page }) => {
   // (a reload test must observe real persisted state, not a fresh re-seed).
   await page.addInitScript(
     ([http, token]) => {
-      if (!localStorage.getItem("agent-manage")) {
+      if (!localStorage.getItem("switchboard")) {
         localStorage.setItem(
-          "agent-manage",
+          "switchboard",
           JSON.stringify({
             state: {
               services: [{ id: "pw-svc", name: "PW Host", url: http, token }],
@@ -21,7 +21,7 @@ test.beforeEach(async ({ page }) => {
           }),
         );
       }
-      localStorage.setItem("agent-manage-client-id", "pw-client");
+      localStorage.setItem("switchboard-client-id", "pw-client");
     },
     [HTTP, TOKEN],
   );
