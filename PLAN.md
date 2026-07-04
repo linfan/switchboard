@@ -264,6 +264,26 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   *Test:* Playwright regression (`persistence.spec.ts`: delete survives reload)
   + persist round-trip unit test (`store/persist.test.ts`); client 33 + e2e 3
   green, `tsc` + build clean. ✅
+- ✅ **P12 — Free-text agent command + server folder picker**: the New Task
+  dialog no longer limits the agent tool to a hard-coded dropdown. The tool
+  field is now a combobox (`<input list=…>` + `<datalist>`) whose suggestions are
+  the 5 most-recently-used commands for that service (persisted per-service in
+  the store), followed by any installed known tools. Any command on the host's
+  PATH is accepted — `bash` included; a command with args is split on whitespace
+  (first token resolved via `which`, rest passed as argv, no shell quoting).
+  Server: `agent::resolve_command` maps the free-text string to a spawnable
+  `{bin, argv}` (or a `BadRequest` naming the missing command), `pty_proc`
+  spawns arbitrary `bin+argv`, and a new bearer-authed `GET /api/fs?path=`
+  (`fs::list_dir`, DTOs `FsListing`/`FsEntry` in `shared`) lists the host's real
+  directory tree from `/`. Client: a **Browse…** button opens a `FolderPicker`
+  modal that navigates the *server's* filesystem over REST (`net/rest.ts`) and
+  writes the chosen path into Working dir. Create failures surface inline via the
+  previously-ignored `ServerMsg::Error{code:"create_failed"}`; the dialog stays
+  open on failure and closes only once the new conversation appears.
+  *Test:* server `resolve_command`/`list_dir` unit tests (server 28 green),
+  shared bindings regen (21 green), store `addRecentTool`/`create_failed` unit
+  tests (vitest 37 green), Playwright e2e (`new-task.spec.ts`: folder-picker
+  happy path + inline not-found error; suite 5 green), `tsc` + build clean. ✅
 
 Each phase ends with an atomic conventional commit and a PLAN.md update.
 
