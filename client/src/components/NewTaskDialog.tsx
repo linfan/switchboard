@@ -1,35 +1,89 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { pool } from "../net/pool";
 import { useStore } from "../store/store";
+import { FolderPicker } from "./FolderPicker";
 import { Modal } from "./Modal";
 
 export function NewTaskDialog({ onClose }: { onClose: () => void }) {
   const services = useStore((s) => s.services);
   const runtime = useStore((s) => s.runtime);
+  const conversations = useStore((s) => s.conversations);
+  const recentTools = useStore((s) => s.recentTools);
+  const createError = useStore((s) => s.createError);
+  const addRecentTool = useStore((s) => s.addRecentTool);
+  const clearCreateError = useStore((s) => s.clearCreateError);
 
   const [serviceId, setServiceId] = useState(services[0]?.id ?? "");
   const [tool, setTool] = useState("");
   const [title, setTitle] = useState("");
   const [cwd, setCwd] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
 
   const rt = runtime[serviceId];
   const online = rt?.status === "online";
-  const tools = rt?.info?.tools ?? [];
+  const knownTools = useMemo(() => rt?.info?.tools ?? [], [rt?.info?.tools]);
+  const recents = useMemo(
+    () => recentTools[serviceId] ?? [],
+    [recentTools, serviceId],
+  );
+  const service = services.find((s) => s.id === serviceId);
 
-  // Default the tool selection to the first available tool for the service.
+  // Datalist suggestions: recent commands first, then any available known tools
+  // not already listed.
+  const suggestions = useMemo(() => {
+    const known = knownTools.filter((t) => t.available).map((t) => t.id);
+    return [...recents, ...known.filter((id) => !recents.includes(id))];
+  }, [recents, knownTools]);
+
+  // Default the command to the most recent one, else the first available tool.
   useEffect(() => {
-    const firstAvailable = tools.find((t) => t.available)?.id ?? tools[0]?.id ?? "";
-    setTool(firstAvailable);
+    setTool(recents[0] ?? knownTools.find((t) => t.available)?.id ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serviceId, tools.length]);
+  }, [serviceId, recents.length, knownTools.length]);
 
-  const valid = serviceId !== "" && tool !== "" && online;
+  // Clear any stale create error when the dialog unmounts.
+  useEffect(() => clearCreateError, [clearCreateError]);
+
+  const prefix = `${serviceId}::`;
+  const convCount = useMemo(
+    () => Object.keys(conversations).filter((k) => k.startsWith(prefix)).length,
+    [conversations, prefix],
+  );
+  const baselineRef = useRef(0);
+
+  // A create failed: surface the server's message inline, re-enable the form.
+  useEffect(() => {
+    if (submitting && createError) setSubmitting(false);
+  }, [submitting, createError]);
+
+  // A create succeeded (a new conversation appeared for this service): remember
+  // the command and close.
+  useEffect(() => {
+    if (submitting && convCount > baselineRef.current) {
+      addRecentTool(serviceId, tool.trim());
+      onClose();
+    }
+  }, [submitting, convCount, serviceId, tool, addRecentTool, onClose]);
+
+  const valid = serviceId !== "" && tool.trim() !== "" && online;
 
   const submit = () => {
-    if (!valid) return;
-    pool.createTask(serviceId, tool, title.trim() || null, cwd.trim() || null);
-    onClose();
+    if (!valid || submitting) return;
+    clearCreateError();
+    baselineRef.current = convCount;
+    setSubmitting(true);
+    const sent = pool.createTask(
+      serviceId,
+      tool.trim(),
+      title.trim() || null,
+      cwd.trim() || null,
+    );
+    if (!sent) {
+      setSubmitting(false);
+      useStore.setState({ createError: "not connected to this service" });
+    }
   };
 
   return (
@@ -41,8 +95,12 @@ export function NewTaskDialog({ onClose }: { onClose: () => void }) {
           <button className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button className="btn btn--primary" disabled={!valid} onClick={submit}>
-            Create
+          <button
+            className="btn btn--primary"
+            disabled={!valid || submitting}
+            onClick={submit}
+          >
+            {submitting ? "Creating…" : "Create"}
           </button>
         </>
       }
@@ -67,39 +125,46 @@ export function NewTaskDialog({ onClose }: { onClose: () => void }) {
           </label>
 
           <label className="field">
-            <span>Agent tool</span>
-            <select
+            <span>Agent tool / command</span>
+            <input
+              list="nt-tool-suggestions"
               value={tool}
+              placeholder="claude, bash, python3 -m http.server, …"
+              disabled={!online}
               onChange={(e) => setTool(e.target.value)}
-              disabled={!online || tools.length === 0}
-            >
-              {tools.length === 0 ? (
-                <option value="">
-                  {online ? "no tools reported" : "connect to load tools"}
-                </option>
-              ) : (
-                tools.map((t) => (
-                  <option key={t.id} value={t.id} disabled={!t.available}>
-                    {t.display_name}
-                    {t.available ? "" : " (not installed)"}
-                  </option>
-                ))
-              )}
-            </select>
+            />
+            <datalist id="nt-tool-suggestions">
+              {suggestions.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
           </label>
 
           <label className="field">
             <span>Title (optional)</span>
             <input value={title} onChange={(e) => setTitle(e.target.value)} />
           </label>
+
           <label className="field">
             <span>Working dir (optional)</span>
-            <input
-              value={cwd}
-              placeholder="/path/to/project"
-              onChange={(e) => setCwd(e.target.value)}
-            />
+            <div className="field__row">
+              <input
+                value={cwd}
+                placeholder="/path/to/project"
+                onChange={(e) => setCwd(e.target.value)}
+              />
+              <button
+                type="button"
+                className="btn"
+                disabled={!online || !service}
+                onClick={() => setShowPicker(true)}
+              >
+                Browse…
+              </button>
+            </div>
           </label>
+
+          {createError && <p className="hint hint--error">{createError}</p>}
           {!online && (
             <p className="hint">
               This service is {rt?.status ?? "offline"}; connect before creating a
@@ -107,6 +172,18 @@ export function NewTaskDialog({ onClose }: { onClose: () => void }) {
             </p>
           )}
         </>
+      )}
+
+      {showPicker && service && (
+        <FolderPicker
+          service={service}
+          initialPath={cwd.trim() || undefined}
+          onPick={(p) => {
+            setCwd(p);
+            setShowPicker(false);
+          }}
+          onClose={() => setShowPicker(false)}
+        />
       )}
     </Modal>
   );

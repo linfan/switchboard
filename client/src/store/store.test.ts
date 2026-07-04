@@ -13,7 +13,53 @@ beforeEach(() => {
     runtime: {},
     conversations: {},
     cursors: {},
+    recentTools: {},
     selectedKey: undefined,
+    createError: undefined,
+  });
+});
+
+describe("recent tools", () => {
+  it("prepends, dedupes, and caps at 5 per service", () => {
+    const { addRecentTool } = useStore.getState();
+    for (const c of ["a", "b", "c", "a", "d", "e", "f"]) addRecentTool("s1", c);
+    // "a" moved to front on reuse; only the 5 most recent are kept.
+    expect(useStore.getState().recentTools.s1).toEqual(["f", "e", "d", "a", "c"]);
+  });
+
+  it("ignores blank commands and scopes per service", () => {
+    const { addRecentTool } = useStore.getState();
+    addRecentTool("s1", "  ");
+    addRecentTool("s1", "claude");
+    addRecentTool("s2", "bash");
+    expect(useStore.getState().recentTools.s1).toEqual(["claude"]);
+    expect(useStore.getState().recentTools.s2).toEqual(["bash"]);
+  });
+});
+
+describe("create errors", () => {
+  it("surfaces a create_failed error message and clears it", () => {
+    useStore.getState().applyServerMsg("s1", {
+      type: "error",
+      task_id: null,
+      code: "create_failed",
+      message: "command 'nope' not found on this host",
+    });
+    expect(useStore.getState().createError).toBe(
+      "command 'nope' not found on this host",
+    );
+    useStore.getState().clearCreateError();
+    expect(useStore.getState().createError).toBeUndefined();
+  });
+
+  it("ignores errors with other codes", () => {
+    useStore.getState().applyServerMsg("s1", {
+      type: "error",
+      task_id: "t1",
+      code: "terminate_failed",
+      message: "nope",
+    });
+    expect(useStore.getState().createError).toBeUndefined();
   });
 });
 

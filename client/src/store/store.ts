@@ -24,14 +24,22 @@ export interface AppState {
   conversations: Record<string, Conversation>;
   /** Persisted reconnect cursors keyed by `serviceId::taskId`. */
   cursors: Record<string, number>;
+  /** Recently used task commands per service (most-recent first, persisted). */
+  recentTools: Record<string, string[]>;
   /** Currently focused conversation key, if any. */
   selectedKey?: string;
+  /** Last task-creation error surfaced by the server (in-memory, transient). */
+  createError?: string;
 
   // --- service management -------------------------------------------------
   addService: (svc: Omit<Service, "id"> & { id?: string }) => string;
   updateService: (id: string, patch: Partial<Omit<Service, "id">>) => void;
   removeService: (id: string) => void;
   setRuntime: (id: string, patch: Partial<ServiceRuntime>) => void;
+  /** Record a command used to launch a task on a service (dedup, cap 5). */
+  addRecentTool: (serviceId: string, cmd: string) => void;
+  /** Clear the transient task-creation error. */
+  clearCreateError: () => void;
 
   // --- sync application ----------------------------------------------------
   /** Apply one server (control-plane) message for a given service. */
@@ -60,7 +68,9 @@ export const useStore = create<AppState>()(
       runtime: {},
       conversations: {},
       cursors: {},
+      recentTools: {},
       selectedKey: undefined,
+      createError: undefined,
 
       addService: (svc) => {
         const id = svc.id ?? newId();
@@ -106,6 +116,17 @@ export const useStore = create<AppState>()(
           },
         })),
 
+      addRecentTool: (serviceId, cmd) =>
+        set((s) => {
+          const value = cmd.trim();
+          if (value === "") return {};
+          const prev = s.recentTools[serviceId] ?? [];
+          const next = [value, ...prev.filter((c) => c !== value)].slice(0, 5);
+          return { recentTools: { ...s.recentTools, [serviceId]: next } };
+        }),
+
+      clearCreateError: () => set({ createError: undefined }),
+
       applyServerMsg: (serviceId, msg) =>
         set((s) => applyMsg(s, serviceId, msg)),
 
@@ -134,7 +155,11 @@ export const useStore = create<AppState>()(
     {
       name: "agent-manage",
       storage: createJSONStorage(() => persistStorage),
-      partialize: (s) => ({ services: s.services, cursors: s.cursors }),
+      partialize: (s) => ({
+        services: s.services,
+        cursors: s.cursors,
+        recentTools: s.recentTools,
+      }),
     },
   ),
 );
@@ -209,9 +234,12 @@ export function applyMsg(
       const selectedKey = s.selectedKey === key ? undefined : s.selectedKey;
       return { conversations, cursors, selectedKey };
     }
+    case "error": {
+      if (msg.code === "create_failed") return { createError: msg.message };
+      return {};
+    }
     case "replay_done":
     case "pong":
-    case "error":
       return {};
   }
 }
