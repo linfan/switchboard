@@ -7,3 +7,5 @@ export type { TaskStatus } from "./TaskStatus";
 export type { TaskInfo } from "./TaskInfo";
 export type { ClientMsg } from "./ClientMsg";
 export type { ServerMsg } from "./ServerMsg";
+export type { FsEntry } from "./FsEntry";
+export type { FsListing } from "./FsListing";

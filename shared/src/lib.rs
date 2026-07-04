@@ -23,6 +23,31 @@ pub struct AgentTool {
     pub available: bool,
 }
 
+/// One entry in a server-side directory listing (REST `/api/fs`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "client/src/protocol/")]
+pub struct FsEntry {
+    /// File/directory name (no path separators).
+    pub name: String,
+    /// Absolute path on the hosting machine.
+    pub path: String,
+    /// Whether this entry is a directory.
+    pub is_dir: bool,
+}
+
+/// A directory listing of the hosting machine's filesystem (REST `/api/fs`),
+/// used by the client's working-directory folder picker.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "client/src/protocol/")]
+pub struct FsListing {
+    /// Absolute, canonicalized path that was listed.
+    pub path: String,
+    /// Parent directory, or `None` at the filesystem root.
+    pub parent: Option<String>,
+    /// Immediate children (directories first, then files).
+    pub entries: Vec<FsEntry>,
+}
+
 /// Metadata a hosting service advertises to clients.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "client/src/protocol/")]
@@ -237,5 +262,6 @@ mod tests {
     fn export_bindings() {
         ServerMsg::export_all().unwrap();
         ClientMsg::export_all().unwrap();
+        FsListing::export_all().unwrap();
     }
 }
