@@ -134,61 +134,49 @@ screen for snapshots. Adding a new CLI agent is one registry entry in
 
 ## Quick start
 
-The server speaks **HTTPS by default — even on localhost** (the macOS client's
-WebView blocks cleartext to anything but `localhost`, so a remote host must be
-HTTPS anyway). On first run the server generates a self-signed certificate; the
-client just needs to trust it once per machine.
+The server speaks **HTTPS by default — even on localhost** — generating a
+self-signed certificate on first run. The desktop client routes its networking
+through its native (Rust) layer, which **accepts self-signed certs**, so there
+is no certificate to install or trust: just point the client at the host.
 
 ```bash
 make setup                  # install Rust + client + e2e deps
 make run-server             # start a hosting service (https) on 127.0.0.1:8787
-```
-
-On first start the server writes `server/data/switchboard-cert.pem` (+ key). The
-log line `listening (https) … sans=[…]` shows the addresses the cert is valid
-for. Trust that cert on the client machine (once):
-
-```bash
-# per-user trust; no sudo needed
-security add-trusted-cert -r trustRoot \
-  -k ~/Library/Keychains/login.keychain-db \
-  server/data/switchboard-cert.pem
-```
-
-```bash
 # in another terminal:
 make run-client             # launch the desktop client (Tauri dev)
 ```
 
-In the client: **+svc** → name it, address `127.0.0.1:8787` (no scheme — HTTPS is
-assumed), token `dev-token` → **+task** → pick the service + agent tool →
-**Create**. Click the task to open its live terminal and type straight into the
-agent. Use the ↻ button to reconnect a service, and **Terminate** to stop a task.
+In the client: **+svc** → name it, leave the protocol on **https**, host
+`127.0.0.1` (the port defaults to `8787`), token `dev-token` → **+task** → pick
+the service + agent tool → **Create**. Click the task to open its live terminal
+and type straight into the agent. Use the ↻ button to reconnect a service, and
+**Terminate** to stop a task.
 
 ### Connecting to a remote host
 
-Start the server so its certificate covers the address the client will dial
-(pass the public IP/hostname as a SAN), and bind all interfaces:
+Bind all interfaces and choose a strong token:
 
 ```bash
 SWITCHBOARD_ADDR=0.0.0.0:8787 \
-SWITCHBOARD_TLS_SAN=203.0.113.10 \
 SWITCHBOARD_TOKEN='choose-a-strong-token' \
   cargo run -p switchboard-server --release
 ```
 
-Copy `server/data/switchboard-cert.pem` to each client machine and trust it with
-the `security add-trusted-cert` command above, then add the service with address
-`203.0.113.10:8787`. Ensure the host firewall / cloud security group allows
-inbound TCP on the port.
+In the client, add the service with the host's IP/hostname and that token — no
+cert step needed. Ensure the host firewall / cloud security group allows inbound
+TCP on the port.
+
+> **Security note:** accepting self-signed certs keeps traffic encrypted but not
+> authenticated, so it does not protect against an active man-in-the-middle. For
+> untrusted networks, front the server with a reverse proxy holding a real CA
+> certificate (set `SWITCHBOARD_TLS=0` and terminate TLS there).
 
 Prefer the browser during development? `cd client && npm run dev` serves the same
-UI at http://localhost:5173 — note it will connect to the server over HTTPS, so
-the local cert must be trusted (browsers on macOS read the system keychain).
-
-> Running plain HTTP instead (e.g. behind your own TLS proxy): set
-> `SWITCHBOARD_TLS=0` on the server and enter the address as
-> `http://127.0.0.1:8787` in the dialog.
+UI at http://localhost:5173. The browser build uses the webview's own
+fetch/WebSocket (not the native bridge), so it can't accept a self-signed cert —
+run the server with `SWITCHBOARD_TLS=0` and select the **http** protocol in the
+dialog, or trust the generated `server/data/switchboard-cert.pem` in your OS
+keychain.
 
 ## Configuration
 
@@ -210,13 +198,17 @@ Auth: REST uses `Authorization: Bearer <token>`; the WebSocket uses
 `?token=<token>` (webviews can't set custom WS headers).
 
 TLS: HTTPS is on by default. When the cert/key files are absent the server
-generates a self-signed, ATS-compliant certificate (ECDSA P-256, ~13-month
-validity) whose SANs include `localhost`, the loopback and primary interface
-addresses, and any `SWITCHBOARD_TLS_SAN` entries — so add the public IP/hostname
-there for a remote host. The cert must be trusted on each client machine (see
-[Quick start](#quick-start)); regenerate it by deleting the two `.pem` files and
-restarting. To terminate TLS yourself (reverse proxy, real CA cert), set
+generates a self-signed certificate (ECDSA P-256, ~13-month validity); the
+`SWITCHBOARD_TLS_SAN` entries (plus `localhost` and local interface addresses)
+become its SANs, which matters only if you later trust it in a browser. The
+desktop client accepts self-signed certs directly, so no trust step is needed
+there. To terminate TLS yourself (reverse proxy, real CA cert), set
 `SWITCHBOARD_TLS=0` and run the proxy in front.
+
+Networking: the desktop client performs REST and WebSocket I/O in its native
+(Rust) layer rather than the webview, so it can reach hosts with self-signed
+certificates that the webview's fetch/WebSocket would reject. Certificate
+validation is intentionally disabled for this self-signed use case.
 
 ## Testing
 ```bash
