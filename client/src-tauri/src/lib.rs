@@ -1,11 +1,20 @@
-//! Tauri shell. The client is a pure web app talking WebSocket directly to
-//! hosting services, so the native layer is intentionally thin: it just hosts
-//! the webview. Network/reconnect logic lives in the frontend.
+//! Tauri shell. Reconnect/liveness logic lives in the frontend, but network I/O
+//! is routed through the native layer (`net`) so it can reach hosting services
+//! with self-signed TLS certs that the webview's own fetch/WebSocket refuse.
+
+mod net;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
+        .manage(net::new_state())
+        .invoke_handler(tauri::generate_handler![
+            net::http_request,
+            net::ws_connect,
+            net::ws_send,
+            net::ws_close
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

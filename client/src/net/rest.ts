@@ -3,6 +3,7 @@
 //! host's filesystem for the working-directory picker.
 
 import type { FsListing, ServiceInfo } from "../protocol";
+import { invoke, isTauri } from "./tauri";
 
 interface ServiceRef {
   url: string;
@@ -11,6 +12,62 @@ interface ServiceRef {
 
 /** How long `probeService` waits for the server before giving up. */
 export const PROBE_TIMEOUT_MS = 5000;
+
+/** Status + raw body from the native REST bridge (mirrors a `fetch` response). */
+interface BridgeResponse {
+  status: number;
+  body: string;
+}
+
+/** Reject sentinel used to distinguish a timeout from other failures. */
+const TIMEOUT = Symbol("timeout");
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(TIMEOUT), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
+/**
+ * Interpret a bridge response with the same rules as the fetch path: 401 is a
+ * bad token, other non-2xx surfaces the server's `message`, 2xx is parsed JSON.
+ */
+function interpret<T>(res: BridgeResponse): T {
+  if (res.status === 401) throw new Error("Invalid token.");
+  if (res.status < 200 || res.status >= 300) {
+    let message = `HTTP ${res.status}`;
+    try {
+      message = JSON.parse(res.body).message ?? message;
+    } catch {
+      // non-JSON body; keep the status text
+    }
+    throw new Error(message);
+  }
+  return JSON.parse(res.body) as T;
+}
+
+function bridgeRequest(
+  method: string,
+  url: string,
+  token: string,
+): Promise<BridgeResponse> {
+  return invoke<BridgeResponse>("http_request", {
+    method,
+    url,
+    token,
+    body: null,
+  });
+}
 
 /**
  * Verify a service is reachable and the token is accepted, returning its info.
@@ -25,6 +82,23 @@ export const PROBE_TIMEOUT_MS = 5000;
  */
 export async function probeService(service: ServiceRef): Promise<ServiceInfo> {
   const base = service.url.replace(/\/+$/, "");
+  if (isTauri) {
+    let res: BridgeResponse;
+    try {
+      res = await withTimeout(
+        bridgeRequest("GET", `${base}/api/info`, service.token),
+        PROBE_TIMEOUT_MS,
+      );
+    } catch (e) {
+      if (e === TIMEOUT) {
+        throw new Error(
+          `Server did not respond within ${PROBE_TIMEOUT_MS / 1000}s.`,
+        );
+      }
+      throw new Error("Could not reach the server — check the address.");
+    }
+    return interpret<ServiceInfo>(res);
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   let res: Response;
@@ -63,6 +137,11 @@ export async function listDir(
 ): Promise<FsListing> {
   const base = service.url.replace(/\/+$/, "");
   const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+  if (isTauri) {
+    return interpret<FsListing>(
+      await bridgeRequest("GET", `${base}/api/fs${qs}`, service.token),
+    );
+  }
   const res = await fetch(`${base}/api/fs${qs}`, {
     headers: { Authorization: `Bearer ${service.token}` },
   });
