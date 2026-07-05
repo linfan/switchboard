@@ -23,6 +23,7 @@ export default async function globalSetup() {
     env: {
       ...process.env,
       SWITCHBOARD_ADDR: ADDR,
+      SWITCHBOARD_TLS: "0", // browser test connects over plain http/ws
       SWITCHBOARD_TOKEN: TOKEN,
       SWITCHBOARD_DB: join(dbDir, "pw.db"),
       SWITCHBOARD_NAME: "pw-host",

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { HTTP, TOKEN } from "./constants";
+import { HOST, HTTP, PORT, TOKEN } from "./constants";
 
 // Start with no registered services so the +svc dialog drives the whole flow.
 test.beforeEach(async ({ page }) => {
@@ -16,7 +16,10 @@ test("a wrong token is rejected and blocks the Add dialog", async ({ page }) => 
   await expect(dialog).toBeVisible();
 
   await dialog.getByPlaceholder("Laptop / prod-box").fill("PW Host");
-  await dialog.getByPlaceholder("http://host:8787").fill(HTTP);
+  // Harness server runs plain http, so pick the http protocol.
+  await dialog.getByRole("radio", { name: "http", exact: true }).check();
+  await dialog.getByPlaceholder("hostname or IP").fill(HOST);
+  await dialog.getByPlaceholder("8787").fill(PORT);
   // Token field is the only password input in the dialog.
   await dialog.locator('input[type="password"]').fill("wrong-token");
   await dialog.getByRole("button", { name: "Add" }).click();
@@ -62,7 +65,8 @@ test("editing a service's token rebuilds the connection", async ({ page }) => {
   // Open the edit dialog: fields are pre-filled with the current config.
   await page.getByTitle("Edit service").click();
   const edit = page.getByRole("dialog", { name: "Edit hosting service" });
-  await expect(edit.getByPlaceholder("http://host:8787")).toHaveValue(HTTP);
+  await expect(edit.getByPlaceholder("hostname or IP")).toHaveValue(HOST);
+  await expect(edit.getByPlaceholder("8787")).toHaveValue(PORT);
 
   // A still-wrong token is rejected inline.
   await edit.getByRole("button", { name: "Save" }).click();

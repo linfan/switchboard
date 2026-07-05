@@ -1,19 +1,15 @@
 import { useState } from "react";
 
 import { probeService } from "../net/rest";
-import { stripImplicitHttps, withImplicitHttps } from "../net/url";
+import {
+  buildServiceUrl,
+  DEFAULT_PORT,
+  parseServiceUrl,
+  type ServiceAddr,
+} from "../net/url";
 import { useStore } from "../store/store";
 import type { Service } from "../store/types";
 import { Modal } from "./Modal";
-
-/** True if `url` parses and has a host — used to gate the submit button. */
-function looksLikeUrl(url: string): boolean {
-  try {
-    return new URL(url).host !== "";
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Add a new hosting service, or (when `service` is given) edit an existing one.
@@ -32,19 +28,26 @@ export function AddServiceDialog({
   const updateService = useStore((s) => s.updateService);
   const editing = service !== undefined;
 
+  const initial: ServiceAddr = service
+    ? parseServiceUrl(service.url)
+    : { protocol: "https", host: "", port: "" };
   const [name, setName] = useState(service?.name ?? "");
-  const [url, setUrl] = useState(
-    service ? stripImplicitHttps(service.url) : "",
+  const [protocol, setProtocol] = useState<ServiceAddr["protocol"]>(
+    initial.protocol,
   );
-  const [token, setToken] = useState(service?.token ?? "dev-token");
+  const [host, setHost] = useState(initial.host);
+  const [port, setPort] = useState(initial.port);
+  const [token, setToken] = useState(service?.token ?? "");
   const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState<string | undefined>();
 
-  const valid = name.trim() !== "" && looksLikeUrl(withImplicitHttps(url));
+  const portOk = port.trim() === "" || /^\d+$/.test(port.trim());
+  const valid = name.trim() !== "" && host.trim() !== "" && portOk;
 
   const submit = async () => {
     if (!valid || verifying) return;
-    const svc = { name: name.trim(), url: withImplicitHttps(url), token };
+    const url = buildServiceUrl({ protocol, host, port });
+    const svc = { name: name.trim(), url, token };
     setVerifying(true);
     setError(undefined);
     try {
@@ -88,17 +91,46 @@ export function AddServiceDialog({
           autoFocus
         />
       </label>
-      <label className="field">
+      <div className="field">
+        <span>Protocol</span>
+        <div className="radio-row">
+          <label>
+            <input
+              type="radio"
+              name="protocol"
+              checked={protocol === "https"}
+              onChange={() => setProtocol("https")}
+            />
+            https
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="protocol"
+              checked={protocol === "http"}
+              onChange={() => setProtocol("http")}
+            />
+            http
+          </label>
+        </div>
+      </div>
+      <div className="field">
         <span>Address</span>
-        <input
-          value={url}
-          placeholder="30.233.64.152:8787"
-          onChange={(e) => setUrl(e.target.value)}
-        />
-        <small className="hint hint--muted">
-          Uses https:// — type http:// only for a local server without TLS.
-        </small>
-      </label>
+        <div className="field__row">
+          <input
+            value={host}
+            placeholder="hostname or IP"
+            onChange={(e) => setHost(e.target.value)}
+          />
+          <input
+            className="field__port"
+            value={port}
+            placeholder={DEFAULT_PORT}
+            inputMode="numeric"
+            onChange={(e) => setPort(e.target.value)}
+          />
+        </div>
+      </div>
       <label className="field">
         <span>Token</span>
         <input

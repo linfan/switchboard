@@ -311,7 +311,7 @@ body {
   font-size: 13px;
   color: var(--fg-dim);
 }
-.field input,
+.field input:not([type="radio"]),
 .field select,
 .field textarea {
   background: var(--bg);
@@ -322,11 +322,31 @@ body {
   font-size: 14px;
   font-family: inherit;
 }
-.field input:focus,
+.field input:not([type="radio"]):focus,
 .field select:focus,
 .field textarea:focus {
   outline: none;
   border-color: var(--accent);
+}
+/* --- protocol radio row --- */
+.radio-row {
+  display: flex;
+  gap: 16px;
+}
+.radio-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg);
+  font-size: 14px;
+  cursor: pointer;
+}
+.radio-row input[type="radio"] {
+  margin: 0;
+}
+/* Port sits beside the host input and stays narrow. */
+.field__row .field__port {
+  flex: 0 0 88px;
 }
 .hint {
   font-size: 12px;

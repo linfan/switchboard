@@ -1,22 +1,36 @@
-//! Address-input normalization for the connect dialog.
+//! Service-address helpers for the connect dialog.
 //!
-//! HTTPS is the implicit scheme: the macOS WKWebView (ATS) blocks cleartext to
-//! remote hosts, so a service is effectively always `https://`. The dialog lets
-//! the operator type a bare `host:port` and we fill in the scheme. An explicit
-//! `http://` is still honored, for a local/dev server running without TLS.
+//! The dialog collects the protocol, host, and port separately (the port is
+//! usually the default, so it can be left blank). These convert between that
+//! shape and the single URL string persisted per service.
 
-/** Prepend the implicit `https://` scheme unless one was typed explicitly. */
-export function withImplicitHttps(input: string): string {
-  const trimmed = input.trim();
-  if (trimmed === "") return "";
-  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+export interface ServiceAddr {
+  protocol: "https" | "http";
+  host: string;
+  /** Empty string means "use the default port". */
+  port: string;
 }
 
-/**
- * Inverse of {@link withImplicitHttps} for display: drop a leading `https://`
- * (the implicit default) so the field shows a bare `host:port`, but keep an
- * explicit `http://` visible so http services round-trip unchanged on edit.
- */
-export function stripImplicitHttps(url: string): string {
-  return url.replace(/^https:\/\//i, "");
+/** Default hosting-service port; applied when the port field is left blank. */
+export const DEFAULT_PORT = "8787";
+
+/** Split a stored service URL into its parts (for editing an existing entry). */
+export function parseServiceUrl(url: string): ServiceAddr {
+  try {
+    const u = new URL(url);
+    return {
+      protocol: u.protocol === "http:" ? "http" : "https",
+      host: u.hostname,
+      port: u.port,
+    };
+  } catch {
+    return { protocol: "https", host: "", port: "" };
+  }
+}
+
+/** Assemble a URL from the dialog fields, defaulting the port when blank. */
+export function buildServiceUrl(addr: ServiceAddr): string {
+  const host = addr.host.trim();
+  const port = addr.port.trim() || DEFAULT_PORT;
+  return `${addr.protocol}://${host}:${port}`;
 }

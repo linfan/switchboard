@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { HTTP, TOKEN } from "./constants";
+import { HOST, PORT, TOKEN } from "./constants";
 
 // Reproduces the user-reported bug: after deleting a service and "restarting"
 // the client (page reload), the deleted service must NOT reappear.
@@ -13,11 +13,13 @@ test("a deleted service stays deleted across a reload", async ({ page }) => {
 
   // Add a service through the real UI flow.
   await page.getByTitle("Add service").click();
-  await page.getByRole("textbox").first().fill("Demo");
-  // URL + token fields come pre-filled; point them at the live PW host.
-  const inputs = page.locator(".modal input");
-  await inputs.nth(1).fill(HTTP);
-  await inputs.nth(2).fill(TOKEN);
+  const dialog = page.getByRole("dialog", { name: "Add hosting service" });
+  await dialog.getByPlaceholder("Laptop / prod-box").fill("Demo");
+  // Harness server runs plain http; point the fields at the live PW host.
+  await dialog.getByRole("radio", { name: "http", exact: true }).check();
+  await dialog.getByPlaceholder("hostname or IP").fill(HOST);
+  await dialog.getByPlaceholder("8787").fill(PORT);
+  await dialog.locator('input[type="password"]').fill(TOKEN);
   await page.getByRole("button", { name: "Add" }).click();
 
   const service = page.locator(".service", { hasText: "Demo" });

@@ -152,6 +152,7 @@ function startServer() {
     env: {
       ...process.env,
       SWITCHBOARD_ADDR: ADDR,
+      SWITCHBOARD_TLS: "0", // harness clients speak plain ws over http
       SWITCHBOARD_TOKEN: TOKEN,
       SWITCHBOARD_DB: join(dbDir, "e2e.db"),
       SWITCHBOARD_NAME: "e2e-host",
