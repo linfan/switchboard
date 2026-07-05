@@ -302,6 +302,24 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   only when absent so reloads observe real persisted state. Store unit test
   asserts cursors are excluded from the persisted snapshot (vitest 38 green),
   e2e suite 6 green, `tsc` + build clean. ✅
+- ✅ **P14 — Validate token on add + edit a service later**: adding a service
+  used to trust the token blindly — a wrong one silently spun forever in
+  reconnect backoff. The Add dialog now verifies the URL+token against the
+  bearer-authed `GET /api/info` (`net/rest.ts::probeService`) *before* touching
+  the store: a 401 reports "Invalid token.", an unreachable host reports a reach
+  error, and either keeps the dialog open with nothing registered. The same
+  dialog doubles as an editor (`AddServiceDialog` takes an optional `service`
+  prop) opened from a new **✎** button per service in the sidebar, letting the
+  user fix a changed address, rotate the token, or rename — re-verified on save.
+  Editing url/token needed a pool fix: `ConnectionManager` captures its config at
+  construction, so `ConnectionPool.sync` now tracks a per-service `configKey`
+  (url+token) and tears down + rebuilds a manager whose config changed, the same
+  delete-before-stop ordering used for removals to avoid re-entrant recursion.
+  *Test:* `probeService` unit tests (success, trailing-slash, 401, server
+  message, unreachable — vitest 43 green), Playwright e2e (`add-service.spec.ts`:
+  wrong token blocks the Add dialog then a correct one connects; a seeded
+  bad-token service edited to the right token rebuilds the manager and comes
+  online — suite 8 green), `tsc` + build clean. ✅
 
 Each phase ends with an atomic conventional commit and a PLAN.md update.
 

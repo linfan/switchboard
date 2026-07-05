@@ -1,6 +1,9 @@
+import { useState } from "react";
+
 import { pool } from "../net/pool";
 import { useStore } from "../store/store";
 import { convKey, type Conversation, type Service } from "../store/types";
+import { AddServiceDialog } from "./AddServiceDialog";
 import { ConfirmButton } from "./ConfirmButton";
 
 export function Sidebar({
@@ -64,6 +67,7 @@ function ServiceGroup({
   const select = useStore((s) => s.select);
   const removeService = useStore((s) => s.removeService);
   const status = rt?.status ?? "offline";
+  const [editing, setEditing] = useState(false);
 
   return (
     <section className="service">
@@ -71,6 +75,13 @@ function ServiceGroup({
         <span className={`dot dot--${status}`} title={status} />
         <span className="service__name">{service.name}</span>
         <span className="service__spacer" />
+        <button
+          className="icon-btn icon-btn--sm"
+          title="Edit service"
+          onClick={() => setEditing(true)}
+        >
+          ✎
+        </button>
         <button
           className="icon-btn icon-btn--sm"
           title="Reconnect now"
@@ -125,6 +136,12 @@ function ServiceGroup({
           })
         )}
       </ul>
+      {editing && (
+        <AddServiceDialog
+          service={service}
+          onClose={() => setEditing(false)}
+        />
+      )}
     </section>
   );
 }
