@@ -1,9 +1,19 @@
 import { useState } from "react";
 
 import { probeService } from "../net/rest";
+import { stripImplicitHttps, withImplicitHttps } from "../net/url";
 import { useStore } from "../store/store";
 import type { Service } from "../store/types";
 import { Modal } from "./Modal";
+
+/** True if `url` parses and has a host — used to gate the submit button. */
+function looksLikeUrl(url: string): boolean {
+  try {
+    return new URL(url).host !== "";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Add a new hosting service, or (when `service` is given) edit an existing one.
@@ -23,16 +33,18 @@ export function AddServiceDialog({
   const editing = service !== undefined;
 
   const [name, setName] = useState(service?.name ?? "");
-  const [url, setUrl] = useState(service?.url ?? "http://127.0.0.1:8787");
+  const [url, setUrl] = useState(
+    service ? stripImplicitHttps(service.url) : "",
+  );
   const [token, setToken] = useState(service?.token ?? "dev-token");
   const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState<string | undefined>();
 
-  const valid = name.trim() !== "" && /^https?:\/\//i.test(url.trim());
+  const valid = name.trim() !== "" && looksLikeUrl(withImplicitHttps(url));
 
   const submit = async () => {
     if (!valid || verifying) return;
-    const svc = { name: name.trim(), url: url.trim(), token };
+    const svc = { name: name.trim(), url: withImplicitHttps(url), token };
     setVerifying(true);
     setError(undefined);
     try {
@@ -77,12 +89,15 @@ export function AddServiceDialog({
         />
       </label>
       <label className="field">
-        <span>URL</span>
+        <span>Address</span>
         <input
           value={url}
-          placeholder="http://host:8787"
+          placeholder="30.233.64.152:8787"
           onChange={(e) => setUrl(e.target.value)}
         />
+        <small className="hint hint--muted">
+          Uses https:// — type http:// only for a local server without TLS.
+        </small>
       </label>
       <label className="field">
         <span>Token</span>

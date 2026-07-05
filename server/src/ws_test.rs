@@ -35,6 +35,7 @@ async fn start_server() -> (SocketAddr, Arc<AppState>) {
             db_path: db.to_string_lossy().into(),
             service_name: "test-host".into(),
             agent_permission_mode: "default".into(),
+            tls: None,
         },
         store,
         tasks,

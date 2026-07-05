@@ -11,10 +11,12 @@ mod state;
 mod store;
 mod task;
 mod terminal;
+mod tls;
 mod ws;
 #[cfg(test)]
 mod ws_test;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
@@ -43,8 +45,28 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let app = http::router(state.clone());
-    let listener = TcpListener::bind(&config.addr).await?;
-    tracing::info!(addr = %config.addr, "listening");
-    axum::serve(listener, app).await?;
+
+    match &config.tls {
+        Some(tls_cfg) => {
+            // rustls 0.23 needs a process-wide crypto provider chosen explicitly.
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .ok();
+            let sans = tls::ensure_cert(tls_cfg)?;
+            let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(
+                std::sync::Arc::new(tls::server_config(tls_cfg)?),
+            );
+            let addr: SocketAddr = config.addr.parse()?;
+            tracing::info!(addr = %config.addr, cert = %tls_cfg.cert_path, sans = ?sans, "listening (https)");
+            axum_server::bind_rustls(addr, rustls_config)
+                .serve(app.into_make_service())
+                .await?;
+        }
+        None => {
+            let listener = TcpListener::bind(&config.addr).await?;
+            tracing::info!(addr = %config.addr, "listening (http)");
+            axum::serve(listener, app).await?;
+        }
+    }
     Ok(())
 }

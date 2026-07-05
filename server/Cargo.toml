@@ -21,6 +21,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
+time = { version = "0.3", default-features = false, features = ["std"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }

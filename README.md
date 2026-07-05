@@ -133,19 +133,62 @@ screen for snapshots. Adding a new CLI agent is one registry entry in
   the desktop shell; the web client builds without them.
 
 ## Quick start
+
+The server speaks **HTTPS by default — even on localhost** (the macOS client's
+WebView blocks cleartext to anything but `localhost`, so a remote host must be
+HTTPS anyway). On first run the server generates a self-signed certificate; the
+client just needs to trust it once per machine.
+
 ```bash
 make setup                  # install Rust + client + e2e deps
-make run-server             # start a hosting service on 127.0.0.1:8787
+make run-server             # start a hosting service (https) on 127.0.0.1:8787
+```
+
+On first start the server writes `server/data/switchboard-cert.pem` (+ key). The
+log line `listening (https) … sans=[…]` shows the addresses the cert is valid
+for. Trust that cert on the client machine (once):
+
+```bash
+# per-user trust; no sudo needed
+security add-trusted-cert -r trustRoot \
+  -k ~/Library/Keychains/login.keychain-db \
+  server/data/switchboard-cert.pem
+```
+
+```bash
 # in another terminal:
 make run-client             # launch the desktop client (Tauri dev)
 ```
-In the client: **+svc** → name it, URL `http://127.0.0.1:8787`, token
-`dev-token` → **+task** → pick the service + agent tool → **Create**. Click the
-task to open its live terminal and type straight into the agent. Use the ↻ button
-to reconnect a service, and **Terminate** to stop a task.
+
+In the client: **+svc** → name it, address `127.0.0.1:8787` (no scheme — HTTPS is
+assumed), token `dev-token` → **+task** → pick the service + agent tool →
+**Create**. Click the task to open its live terminal and type straight into the
+agent. Use the ↻ button to reconnect a service, and **Terminate** to stop a task.
+
+### Connecting to a remote host
+
+Start the server so its certificate covers the address the client will dial
+(pass the public IP/hostname as a SAN), and bind all interfaces:
+
+```bash
+SWITCHBOARD_ADDR=0.0.0.0:8787 \
+SWITCHBOARD_TLS_SAN=203.0.113.10 \
+SWITCHBOARD_TOKEN='choose-a-strong-token' \
+  cargo run -p switchboard-server --release
+```
+
+Copy `server/data/switchboard-cert.pem` to each client machine and trust it with
+the `security add-trusted-cert` command above, then add the service with address
+`203.0.113.10:8787`. Ensure the host firewall / cloud security group allows
+inbound TCP on the port.
 
 Prefer the browser during development? `cd client && npm run dev` serves the same
-UI at http://localhost:5173.
+UI at http://localhost:5173 — note it will connect to the server over HTTPS, so
+the local cert must be trusted (browsers on macOS read the system keychain).
+
+> Running plain HTTP instead (e.g. behind your own TLS proxy): set
+> `SWITCHBOARD_TLS=0` on the server and enter the address as
+> `http://127.0.0.1:8787` in the dialog.
 
 ## Configuration
 
@@ -158,10 +201,22 @@ Server (environment variables):
 | `SWITCHBOARD_DB` | `server/data/switchboard.db` | SQLite path |
 | `SWITCHBOARD_NAME` | host name | Service display name |
 | `SWITCHBOARD_PERMISSION_MODE` | `default` | Passed to the agent's `--permission-mode` |
+| `SWITCHBOARD_TLS` | `1` (on) | HTTPS/WSS; set `0` to serve plain HTTP |
+| `SWITCHBOARD_TLS_CERT` | `server/data/switchboard-cert.pem` | PEM cert path (auto-generated if missing) |
+| `SWITCHBOARD_TLS_KEY` | `server/data/switchboard-key.pem` | PEM key path (auto-generated if missing) |
+| `SWITCHBOARD_TLS_SAN` | — | Extra SANs (comma-separated IPs/hostnames) for the generated cert |
 
 Auth: REST uses `Authorization: Bearer <token>`; the WebSocket uses
-`?token=<token>` (webviews can't set custom WS headers). Use `wss://` behind a
-TLS-terminating reverse proxy for remote hosts.
+`?token=<token>` (webviews can't set custom WS headers).
+
+TLS: HTTPS is on by default. When the cert/key files are absent the server
+generates a self-signed, ATS-compliant certificate (ECDSA P-256, ~13-month
+validity) whose SANs include `localhost`, the loopback and primary interface
+addresses, and any `SWITCHBOARD_TLS_SAN` entries — so add the public IP/hostname
+there for a remote host. The cert must be trusted on each client machine (see
+[Quick start](#quick-start)); regenerate it by deleting the two `.pem` files and
+restarting. To terminate TLS yourself (reverse proxy, real CA cert), set
+`SWITCHBOARD_TLS=0` and run the proxy in front.
 
 ## Testing
 ```bash

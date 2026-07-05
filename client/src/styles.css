@@ -336,6 +336,9 @@ body {
 .hint--error {
   color: #f85149;
 }
+.hint--muted {
+  color: var(--fg-dim);
+}
 
 /* --- field row (input + adjacent button) --- */
 .field__row {
