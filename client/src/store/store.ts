@@ -11,6 +11,7 @@ import {
   type ServiceRuntime,
   type TaskInfo,
   type TaskStatus,
+  type Workspace,
 } from "./types";
 
 const DEFAULT_RUNTIME: ServiceRuntime = { status: "offline", attempt: 0 };
@@ -18,6 +19,20 @@ const DEFAULT_RUNTIME: ServiceRuntime = { status: "offline", attempt: 0 };
 export interface AppState {
   /** Registered services (persisted). */
   services: Service[];
+  /** Work folders grouped under services (persisted). */
+  workspaces: Workspace[];
+  /** Which workspace a task belongs to, keyed by `serviceId::taskId` (persisted). */
+  taskWorkspace: Record<string, string>;
+  /** Local task-title overrides, keyed by `serviceId::taskId` (persisted). */
+  titles: Record<string, string>;
+  /**
+   * Per-service FIFO queue of workspace ids awaiting a `task_created` to attach
+   * to. In-memory only: it briefly holds the workspace a create was launched
+   * from so the resulting task can be attributed to it.
+   */
+  pendingWorkspace: Record<string, string[]>;
+  /** Whether the left control panel is collapsed (persisted). */
+  sidebarCollapsed: boolean;
   /** Per-service live connection state (in-memory). */
   runtime: Record<string, ServiceRuntime>;
   /** Conversations keyed by `serviceId::taskId`. */
@@ -49,6 +64,20 @@ export interface AppState {
   /** Clear the transient task-creation error. */
   clearCreateError: () => void;
 
+  // --- workspace management -----------------------------------------------
+  addWorkspace: (ws: Omit<Workspace, "id"> & { id?: string }) => string;
+  updateWorkspace: (id: string, patch: Partial<Omit<Workspace, "id">>) => void;
+  /** Remove a workspace and forget its task mappings/titles (does not touch the server). */
+  removeWorkspace: (id: string) => void;
+  /** Queue a workspace to receive the next `task_created` on a service. */
+  enqueuePendingWorkspace: (serviceId: string, workspaceId: string) => void;
+  /** Set (or clear, when blank) a local title override for a task. */
+  setTaskTitle: (serviceId: string, taskId: string, title: string) => void;
+
+  // --- layout --------------------------------------------------------------
+  setSidebarCollapsed: (collapsed: boolean) => void;
+  toggleSidebar: () => void;
+
   // --- sync application ----------------------------------------------------
   /** Apply one server (control-plane) message for a given service. */
   applyServerMsg: (serviceId: string, msg: ServerMsg) => void;
@@ -73,6 +102,11 @@ export const useStore = create<AppState>()(
   persist(
     (set, get) => ({
       services: [],
+      workspaces: [],
+      taskWorkspace: {},
+      titles: {},
+      pendingWorkspace: {},
+      sidebarCollapsed: false,
       runtime: {},
       conversations: {},
       cursors: {},
@@ -99,21 +133,34 @@ export const useStore = create<AppState>()(
       removeService: (id) =>
         set((s) => {
           const services = s.services.filter((sv) => sv.id !== id);
+          const workspaces = s.workspaces.filter((w) => w.serviceId !== id);
           const runtime = { ...s.runtime };
           delete runtime[id];
           const prefix = `${id}::`;
-          const conversations = Object.fromEntries(
-            Object.entries(s.conversations).filter(
-              ([k]) => !k.startsWith(prefix),
-            ),
-          );
-          const cursors = Object.fromEntries(
-            Object.entries(s.cursors).filter(([k]) => !k.startsWith(prefix)),
-          );
+          const dropPrefixed = <V>(m: Record<string, V>) =>
+            Object.fromEntries(
+              Object.entries(m).filter(([k]) => !k.startsWith(prefix)),
+            );
+          const conversations = dropPrefixed(s.conversations);
+          const cursors = dropPrefixed(s.cursors);
+          const taskWorkspace = dropPrefixed(s.taskWorkspace ?? {});
+          const titles = dropPrefixed(s.titles ?? {});
+          const pendingWorkspace = { ...(s.pendingWorkspace ?? {}) };
+          delete pendingWorkspace[id];
           const selectedKey = s.selectedKey?.startsWith(prefix)
             ? undefined
             : s.selectedKey;
-          return { services, runtime, conversations, cursors, selectedKey };
+          return {
+            services,
+            workspaces,
+            runtime,
+            conversations,
+            cursors,
+            taskWorkspace,
+            titles,
+            pendingWorkspace,
+            selectedKey,
+          };
         }),
 
       setRuntime: (id, patch) =>
@@ -134,6 +181,62 @@ export const useStore = create<AppState>()(
         }),
 
       clearCreateError: () => set({ createError: undefined }),
+
+      addWorkspace: (ws) => {
+        const id = ws.id ?? newId();
+        set((s) => ({ workspaces: [...s.workspaces, { ...ws, id }] }));
+        return id;
+      },
+
+      updateWorkspace: (id, patch) =>
+        set((s) => ({
+          workspaces: s.workspaces.map((w) =>
+            w.id === id ? { ...w, ...patch } : w,
+          ),
+        })),
+
+      removeWorkspace: (id) =>
+        set((s) => {
+          const workspaces = s.workspaces.filter((w) => w.id !== id);
+          const dropByWs = <V>(m: Record<string, V>) =>
+            Object.fromEntries(
+              Object.entries(m).filter(([k]) => s.taskWorkspace[k] !== id),
+            );
+          // Titles are keyed the same way as taskWorkspace, so drop titles for
+          // tasks that were in this workspace before we forget their mapping.
+          const titles = dropByWs(s.titles ?? {});
+          const taskWorkspace = Object.fromEntries(
+            Object.entries(s.taskWorkspace ?? {}).filter(([, v]) => v !== id),
+          );
+          return { workspaces, taskWorkspace, titles };
+        }),
+
+      enqueuePendingWorkspace: (serviceId, workspaceId) =>
+        set((s) => ({
+          pendingWorkspace: {
+            ...s.pendingWorkspace,
+            [serviceId]: [...(s.pendingWorkspace[serviceId] ?? []), workspaceId],
+          },
+        })),
+
+      setTaskTitle: (serviceId, taskId, title) =>
+        set((s) => {
+          const key = convKey(serviceId, taskId);
+          const titles = { ...(s.titles ?? {}) };
+          const value = title.trim();
+          const conv = s.conversations[key];
+          // Clearing the override, or setting it to the server's own title, is a
+          // no-op override — drop the key so display falls back to task.title.
+          if (value === "" || value === conv?.task.title) delete titles[key];
+          else titles[key] = value;
+          return { titles };
+        }),
+
+      setSidebarCollapsed: (collapsed) =>
+        set({ sidebarCollapsed: collapsed }),
+
+      toggleSidebar: () =>
+        set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 
       applyServerMsg: (serviceId, msg) =>
         set((s) => applyMsg(s, serviceId, msg)),
@@ -165,7 +268,11 @@ export const useStore = create<AppState>()(
       storage: createJSONStorage(() => persistStorage),
       partialize: (s) => ({
         services: s.services,
+        workspaces: s.workspaces,
+        taskWorkspace: s.taskWorkspace,
+        titles: s.titles,
         recentTools: s.recentTools,
+        sidebarCollapsed: s.sidebarCollapsed,
       }),
     },
   ),
@@ -223,8 +330,18 @@ export function applyMsg(
       };
     }
     case "task_created": {
+      const conversations = ensureConv(s, serviceId, msg.task);
+      // Attribute this task to the workspace its create was launched from, if
+      // one is queued for this service. Tasks with no queued workspace (e.g.
+      // created by another client) stay unmapped and render under "Ungrouped".
+      const queue = s.pendingWorkspace[serviceId] ?? [];
+      if (queue.length === 0) return { conversations };
+      const [workspaceId, ...rest] = queue;
+      const key = convKey(serviceId, msg.task.id);
       return {
-        conversations: ensureConv(s, serviceId, msg.task),
+        conversations,
+        taskWorkspace: { ...s.taskWorkspace, [key]: workspaceId },
+        pendingWorkspace: { ...s.pendingWorkspace, [serviceId]: rest },
       };
     }
     case "task_state": {
@@ -233,16 +350,32 @@ export function applyMsg(
     }
     case "task_deleted": {
       const key = convKey(serviceId, msg.task_id);
-      if (!(key in s.conversations) && !(key in s.cursors)) return {};
+      const known =
+        key in s.conversations ||
+        key in s.cursors ||
+        key in (s.taskWorkspace ?? {}) ||
+        key in (s.titles ?? {});
+      if (!known) return {};
       const conversations = { ...s.conversations };
       delete conversations[key];
       const cursors = { ...s.cursors };
       delete cursors[key];
+      const taskWorkspace = { ...(s.taskWorkspace ?? {}) };
+      delete taskWorkspace[key];
+      const titles = { ...(s.titles ?? {}) };
+      delete titles[key];
       const selectedKey = s.selectedKey === key ? undefined : s.selectedKey;
-      return { conversations, cursors, selectedKey };
+      return { conversations, cursors, taskWorkspace, titles, selectedKey };
     }
     case "error": {
-      if (msg.code === "create_failed") return { createError: msg.message };
+      if (msg.code === "create_failed") {
+        // The queued workspace for this create will never get a task_created;
+        // drop it so it doesn't steal a later successful create on this service.
+        return {
+          createError: msg.message,
+          pendingWorkspace: { ...s.pendingWorkspace, [serviceId]: [] },
+        };
+      }
       return {};
     }
     case "replay_done":

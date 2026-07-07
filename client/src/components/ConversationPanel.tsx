@@ -8,6 +8,9 @@ export function ConversationPanel() {
   const conv = useStore((s) =>
     s.selectedKey ? s.conversations[s.selectedKey] : undefined,
   );
+  const titleOverride = useStore((s) =>
+    s.selectedKey ? s.titles[s.selectedKey] : undefined,
+  );
 
   if (!selectedKey || !conv) {
     return (
@@ -24,7 +27,7 @@ export function ConversationPanel() {
   return (
     <main className="panel">
       <header className="panel__header">
-        <span className="panel__title">{conv.task.title}</span>
+        <span className="panel__title">{titleOverride ?? conv.task.title}</span>
         <span className={`badge badge--${conv.task.status.state}`}>
           {conv.task.status.state}
         </span>

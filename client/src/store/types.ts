@@ -19,6 +19,23 @@ export interface Service {
   token: string;
 }
 
+/**
+ * A work folder on a service. Purely a client-side grouping construct: the
+ * server knows nothing about workspaces — it just spawns tasks in a `cwd`. A
+ * workspace captures that `cwd` (plus a friendly name) once so tasks created
+ * under it inherit the folder without re-prompting.
+ */
+export interface Workspace {
+  /** Stable client-generated id. */
+  id: string;
+  /** Owning service. */
+  serviceId: string;
+  /** User-facing label (editable). */
+  name: string;
+  /** Working directory on the hosting machine tasks inherit. */
+  cwd: string;
+}
+
 /** Live connection state for a service (not persisted). */
 export interface ServiceRuntime {
   status: ConnStatus;

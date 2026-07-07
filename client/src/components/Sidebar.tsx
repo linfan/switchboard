@@ -2,35 +2,41 @@ import { useState } from "react";
 
 import { pool } from "../net/pool";
 import { useStore } from "../store/store";
-import { convKey, type Conversation, type Service } from "../store/types";
+import {
+  convKey,
+  type Conversation,
+  type Service,
+  type Workspace,
+} from "../store/types";
 import { AddServiceDialog } from "./AddServiceDialog";
+import { AddWorkspaceDialog } from "./AddWorkspaceDialog";
 import { ConfirmButton } from "./ConfirmButton";
+import { InlineEdit } from "./InlineEdit";
+import { NewTaskDialog } from "./NewTaskDialog";
 
-export function Sidebar({
-  onAddService,
-  onNewTask,
-}: {
-  onAddService: () => void;
-  onNewTask: () => void;
-}) {
+export function Sidebar() {
   const services = useStore((s) => s.services);
-  const conversations = useStore((s) => s.conversations);
+  const toggleSidebar = useStore((s) => s.toggleSidebar);
+  const [addServiceOpen, setAddServiceOpen] = useState(false);
 
   return (
     <aside className="sidebar">
       <header className="sidebar__header">
+        <button
+          className="icon-btn icon-btn--sm"
+          title="Collapse panel"
+          onClick={toggleSidebar}
+        >
+          «
+        </button>
         <span className="sidebar__title">Switchboard</span>
         <div className="sidebar__actions">
-          <button className="icon-btn" title="Add service" onClick={onAddService}>
-            +svc
-          </button>
           <button
             className="icon-btn"
-            title="New task"
-            onClick={onNewTask}
-            disabled={services.length === 0}
+            title="Add service"
+            onClick={() => setAddServiceOpen(true)}
           >
-            +task
+            +svc
           </button>
         </div>
       </header>
@@ -40,34 +46,39 @@ export function Sidebar({
             No hosting services yet. Click <b>+svc</b> to add one.
           </p>
         ) : (
-          services.map((svc) => (
-            <ServiceGroup
-              key={svc.id}
-              service={svc}
-              conversations={Object.values(conversations).filter(
-                (c) => c.serviceId === svc.id,
-              )}
-            />
-          ))
+          services.map((svc) => <ServiceGroup key={svc.id} service={svc} />)
         )}
       </div>
+      {addServiceOpen && (
+        <AddServiceDialog onClose={() => setAddServiceOpen(false)} />
+      )}
     </aside>
   );
 }
 
-function ServiceGroup({
-  service,
-  conversations,
-}: {
-  service: Service;
-  conversations: Conversation[];
-}) {
+function ServiceGroup({ service }: { service: Service }) {
   const rt = useStore((s) => s.runtime[service.id]);
-  const selectedKey = useStore((s) => s.selectedKey);
-  const select = useStore((s) => s.select);
+  const workspaces = useStore((s) => s.workspaces);
+  const conversations = useStore((s) => s.conversations);
+  const taskWorkspace = useStore((s) => s.taskWorkspace);
   const removeService = useStore((s) => s.removeService);
   const status = rt?.status ?? "offline";
   const [editing, setEditing] = useState(false);
+  const [addingWorkspace, setAddingWorkspace] = useState(false);
+
+  const serviceWorkspaces = workspaces.filter(
+    (w) => w.serviceId === service.id,
+  );
+  const wsIds = new Set(serviceWorkspaces.map((w) => w.id));
+
+  const convs = Object.values(conversations).filter(
+    (c) => c.serviceId === service.id,
+  );
+  // Tasks whose mapping is missing or points to a removed workspace.
+  const ungrouped = convs.filter((c) => {
+    const ws = taskWorkspace[convKey(service.id, c.task.id)];
+    return !ws || !wsIds.has(ws);
+  });
 
   return (
     <section className="service">
@@ -75,6 +86,13 @@ function ServiceGroup({
         <span className={`dot dot--${status}`} title={status} />
         <span className="service__name">{service.name}</span>
         <span className="service__spacer" />
+        <button
+          className="icon-btn icon-btn--sm"
+          title="Add workspace"
+          onClick={() => setAddingWorkspace(true)}
+        >
+          +ws
+        </button>
         <button
           className="icon-btn icon-btn--sm"
           title="Edit service"
@@ -104,45 +122,178 @@ function ServiceGroup({
           {statusLine(status, rt?.lastError, rt?.nextRetryAt)}
         </div>
       )}
-      <ul className="conv-list">
-        {conversations.length === 0 ? (
-          <li className="empty empty--sm">No conversations</li>
-        ) : (
-          conversations.map((c) => {
-            const key = convKey(service.id, c.task.id);
-            return (
-              <li
-                key={key}
-                className={`conv ${selectedKey === key ? "conv--active" : ""}`}
-                onClick={() => select(key)}
-              >
-                <span className="conv__title">{c.task.title}</span>
-                <span className="conv__meta">
-                  <span className={`badge badge--${c.task.status.state}`}>
-                    {c.task.status.state}
-                  </span>
-                  <ConfirmButton
-                    className="icon-btn icon-btn--sm conv__del"
-                    armedClassName="icon-btn--danger"
-                    title="Delete task"
-                    armedTitle="Click again to delete this task and its history"
-                    onConfirm={() => pool.deleteTask(service.id, c.task.id)}
-                  >
-                    ×
-                  </ConfirmButton>
-                </span>
-              </li>
-            );
-          })
-        )}
-      </ul>
+
+      {serviceWorkspaces.length === 0 && ungrouped.length === 0 ? (
+        <p className="empty empty--sm">
+          No workspaces. Click <b>+ws</b> to add one.
+        </p>
+      ) : (
+        <>
+          {serviceWorkspaces.map((ws) => (
+            <WorkspaceGroup
+              key={ws.id}
+              workspace={ws}
+              online={status === "online"}
+              conversations={convs.filter(
+                (c) =>
+                  taskWorkspace[convKey(service.id, c.task.id)] === ws.id,
+              )}
+            />
+          ))}
+          {ungrouped.length > 0 && (
+            <UngroupedGroup serviceId={service.id} conversations={ungrouped} />
+          )}
+        </>
+      )}
+
       {editing && (
-        <AddServiceDialog
+        <AddServiceDialog service={service} onClose={() => setEditing(false)} />
+      )}
+      {addingWorkspace && (
+        <AddWorkspaceDialog
           service={service}
-          onClose={() => setEditing(false)}
+          onClose={() => setAddingWorkspace(false)}
         />
       )}
     </section>
+  );
+}
+
+function WorkspaceGroup({
+  workspace,
+  conversations,
+  online,
+}: {
+  workspace: Workspace;
+  conversations: Conversation[];
+  online: boolean;
+}) {
+  const updateWorkspace = useStore((s) => s.updateWorkspace);
+  const removeWorkspace = useStore((s) => s.removeWorkspace);
+  const [addingTask, setAddingTask] = useState(false);
+
+  const remove = () => {
+    // "Delete its tasks" model: drop every task on the server first, then
+    // forget the workspace (its mappings get cleaned as task_deleted arrives,
+    // and removeWorkspace forgets any that didn't).
+    for (const c of conversations) {
+      pool.deleteTask(workspace.serviceId, c.task.id);
+    }
+    removeWorkspace(workspace.id);
+  };
+
+  return (
+    <section className="workspace">
+      <div className="workspace__head">
+        <span className="workspace__icon">📁</span>
+        <InlineEdit
+          className="workspace__name"
+          value={workspace.name}
+          title={workspace.cwd}
+          ariaLabel="Workspace name"
+          onCommit={(name) => updateWorkspace(workspace.id, { name })}
+        />
+        <span className="service__spacer" />
+        <button
+          className="icon-btn icon-btn--sm"
+          title="New task"
+          disabled={!online}
+          onClick={() => setAddingTask(true)}
+        >
+          +task
+        </button>
+        <ConfirmButton
+          className="icon-btn icon-btn--sm"
+          armedClassName="icon-btn--danger"
+          title="Remove workspace"
+          armedTitle="Click again to remove this workspace and delete its tasks"
+          onConfirm={remove}
+        >
+          ×
+        </ConfirmButton>
+      </div>
+      <TaskList serviceId={workspace.serviceId} conversations={conversations} />
+      {addingTask && (
+        <NewTaskDialog
+          serviceId={workspace.serviceId}
+          workspaceId={workspace.id}
+          cwd={workspace.cwd}
+          onClose={() => setAddingTask(false)}
+        />
+      )}
+    </section>
+  );
+}
+
+function UngroupedGroup({
+  serviceId,
+  conversations,
+}: {
+  serviceId: string;
+  conversations: Conversation[];
+}) {
+  return (
+    <section className="workspace workspace--ungrouped">
+      <div className="workspace__head">
+        <span className="workspace__icon">🗂️</span>
+        <span className="workspace__name">Ungrouped</span>
+      </div>
+      <TaskList serviceId={serviceId} conversations={conversations} />
+    </section>
+  );
+}
+
+function TaskList({
+  serviceId,
+  conversations,
+}: {
+  serviceId: string;
+  conversations: Conversation[];
+}) {
+  const selectedKey = useStore((s) => s.selectedKey);
+  const titles = useStore((s) => s.titles);
+  const select = useStore((s) => s.select);
+  const setTaskTitle = useStore((s) => s.setTaskTitle);
+
+  if (conversations.length === 0) {
+    return <ul className="conv-list">{null}</ul>;
+  }
+
+  return (
+    <ul className="conv-list">
+      {conversations.map((c) => {
+        const key = convKey(serviceId, c.task.id);
+        const displayTitle = titles[key] ?? c.task.title;
+        return (
+          <li
+            key={key}
+            className={`conv ${selectedKey === key ? "conv--active" : ""}`}
+            onClick={() => select(key)}
+          >
+            <InlineEdit
+              className="conv__title"
+              value={displayTitle}
+              ariaLabel="Task title"
+              onCommit={(title) => setTaskTitle(serviceId, c.task.id, title)}
+            />
+            <span className="conv__meta">
+              <span className={`badge badge--${c.task.status.state}`}>
+                {c.task.status.state}
+              </span>
+              <ConfirmButton
+                className="icon-btn icon-btn--sm conv__del"
+                armedClassName="icon-btn--danger"
+                title="Delete task"
+                armedTitle="Click again to delete this task and its history"
+                onConfirm={() => pool.deleteTask(serviceId, c.task.id)}
+              >
+                ×
+              </ConfirmButton>
+            </span>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 

@@ -1,14 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
-import { AddServiceDialog } from "./components/AddServiceDialog";
 import { ConversationPanel } from "./components/ConversationPanel";
-import { NewTaskDialog } from "./components/NewTaskDialog";
 import { Sidebar } from "./components/Sidebar";
 import { pool } from "./net/pool";
+import { useStore } from "./store/store";
 
 export default function App() {
-  const [addOpen, setAddOpen] = useState(false);
-  const [taskOpen, setTaskOpen] = useState(false);
+  const collapsed = useStore((s) => s.sidebarCollapsed);
+  const setCollapsed = useStore((s) => s.setSidebarCollapsed);
 
   // Own the connection pool for the app's lifetime.
   useEffect(() => {
@@ -17,14 +16,21 @@ export default function App() {
   }, []);
 
   return (
-    <div className="app">
-      <Sidebar
-        onAddService={() => setAddOpen(true)}
-        onNewTask={() => setTaskOpen(true)}
-      />
+    <div className={`app ${collapsed ? "app--collapsed" : ""}`}>
+      {collapsed ? (
+        <div className="sidebar-rail">
+          <button
+            className="icon-btn icon-btn--sm"
+            title="Expand panel"
+            onClick={() => setCollapsed(false)}
+          >
+            »
+          </button>
+        </div>
+      ) : (
+        <Sidebar />
+      )}
       <ConversationPanel />
-      {addOpen && <AddServiceDialog onClose={() => setAddOpen(false)} />}
-      {taskOpen && <NewTaskDialog onClose={() => setTaskOpen(false)} />}
     </div>
   );
 }
