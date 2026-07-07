@@ -27,6 +27,10 @@ interface Entry {
   /** Detached host element; re-parented into the panel by TerminalView. */
   el: HTMLDivElement;
   opened: boolean;
+  /** Viewport is pinned to the last line, so new output keeps auto-scrolling. */
+  follow: boolean;
+  serviceId: string;
+  taskId: string;
 }
 
 const entries = new Map<string, Entry>();
@@ -63,7 +67,15 @@ function ensure(serviceId: string, taskId: string): Entry {
   const el = document.createElement("div");
   el.className = "term-host";
 
-  e = { term, fit, el, opened: false };
+  e = { term, fit, el, opened: false, follow: true, serviceId, taskId };
+  const entry = e;
+  // Track whether the viewport is riding the bottom. xterm only auto-scrolls on
+  // write while the user is already at the bottom, so we mirror that state here
+  // and re-assert it after writes/refits (a reflow can nudge ydisp off ybase).
+  term.onScroll(() => {
+    const b = term.buffer.active;
+    entry.follow = b.viewportY >= b.baseY;
+  });
   entries.set(key, e);
   return e;
 }
@@ -72,11 +84,21 @@ function ensure(serviceId: string, taskId: string): Entry {
 export function write(serviceId: string, taskId: string, frame: Frame): void {
   const e = ensure(serviceId, taskId);
   if (frame.kind === "snapshot") {
-    // A snapshot is an authoritative full-screen redraw: clear, then paint.
+    // A snapshot is an authoritative full-screen redraw: clear, then paint. It
+    // reconstructs the *current* screen, so always land the viewport on it.
     e.term.reset();
-    e.term.write(frame.data);
+    e.term.write(frame.data, () => {
+      e.follow = true;
+      e.term.scrollToBottom();
+    });
   } else if (frame.kind === "output") {
-    e.term.write(frame.data);
+    // Pin to the bottom after the chunk is parsed if we were following it. This
+    // keeps streaming output (Qoder-style downward growth) glued to the latest
+    // line instead of drifting up when a write races with a reflow.
+    const follow = e.follow;
+    e.term.write(frame.data, () => {
+      if (follow) e.term.scrollToBottom();
+    });
   }
 }
 
@@ -92,15 +114,28 @@ export function attach(
     e.term.open(e.el);
     e.opened = true;
   }
-  // Defer the fit until the host has a measured size.
-  requestAnimationFrame(() => {
+  const settle = () => {
     try {
       e.fit.fit();
     } catch {
       // ignore transient zero-size measurements
     }
+    // Repaint every row: output written while this terminal was detached (a
+    // background task) can leave the renderer's grid stale, drawing new content
+    // over old on re-attach. A full refresh clears that; a plain fit does not
+    // when the geometry is unchanged.
+    e.term.refresh(0, e.term.rows - 1);
+    if (e.follow) e.term.scrollToBottom();
+  };
+  // Defer the first fit until the host has a measured size.
+  requestAnimationFrame(() => {
+    settle();
     e.term.focus();
   });
+  // Re-fit once webfonts finish loading. The first fit can measure the fallback
+  // font's cell size and mis-compute rows, clipping or overlapping the last
+  // line until something forces a resize.
+  document.fonts?.ready?.then(settle).catch(() => {});
 }
 
 /** Detach the terminal's element without destroying it (scrollback survives). */
@@ -117,6 +152,25 @@ export function refit(serviceId: string, taskId: string): void {
     e.fit.fit();
   } catch {
     // ignore
+  }
+  // fit() reflows the buffer, which can leave the viewport above the last line;
+  // re-pin so a resize never scrolls live output out of view.
+  if (e.follow) e.term.scrollToBottom();
+}
+
+/**
+ * Re-send the live geometry of every on-screen terminal of a service. Call this
+ * right after a (re)connect: a window resize that happened while the socket was
+ * down updated the local xterm but never reached the server, so its PTY and the
+ * snapshot it renders are stale. Replaying the current size makes the server
+ * SIGWINCH and redraw at the client's real dimensions. Only mounted+fitted
+ * terminals are reported — a detached entry may still hold the 80×24 default and
+ * would otherwise shrink the server's PTY.
+ */
+export function resync(serviceId: string): void {
+  for (const e of entries.values()) {
+    if (e.serviceId !== serviceId || !e.opened || !e.el.isConnected) continue;
+    resizeSink?.(e.serviceId, e.taskId, e.term.cols, e.term.rows);
   }
 }
 

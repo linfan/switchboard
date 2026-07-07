@@ -1,6 +1,22 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { HTTP, TOKEN } from "./constants";
+
+// Create a workspace (name + a real server folder) so tasks have a home. Tasks
+// inherit its folder, so the New-task dialog no longer prompts for one.
+async function addWorkspace(page: Page, name: string) {
+  await page.getByTitle("Add workspace").click();
+  const dialog = page.getByRole("dialog", { name: "Add workspace" });
+  await dialog.getByPlaceholder("my-project").fill(name);
+  await dialog.getByRole("button", { name: "Browse…" }).click();
+  const picker = page.getByRole("dialog", { name: "Choose working directory" });
+  await expect(picker.locator(".fs-picker__path")).not.toHaveText("…", {
+    timeout: 15000,
+  });
+  await picker.getByRole("button", { name: "Select this folder" }).click();
+  await dialog.getByRole("button", { name: "Add" }).click();
+  await expect(dialog).toBeHidden();
+}
 
 // Seed a registered service into localStorage before the app boots, so the
 // connection pool dials our live hosting service on load. Mirrors the zustand
@@ -35,9 +51,10 @@ test("renders a PTY terminal, streams output, echoes input, and survives reconne
   // The pool connects; the service dot goes online.
   await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
 
-  // Create a task via the New Task dialog (tool defaults to first available).
+  // Create a task under a workspace (tool defaults to first available).
+  await addWorkspace(page, "proj");
   await page.getByTitle("New task").click();
-  await expect(page.getByText("New task")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "New task" })).toBeVisible();
   await page.getByRole("button", { name: "Create" }).click();
 
   // A conversation appears in the sidebar; open it.
@@ -68,10 +85,15 @@ test("terminal screen content is restored after a full client reload", async ({
   await page.goto("/");
   await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
 
-  // Create a task and drive some output into its terminal.
+  // Create a task under a workspace and drive some output into its terminal.
+  // A unique title lets us re-select exactly this task after reload — the shared
+  // host DB accumulates tasks across tests, so `.conv first` isn't reliable.
+  await addWorkspace(page, "proj");
   await page.getByTitle("New task").click();
-  await page.getByRole("button", { name: "Create" }).click();
-  const conv = page.locator(".conv").first();
+  const dialog = page.getByRole("dialog", { name: "New task" });
+  await dialog.getByLabel("Title (optional)").fill("reload-task");
+  await dialog.getByRole("button", { name: "Create" }).click();
+  const conv = page.locator(".conv", { hasText: "reload-task" });
   await expect(conv).toBeVisible({ timeout: 15000 });
   await conv.click();
 
@@ -87,7 +109,7 @@ test("terminal screen content is restored after a full client reload", async ({
   // rather than coming back blank/garbled.
   await page.reload();
   await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
-  await page.locator(".conv").first().click();
+  await page.locator(".conv", { hasText: "reload-task" }).click();
   await expect(page.locator(".xterm-rows")).toContainText("reply:persist-me", {
     timeout: 15000,
   });

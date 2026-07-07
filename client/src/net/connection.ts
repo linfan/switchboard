@@ -71,6 +71,8 @@ export interface ConnectionDeps {
   onBinary: (bytes: Uint8Array) => void;
   /** Report a connection status transition. */
   onStatus: (status: ConnStatus, meta?: StatusMeta) => void;
+  /** Fired once per successful (re)connect, after Hello is sent. */
+  onReady?: () => void;
   wsFactory?: WebSocketFactory;
   now?: () => number;
   reconnect?: Partial<ReconnectOptions>;
@@ -241,6 +243,9 @@ export class ConnectionManager {
       cursors: this.d.getCursors(),
     });
     this.startHeartbeat();
+    // Let the app re-assert per-task state that must survive a drop (e.g. the
+    // terminal geometry, in case the window was resized while offline).
+    this.d.onReady?.();
   }
 
   private onData(data: unknown): void {

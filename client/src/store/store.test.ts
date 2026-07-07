@@ -10,6 +10,11 @@ function baseState(): AppState {
 beforeEach(() => {
   useStore.setState({
     services: [],
+    workspaces: [],
+    taskWorkspace: {},
+    titles: {},
+    pendingWorkspace: {},
+    sidebarCollapsed: false,
     runtime: {},
     conversations: {},
     cursors: {},
@@ -18,6 +23,20 @@ beforeEach(() => {
     createError: undefined,
   });
 });
+
+function seedTask(svc: string, id: string) {
+  useStore.getState().applyServerMsg(svc, {
+    type: "task_created",
+    task: {
+      id,
+      tool: "claude",
+      title: `T-${id}`,
+      status: { state: "running" },
+      created_at: 0,
+      last_seq: 0,
+    },
+  });
+}
 
 describe("recent tools", () => {
   it("prepends, dedupes, and caps at 5 per service", () => {
@@ -236,5 +255,102 @@ describe("removeService", () => {
 
     useStore.getState().removeService("s1");
     expect(useStore.getState().selectedKey).toBe(convKey("s2", "t2"));
+  });
+
+  it("removeService also drops that service's workspaces and mappings", () => {
+    const st = useStore.getState();
+    st.addService({ id: "s1", name: "S1", url: "http://a", token: "t" });
+    const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
+    st.enqueuePendingWorkspace("s1", ws);
+    seedTask("s1", "t1");
+    st.setTaskTitle("s1", "t1", "renamed");
+
+    useStore.getState().removeService("s1");
+
+    const s = useStore.getState();
+    expect(s.workspaces).toHaveLength(0);
+    expect(s.taskWorkspace[convKey("s1", "t1")]).toBeUndefined();
+    expect(s.titles[convKey("s1", "t1")]).toBeUndefined();
+    expect(s.pendingWorkspace["s1"]).toBeUndefined();
+  });
+});
+
+describe("workspaces", () => {
+  it("attributes a created task to the queued workspace and clears the queue", () => {
+    const st = useStore.getState();
+    const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
+    st.enqueuePendingWorkspace("s1", ws);
+    seedTask("s1", "t1");
+
+    const s = useStore.getState();
+    expect(s.taskWorkspace[convKey("s1", "t1")]).toBe(ws);
+    expect(s.pendingWorkspace["s1"]).toEqual([]);
+  });
+
+  it("leaves tasks unmapped when no workspace is queued (ungrouped)", () => {
+    seedTask("s1", "t1");
+    expect(useStore.getState().taskWorkspace[convKey("s1", "t1")]).toBeUndefined();
+  });
+
+  it("a failed create clears the pending queue so it can't steal a later task", () => {
+    const st = useStore.getState();
+    const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
+    st.enqueuePendingWorkspace("s1", ws);
+
+    st.applyServerMsg("s1", {
+      type: "error",
+      task_id: null,
+      code: "create_failed",
+      message: "nope",
+    });
+    expect(useStore.getState().pendingWorkspace["s1"]).toEqual([]);
+
+    // A later task (e.g. from another client) is not attributed to the workspace.
+    seedTask("s1", "t9");
+    expect(useStore.getState().taskWorkspace[convKey("s1", "t9")]).toBeUndefined();
+  });
+
+  it("removeWorkspace forgets its task mappings and titles but not the server task", () => {
+    const st = useStore.getState();
+    const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
+    st.enqueuePendingWorkspace("s1", ws);
+    seedTask("s1", "t1");
+    st.setTaskTitle("s1", "t1", "renamed");
+
+    useStore.getState().removeWorkspace(ws);
+
+    const s = useStore.getState();
+    expect(s.workspaces).toHaveLength(0);
+    expect(s.taskWorkspace[convKey("s1", "t1")]).toBeUndefined();
+    expect(s.titles[convKey("s1", "t1")]).toBeUndefined();
+    // The conversation itself survives (deletion is a separate server round-trip).
+    expect(s.conversations[convKey("s1", "t1")]).toBeTruthy();
+  });
+
+  it("setTaskTitle overrides, and blank/identical clears the override", () => {
+    const st = useStore.getState();
+    seedTask("s1", "t1");
+    st.setTaskTitle("s1", "t1", "custom");
+    expect(useStore.getState().titles[convKey("s1", "t1")]).toBe("custom");
+    st.setTaskTitle("s1", "t1", "   ");
+    expect(useStore.getState().titles[convKey("s1", "t1")]).toBeUndefined();
+    // Setting it back to the server title is a no-op override.
+    st.setTaskTitle("s1", "t1", "custom");
+    st.setTaskTitle("s1", "t1", "T-t1");
+    expect(useStore.getState().titles[convKey("s1", "t1")]).toBeUndefined();
+  });
+
+  it("task_deleted clears the workspace mapping and title override", () => {
+    const st = useStore.getState();
+    const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
+    st.enqueuePendingWorkspace("s1", ws);
+    seedTask("s1", "t1");
+    st.setTaskTitle("s1", "t1", "renamed");
+
+    st.applyServerMsg("s1", { type: "task_deleted", task_id: "t1" });
+
+    const s = useStore.getState();
+    expect(s.taskWorkspace[convKey("s1", "t1")]).toBeUndefined();
+    expect(s.titles[convKey("s1", "t1")]).toBeUndefined();
   });
 });
