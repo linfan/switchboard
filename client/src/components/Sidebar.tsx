@@ -14,6 +14,25 @@ import { ConfirmButton } from "./ConfirmButton";
 import { InlineEdit } from "./InlineEdit";
 import { NewTaskDialog } from "./NewTaskDialog";
 
+function FolderIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M1.75 4.25a1 1 0 0 1 1-1h3l1.25 1.5h6.25a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-10.5a1 1 0 0 1-1-1v-7.5Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function Sidebar() {
   const services = useStore((s) => s.services);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
@@ -185,7 +204,9 @@ function WorkspaceGroup({
   return (
     <section className="workspace">
       <div className="workspace__head">
-        <span className="workspace__icon">📁</span>
+        <span className="workspace__icon">
+          <FolderIcon />
+        </span>
         <InlineEdit
           className="workspace__name"
           value={workspace.name}

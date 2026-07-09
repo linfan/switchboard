@@ -25,22 +25,26 @@ body {
 }
 
 .app {
+  position: relative;
   display: grid;
   grid-template-columns: 260px 1fr;
   height: 100vh;
 }
 .app--collapsed {
-  grid-template-columns: 40px 1fr;
+  grid-template-columns: 1fr;
 }
 
-/* Thin rail shown when the sidebar is collapsed, so the terminal maximizes. */
-.sidebar-rail {
-  border-right: 1px solid var(--border);
-  background: var(--bg-alt);
-  display: flex;
-  justify-content: center;
-  padding: 12px 0;
-  overflow: hidden;
+/* When collapsed the whole sidebar reduces to a single button pinned to the
+   top-left corner, in the same spot the collapse button sits when expanded. */
+.sidebar-toggle {
+  position: absolute;
+  top: 12px;
+  left: 14px;
+  z-index: 20;
+}
+/* Keep the panel header content clear of the floating toggle. */
+.app--collapsed .panel__header {
+  padding-left: 44px;
 }
 
 /* --- sidebar --- */
@@ -238,7 +242,9 @@ body {
 }
 .workspace__icon {
   flex: none;
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--fg-dim);
 }
 .workspace__name {
   font-weight: 500;

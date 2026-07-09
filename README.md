@@ -241,6 +241,27 @@ make deploy-server     # stage the server binary in ./dist
 make package-client    # Tauri desktop bundles
 ```
 
+### App icon
+The icon is authored as SVG (`client/src-tauri/icons/icon.svg` for large sizes,
+`icon-small.svg` for ≤64px). After editing an SVG, regenerate the bundled PNGs
+and `.icns` (needs `iconutil`, macOS-only):
+```bash
+cd client/src-tauri/icons
+node render-icon.mjs                        # render 16–1024px PNGs from the SVGs
+cp 32.png 32x32.png                         # map to the names tauri.conf.json bundles
+cp 128.png 128x128.png
+cp 256.png 128x128@2x.png
+cp 1024.png icon.png
+ICONSET=switchboard.iconset; rm -rf "$ICONSET"; mkdir "$ICONSET"
+cp 16.png "$ICONSET/icon_16x16.png";      cp 32.png "$ICONSET/icon_16x16@2x.png"
+cp 32.png "$ICONSET/icon_32x32.png";      cp 64.png "$ICONSET/icon_32x32@2x.png"
+cp 128.png "$ICONSET/icon_128x128.png";   cp 256.png "$ICONSET/icon_128x128@2x.png"
+cp 256.png "$ICONSET/icon_256x256.png";   cp 512.png "$ICONSET/icon_256x256@2x.png"
+cp 512.png "$ICONSET/icon_512x512.png";   cp 1024.png "$ICONSET/icon_512x512@2x.png"
+iconutil -c icns "$ICONSET" -o icon.icns
+rm -rf "$ICONSET" 16.png 32.png 64.png 128.png 256.png 512.png 1024.png
+```
+
 ## Design rationale
 - **PTY over stream-json**: running each agent as a real interactive terminal
   means new CLIs work with zero adapter code and users answer trust/permission

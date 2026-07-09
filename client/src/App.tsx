@@ -18,15 +18,13 @@ export default function App() {
   return (
     <div className={`app ${collapsed ? "app--collapsed" : ""}`}>
       {collapsed ? (
-        <div className="sidebar-rail">
-          <button
-            className="icon-btn icon-btn--sm"
-            title="Expand panel"
-            onClick={() => setCollapsed(false)}
-          >
-            »
-          </button>
-        </div>
+        <button
+          className="icon-btn icon-btn--sm sidebar-toggle"
+          title="Expand panel"
+          onClick={() => setCollapsed(false)}
+        >
+          »
+        </button>
       ) : (
         <Sidebar />
       )}
