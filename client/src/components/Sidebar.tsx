@@ -14,6 +14,30 @@ import { ConfirmButton } from "./ConfirmButton";
 import { InlineEdit } from "./InlineEdit";
 import { NewTaskDialog } from "./NewTaskDialog";
 
+function Caret({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+      style={{
+        transform: collapsed ? "rotate(-90deg)" : "none",
+        transition: "transform 0.12s ease",
+      }}
+    >
+      <path
+        d="M4 6l4 4 4-4"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function FolderIcon() {
   return (
     <svg
@@ -84,6 +108,7 @@ function ServiceGroup({ service }: { service: Service }) {
   const status = rt?.status ?? "offline";
   const [editing, setEditing] = useState(false);
   const [addingWorkspace, setAddingWorkspace] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
 
   const serviceWorkspaces = workspaces.filter(
     (w) => w.serviceId === service.id,
@@ -102,6 +127,14 @@ function ServiceGroup({ service }: { service: Service }) {
   return (
     <section className="service">
       <div className="service__head">
+        <button
+          className="icon-btn icon-btn--sm caret-btn"
+          title={collapsed ? "Expand" : "Collapse"}
+          aria-expanded={!collapsed}
+          onClick={() => setCollapsed((c) => !c)}
+        >
+          <Caret collapsed={collapsed} />
+        </button>
         <span className={`dot dot--${status}`} title={status} />
         <span className="service__name">{service.name}</span>
         <span className="service__spacer" />
@@ -142,28 +175,29 @@ function ServiceGroup({ service }: { service: Service }) {
         </div>
       )}
 
-      {serviceWorkspaces.length === 0 && ungrouped.length === 0 ? (
-        <p className="empty empty--sm">
-          No workspaces. Click <b>+ws</b> to add one.
-        </p>
-      ) : (
-        <>
-          {serviceWorkspaces.map((ws) => (
-            <WorkspaceGroup
-              key={ws.id}
-              workspace={ws}
-              online={status === "online"}
-              conversations={convs.filter(
-                (c) =>
-                  taskWorkspace[convKey(service.id, c.task.id)] === ws.id,
-              )}
-            />
-          ))}
-          {ungrouped.length > 0 && (
-            <UngroupedGroup serviceId={service.id} conversations={ungrouped} />
-          )}
-        </>
-      )}
+      {!collapsed &&
+        (serviceWorkspaces.length === 0 && ungrouped.length === 0 ? (
+          <p className="empty empty--sm">
+            No workspaces. Click <b>+ws</b> to add one.
+          </p>
+        ) : (
+          <>
+            {serviceWorkspaces.map((ws) => (
+              <WorkspaceGroup
+                key={ws.id}
+                workspace={ws}
+                online={status === "online"}
+                conversations={convs.filter(
+                  (c) =>
+                    taskWorkspace[convKey(service.id, c.task.id)] === ws.id,
+                )}
+              />
+            ))}
+            {ungrouped.length > 0 && (
+              <UngroupedGroup serviceId={service.id} conversations={ungrouped} />
+            )}
+          </>
+        ))}
 
       {editing && (
         <AddServiceDialog service={service} onClose={() => setEditing(false)} />
@@ -190,6 +224,7 @@ function WorkspaceGroup({
   const updateWorkspace = useStore((s) => s.updateWorkspace);
   const removeWorkspace = useStore((s) => s.removeWorkspace);
   const [addingTask, setAddingTask] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
 
   const remove = () => {
     // "Delete its tasks" model: drop every task on the server first, then
@@ -204,6 +239,14 @@ function WorkspaceGroup({
   return (
     <section className="workspace">
       <div className="workspace__head">
+        <button
+          className="icon-btn icon-btn--sm caret-btn"
+          title={collapsed ? "Expand" : "Collapse"}
+          aria-expanded={!collapsed}
+          onClick={() => setCollapsed((c) => !c)}
+        >
+          <Caret collapsed={collapsed} />
+        </button>
         <span className="workspace__icon">
           <FolderIcon />
         </span>
@@ -233,7 +276,12 @@ function WorkspaceGroup({
           ×
         </ConfirmButton>
       </div>
-      <TaskList serviceId={workspace.serviceId} conversations={conversations} />
+      {!collapsed && (
+        <TaskList
+          serviceId={workspace.serviceId}
+          conversations={conversations}
+        />
+      )}
       {addingTask && (
         <NewTaskDialog
           serviceId={workspace.serviceId}

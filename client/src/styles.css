@@ -68,7 +68,23 @@ body {
 .sidebar__body {
   overflow-y: auto;
   flex: 1;
+  min-height: 0;
   padding: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.sidebar__body::-webkit-scrollbar {
+  width: 10px;
+}
+.sidebar__body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.sidebar__body::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-dim);
+  background-clip: padding-box;
 }
 
 .service {
@@ -328,6 +344,22 @@ body {
 .icon-btn--danger {
   color: #f85149;
   border-color: #f85149;
+}
+/* Caret toggles are borderless so they read as an affordance on the row,
+   not a button competing with the +ws/×/etc. actions. */
+.caret-btn {
+  border: none;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: 2px;
+  color: var(--fg-dim);
+}
+.caret-btn:hover:not(:disabled) {
+  border: none;
+  color: var(--fg);
 }
 
 /* --- panel header --- */
