@@ -468,6 +468,9 @@ export function applyMsg(
         conversations,
         taskWorkspace: { ...s.taskWorkspace, [key]: workspaceId },
         pendingWorkspace: { ...s.pendingWorkspace, [serviceId]: rest },
+        // This client just created the task — focus its terminal.
+        selectedKey: key,
+        selectedWorkspaceId: undefined,
       };
     }
     case "task_state": {

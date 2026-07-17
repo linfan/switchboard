@@ -35,6 +35,28 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
   const [git, setGit] = useState<GitInfo | null>(null);
   const [gitError, setGitError] = useState<string | null>(null);
 
+  // Width of the left panel column, adjustable by dragging the divider.
+  const [panelWidth, setPanelWidth] = useState(280);
+  const startDrag = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = panelWidth;
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.min(640, Math.max(160, startWidth + ev.clientX - startX));
+      setPanelWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+
   useEffect(() => {
     if (!service) return;
     let cancelled = false;
@@ -86,7 +108,10 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
         {!online && <span className="weditor__offline">offline</span>}
       </header>
 
-      <div className={`weditor__body ${showGit ? "" : "weditor__body--nogit"}`}>
+      <div
+        className={`weditor__body ${showGit ? "" : "weditor__body--nogit"}`}
+        style={{ gridTemplateColumns: `${panelWidth}px 6px 1fr` }}
+      >
         <div className="weditor__panels">
           <section className="weditor__panel weditor__panel--tree">
             <div className="weditor__panel-head">Files</div>
@@ -137,6 +162,13 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
             </section>
           )}
         </div>
+
+        <div
+          className="weditor__resizer"
+          role="separator"
+          aria-orientation="vertical"
+          onMouseDown={startDrag}
+        />
 
         <EditorArea
           key={workspace.id}

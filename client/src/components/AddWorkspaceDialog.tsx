@@ -18,6 +18,7 @@ export function AddWorkspaceDialog({
   onClose: () => void;
 }) {
   const addWorkspace = useStore((s) => s.addWorkspace);
+  const selectWorkspace = useStore((s) => s.selectWorkspace);
   const workspaces = useStore((s) => s.workspaces);
   const online = useStore((s) => s.runtime[service.id]?.status === "online");
 
@@ -37,7 +38,9 @@ export function AddWorkspaceDialog({
       setError("A workspace for this folder already exists on this service.");
       return;
     }
-    addWorkspace({ serviceId: service.id, name: n, cwd: dir });
+    const id = addWorkspace({ serviceId: service.id, name: n, cwd: dir });
+    // Jump straight into the new workspace's editor.
+    selectWorkspace(id);
     onClose();
   };
 
@@ -47,12 +50,14 @@ export function AddWorkspaceDialog({
     <Modal
       title="Add workspace"
       onClose={onClose}
+      onSubmit={submit}
       footer={
         <>
-          <button className="btn" onClick={onClose}>
+          <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
           <button
+            type="button"
             className="btn btn--primary"
             disabled={!valid}
             onClick={submit}

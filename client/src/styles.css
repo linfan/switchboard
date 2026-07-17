@@ -572,6 +572,14 @@ body {
   grid-template-rows: 1fr;
 }
 
+/* Draggable divider between the panel column and the editor area. */
+.weditor__resizer {
+  cursor: col-resize;
+  background: transparent;
+  margin-left: -3px;
+  z-index: 1;
+}
+
 .weditor__panel {
   display: flex;
   flex-direction: column;

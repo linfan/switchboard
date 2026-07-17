@@ -67,12 +67,19 @@ export function AddServiceDialog({
     <Modal
       title={editing ? "Edit hosting service" : "Add hosting service"}
       onClose={onClose}
+      onSubmit={submit}
       footer={
         <>
-          <button className="btn" onClick={onClose} disabled={verifying}>
+          <button
+            type="button"
+            className="btn"
+            onClick={onClose}
+            disabled={verifying}
+          >
             Cancel
           </button>
           <button
+            type="button"
             className="btn btn--primary"
             disabled={!valid || verifying}
             onClick={submit}
