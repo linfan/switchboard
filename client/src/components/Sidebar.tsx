@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import * as editors from "../net/editors";
 import { pool } from "../net/pool";
 import { useStore } from "../store/store";
 import {
@@ -164,7 +165,10 @@ function ServiceGroup({ service }: { service: Service }) {
           armedClassName="icon-btn--danger"
           title="Remove service"
           armedTitle="Click again to remove this service"
-          onConfirm={() => removeService(service.id)}
+          onConfirm={() => {
+            for (const w of serviceWorkspaces) editors.dispose(w.id);
+            removeService(service.id);
+          }}
         >
           ×
         </ConfirmButton>
@@ -223,6 +227,8 @@ function WorkspaceGroup({
 }) {
   const updateWorkspace = useStore((s) => s.updateWorkspace);
   const removeWorkspace = useStore((s) => s.removeWorkspace);
+  const selectWorkspace = useStore((s) => s.selectWorkspace);
+  const selected = useStore((s) => s.selectedWorkspaceId === workspace.id);
   const [addingTask, setAddingTask] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
@@ -233,17 +239,24 @@ function WorkspaceGroup({
     for (const c of conversations) {
       pool.deleteTask(workspace.serviceId, c.task.id);
     }
+    editors.dispose(workspace.id);
     removeWorkspace(workspace.id);
   };
 
   return (
     <section className="workspace">
-      <div className="workspace__head">
+      <div
+        className={`workspace__head ${selected ? "workspace__head--active" : ""}`}
+        onClick={() => selectWorkspace(workspace.id)}
+      >
         <button
           className="icon-btn icon-btn--sm caret-btn"
           title={collapsed ? "Expand" : "Collapse"}
           aria-expanded={!collapsed}
-          onClick={() => setCollapsed((c) => !c)}
+          onClick={(e) => {
+            e.stopPropagation();
+            setCollapsed((c) => !c);
+          }}
         >
           <Caret collapsed={collapsed} />
         </button>
@@ -262,7 +275,10 @@ function WorkspaceGroup({
           className="icon-btn icon-btn--sm"
           title="New task"
           disabled={!online}
-          onClick={() => setAddingTask(true)}
+          onClick={(e) => {
+            e.stopPropagation();
+            setAddingTask(true);
+          }}
         >
           +task
         </button>

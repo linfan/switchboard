@@ -48,6 +48,44 @@ export interface ServiceRuntime {
   attempt: number;
 }
 
+/** One open file in the editor: a tab. */
+export interface OpenFile {
+  /** Absolute path on the hosting machine (repo-relative for a diff). */
+  path: string;
+  /** `edit` = editable file from the tree; `diff` = read-only diff view. */
+  mode: "edit" | "diff";
+  /** For a diff, the commit the diff is against (hash or `"WORKING"`). */
+  commit?: string;
+}
+
+/**
+ * Stable identity for an open file, so the same path opened as an edit vs a diff
+ * (or against different commits) are distinct tabs. Used as the tab key and the
+ * editor-view registry key.
+ */
+export function tabKey(f: OpenFile): string {
+  return `${f.mode}:${f.commit ?? ""}:${f.path}`;
+}
+
+/**
+ * Persisted UI state of a workspace's file editor, so switching workspaces or
+ * restarting the app restores what the user had open (content itself is
+ * re-fetched from the host — cf. how terminals replay from the server).
+ */
+export interface WorkspaceEditorState {
+  /** Absolute paths of expanded folders in the file tree. */
+  expandedDirs: string[];
+  /** Selected git-history node: a commit hash, or `"WORKING"` for uncommitted. */
+  selectedCommit?: string;
+  /** Open editor tabs, in display order. */
+  openTabs: OpenFile[];
+  /** `tabKey` of the active tab, if any. */
+  activeTab?: string;
+}
+
+/** Sentinel commit id for the working tree (uncommitted changes) node. */
+export const WORKING_COMMIT = "WORKING";
+
 /** A conversation === one agent task on one service. */
 export interface Conversation {
   serviceId: string;

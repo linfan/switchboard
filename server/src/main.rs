@@ -3,6 +3,7 @@
 mod agent;
 mod auth;
 mod config;
+mod editor;
 mod error;
 mod fs;
 mod http;

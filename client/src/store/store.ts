@@ -5,13 +5,16 @@ import type { ServerMsg } from "../protocol";
 import { persistStorage } from "./storage";
 import {
   convKey,
+  tabKey,
   type Conversation,
+  type OpenFile,
   type Service,
   type ServiceInfo,
   type ServiceRuntime,
   type TaskInfo,
   type TaskStatus,
   type Workspace,
+  type WorkspaceEditorState,
 } from "./types";
 
 const DEFAULT_RUNTIME: ServiceRuntime = { status: "offline", attempt: 0 };
@@ -51,6 +54,13 @@ export interface AppState {
   recentTools: Record<string, string[]>;
   /** Currently focused conversation key, if any. */
   selectedKey?: string;
+  /**
+   * Currently focused workspace (its file editor fills the right pane). Mutually
+   * exclusive with `selectedKey`. Persisted so the editor restores on restart.
+   */
+  selectedWorkspaceId?: string;
+  /** Per-workspace file-editor UI state, keyed by workspace id (persisted). */
+  editorState: Record<string, WorkspaceEditorState>;
   /** Last task-creation error surfaced by the server (in-memory, transient). */
   createError?: string;
 
@@ -85,7 +95,21 @@ export interface AppState {
   setCursor: (serviceId: string, taskId: string, seq: number) => void;
 
   // --- selection -----------------------------------------------------------
+  /** Focus a conversation (task terminal); clears any workspace selection. */
   select: (key: string | undefined) => void;
+  /** Focus a workspace (file editor); clears any conversation selection. */
+  selectWorkspace: (id: string | undefined) => void;
+  /** Merge a patch into a workspace's persisted editor UI state. */
+  patchEditorState: (
+    workspaceId: string,
+    patch: Partial<WorkspaceEditorState>,
+  ) => void;
+  /** Open a file as a tab (or focus it if already open) and make it active. */
+  openTab: (workspaceId: string, file: OpenFile) => void;
+  /** Close a tab; if it was active, focus a neighbouring tab. */
+  closeTab: (workspaceId: string, key: string) => void;
+  /** Make an already-open tab the active one. */
+  setActiveTab: (workspaceId: string, key: string) => void;
 
   /** All cursors for a service (sent in Hello on connect). */
   cursorsFor: (serviceId: string) => Record<string, number>;
@@ -96,6 +120,10 @@ function newId(): string {
     globalThis.crypto?.randomUUID?.() ??
     `id-${Date.now()}-${Math.random().toString(16).slice(2)}`
   );
+}
+
+function emptyEditorState(): WorkspaceEditorState {
+  return { expandedDirs: [], openTabs: [] };
 }
 
 export const useStore = create<AppState>()(
@@ -112,6 +140,8 @@ export const useStore = create<AppState>()(
       cursors: {},
       recentTools: {},
       selectedKey: undefined,
+      selectedWorkspaceId: undefined,
+      editorState: {},
       createError: undefined,
 
       addService: (svc) => {
@@ -133,6 +163,9 @@ export const useStore = create<AppState>()(
       removeService: (id) =>
         set((s) => {
           const services = s.services.filter((sv) => sv.id !== id);
+          const removedWsIds = new Set(
+            s.workspaces.filter((w) => w.serviceId === id).map((w) => w.id),
+          );
           const workspaces = s.workspaces.filter((w) => w.serviceId !== id);
           const runtime = { ...s.runtime };
           delete runtime[id];
@@ -150,6 +183,15 @@ export const useStore = create<AppState>()(
           const selectedKey = s.selectedKey?.startsWith(prefix)
             ? undefined
             : s.selectedKey;
+          const editorState = Object.fromEntries(
+            Object.entries(s.editorState ?? {}).filter(
+              ([wsId]) => !removedWsIds.has(wsId),
+            ),
+          );
+          const selectedWorkspaceId =
+            s.selectedWorkspaceId && removedWsIds.has(s.selectedWorkspaceId)
+              ? undefined
+              : s.selectedWorkspaceId;
           return {
             services,
             workspaces,
@@ -160,6 +202,8 @@ export const useStore = create<AppState>()(
             titles,
             pendingWorkspace,
             selectedKey,
+            editorState,
+            selectedWorkspaceId,
           };
         }),
 
@@ -208,7 +252,17 @@ export const useStore = create<AppState>()(
           const taskWorkspace = Object.fromEntries(
             Object.entries(s.taskWorkspace ?? {}).filter(([, v]) => v !== id),
           );
-          return { workspaces, taskWorkspace, titles };
+          const editorState = { ...(s.editorState ?? {}) };
+          delete editorState[id];
+          const selectedWorkspaceId =
+            s.selectedWorkspaceId === id ? undefined : s.selectedWorkspaceId;
+          return {
+            workspaces,
+            taskWorkspace,
+            titles,
+            editorState,
+            selectedWorkspaceId,
+          };
         }),
 
       enqueuePendingWorkspace: (serviceId, workspaceId) =>
@@ -252,7 +306,77 @@ export const useStore = create<AppState>()(
           return { conversations, cursors: { ...s.cursors, [key]: seq } };
         }),
 
-      select: (key) => set({ selectedKey: key }),
+      select: (key) =>
+        set({ selectedKey: key, selectedWorkspaceId: undefined }),
+
+      selectWorkspace: (id) =>
+        set({ selectedWorkspaceId: id, selectedKey: undefined }),
+
+      patchEditorState: (workspaceId, patch) =>
+        set((s) => {
+          const editorState = s.editorState ?? {};
+          const existing = editorState[workspaceId] ?? emptyEditorState();
+          return {
+            editorState: {
+              ...editorState,
+              [workspaceId]: { ...existing, ...patch },
+            },
+          };
+        }),
+
+      openTab: (workspaceId, file) =>
+        set((s) => {
+          const editorState = s.editorState ?? {};
+          const cur = editorState[workspaceId] ?? emptyEditorState();
+          // Tolerate editorState persisted by an older single-file version,
+          // which has no `openTabs`.
+          const tabs = cur.openTabs ?? [];
+          const key = tabKey(file);
+          const exists = tabs.some((t) => tabKey(t) === key);
+          const openTabs = exists ? tabs : [...tabs, file];
+          return {
+            editorState: {
+              ...editorState,
+              [workspaceId]: { ...cur, openTabs, activeTab: key },
+            },
+          };
+        }),
+
+      closeTab: (workspaceId, key) =>
+        set((s) => {
+          const editorState = s.editorState ?? {};
+          const cur = editorState[workspaceId];
+          if (!cur) return {};
+          const tabs = cur.openTabs ?? [];
+          const idx = tabs.findIndex((t) => tabKey(t) === key);
+          if (idx === -1) return {};
+          const openTabs = tabs.filter((_, i) => i !== idx);
+          let activeTab = cur.activeTab;
+          if (activeTab === key) {
+            // Focus the tab that slid into this slot, else the previous one.
+            const neighbour = openTabs[idx] ?? openTabs[idx - 1];
+            activeTab = neighbour ? tabKey(neighbour) : undefined;
+          }
+          return {
+            editorState: {
+              ...editorState,
+              [workspaceId]: { ...cur, openTabs, activeTab },
+            },
+          };
+        }),
+
+      setActiveTab: (workspaceId, key) =>
+        set((s) => {
+          const editorState = s.editorState ?? {};
+          const cur = editorState[workspaceId];
+          if (!cur) return {};
+          return {
+            editorState: {
+              ...editorState,
+              [workspaceId]: { ...cur, activeTab: key },
+            },
+          };
+        }),
 
       cursorsFor: (serviceId) => {
         const prefix = `${serviceId}::`;
@@ -273,6 +397,8 @@ export const useStore = create<AppState>()(
         titles: s.titles,
         recentTools: s.recentTools,
         sidebarCollapsed: s.sidebarCollapsed,
+        selectedWorkspaceId: s.selectedWorkspaceId,
+        editorState: s.editorState,
       }),
     },
   ),

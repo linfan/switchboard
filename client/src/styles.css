@@ -255,6 +255,14 @@ body {
   padding: 4px 6px;
   font-size: 12px;
   color: var(--fg-dim);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.workspace__head:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.workspace__head--active {
+  background: rgba(76, 139, 245, 0.16);
 }
 .workspace__icon {
   flex: none;
@@ -528,4 +536,227 @@ body {
 }
 .fs-row--file {
   color: var(--fg-dim);
+}
+
+/* --- workspace file editor --- */
+.weditor__branch {
+  font-size: 12px;
+  color: var(--fg-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.weditor__offline {
+  font-size: 12px;
+  color: #d29922;
+}
+
+/* Left panel column (fixed) + editor area (fills). */
+.weditor__body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 280px 1fr;
+}
+
+/* Three stacked panels: file tree 2 / history 1 / changes 1. */
+.weditor__panels {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  background: var(--bg-alt);
+  display: grid;
+  grid-template-rows: 2fr 1fr 1fr;
+}
+/* No git → the file tree fills the whole column. */
+.weditor__body--nogit .weditor__panels {
+  grid-template-rows: 1fr;
+}
+
+.weditor__panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-bottom: 1px solid var(--border);
+}
+.weditor__panel-head {
+  flex: none;
+  padding: 6px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.weditor__panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* A row in any of the left panels (tree entry, commit, changed file). */
+.weditor__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.weditor__row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.weditor__row.is-active {
+  background: rgba(76, 139, 245, 0.16);
+}
+.weditor__row--hint {
+  color: var(--fg-dim);
+  cursor: default;
+  font-size: 12px;
+}
+.weditor__row--hint:hover {
+  background: transparent;
+}
+.weditor__row--file {
+  color: var(--fg-dim);
+}
+.weditor__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.weditor__twist {
+  flex: none;
+  display: inline-block;
+  width: 10px;
+  color: var(--fg-dim);
+  transition: transform 0.12s ease;
+}
+.weditor__twist.is-open {
+  transform: rotate(90deg);
+}
+.weditor__commit {
+  flex-direction: row;
+  justify-content: space-between;
+}
+.weditor__commit-meta {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.weditor__status {
+  flex: none;
+  width: 22px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.weditor__status--M {
+  color: #d29922;
+}
+.weditor__status--A,
+.weditor__status--\? {
+  color: #3fb950;
+}
+.weditor__status--D {
+  color: #f85149;
+}
+
+/* Editor area (right). */
+.weditor__area {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.weditor__area--empty {
+  align-items: center;
+  justify-content: center;
+}
+/* Tab bar: a scrollable strip of open files, with Save pinned to the right. */
+.weditor__tabbar {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+.weditor__tabs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.weditor__tab {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 200px;
+  padding: 6px 8px 6px 12px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+}
+.weditor__tab:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.weditor__tab.is-active {
+  color: var(--fg);
+  background: var(--bg);
+}
+.weditor__tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.weditor__tab-close {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 4px;
+}
+.weditor__tab-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--fg);
+}
+.weditor__save {
+  flex: none;
+  align-self: center;
+  margin: 0 8px;
+}
+.weditor__cm {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+/* CodeMirror fills its host and scrolls internally. */
+.weditor__cm .cm-editor {
+  height: 100%;
+}
+.weditor__cm .cm-scroller {
+  overflow: auto;
 }

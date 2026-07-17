@@ -9,3 +9,8 @@ export type { ClientMsg } from "./ClientMsg";
 export type { ServerMsg } from "./ServerMsg";
 export type { FsEntry } from "./FsEntry";
 export type { FsListing } from "./FsListing";
+export type { FileContent } from "./FileContent";
+export type { GitInfo } from "./GitInfo";
+export type { GitCommit } from "./GitCommit";
+export type { GitChange } from "./GitChange";
+export type { GitDiff } from "./GitDiff";

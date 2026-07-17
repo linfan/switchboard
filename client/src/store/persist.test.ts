@@ -5,7 +5,12 @@ import { convKey } from "./types";
 
 const KEY = "switchboard";
 
-function persisted(): { services: unknown[]; cursors?: unknown } {
+function persisted(): {
+  services: unknown[];
+  cursors?: unknown;
+  editorState?: Record<string, unknown>;
+  selectedWorkspaceId?: string;
+} {
   return JSON.parse(localStorage.getItem(KEY) ?? '{"state":{"services":[]}}')
     .state;
 }
@@ -29,5 +34,22 @@ describe("persist round-trip through localStorage", () => {
     useStore.getState().setCursor("s1", "t1", 42);
     expect(useStore.getState().cursors[convKey("s1", "t1")]).toBe(42);
     expect(persisted().cursors).toBeUndefined();
+  });
+
+  it("persists workspace editor state and selection so the editor restores on restart", () => {
+    const st = useStore.getState();
+    st.selectWorkspace("w1");
+    st.patchEditorState("w1", {
+      expandedDirs: ["/w/src"],
+      selectedCommit: "WORKING",
+    });
+    st.openTab("w1", { path: "/w/a.ts", mode: "edit" });
+    expect(persisted().selectedWorkspaceId).toBe("w1");
+    expect(persisted().editorState?.["w1"]).toEqual({
+      expandedDirs: ["/w/src"],
+      selectedCommit: "WORKING",
+      openTabs: [{ path: "/w/a.ts", mode: "edit" }],
+      activeTab: "edit::/w/a.ts",
+    });
   });
 });

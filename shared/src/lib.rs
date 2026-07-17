@@ -48,6 +48,69 @@ pub struct FsListing {
     pub entries: Vec<FsEntry>,
 }
 
+/// Contents of a file on the hosting machine (REST `GET /api/file`), for the
+/// workspace file editor.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "client/src/protocol/")]
+pub struct FileContent {
+    /// Absolute, canonicalized path that was read.
+    pub path: String,
+    /// UTF-8 (lossy) file contents. Empty when `truncated` flags a binary/oversize file.
+    pub content: String,
+    /// True when the file was too large or looked binary and was not returned in full.
+    pub truncated: bool,
+}
+
+/// Git availability + repo state for a workspace folder (REST `GET /api/git/info`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "client/src/protocol/")]
+pub struct GitInfo {
+    /// Whether a `git` binary is on the host's PATH at all.
+    pub available: bool,
+    /// Whether the workspace folder is inside a git work tree.
+    pub is_repo: bool,
+    /// Current branch name (or detached-HEAD short hash), if a repo.
+    pub branch: Option<String>,
+}
+
+/// One commit on the current branch (REST `GET /api/git/log`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "client/src/protocol/")]
+pub struct GitCommit {
+    /// Full commit hash.
+    pub hash: String,
+    /// Abbreviated hash for display.
+    pub short: String,
+    /// First line of the commit message.
+    pub subject: String,
+    /// Remainder of the commit message (everything after the subject), possibly empty.
+    pub body: String,
+    /// Author name.
+    pub author: String,
+    /// Author date, human-readable relative form (e.g. `2 days ago`).
+    pub date: String,
+}
+
+/// One changed file within a commit or the working tree (REST `GET /api/git/changes`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "client/src/protocol/")]
+pub struct GitChange {
+    /// Path relative to the repo root.
+    pub path: String,
+    /// Porcelain status code, e.g. `M`, `A`, `D`, `??`.
+    pub status: String,
+}
+
+/// A unified diff for one file (REST `GET /api/git/diff`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "client/src/protocol/")]
+pub struct GitDiff {
+    /// Path the diff is for (relative to the repo root).
+    pub path: String,
+    /// Unified-diff text (empty if there is no difference).
+    pub diff: String,
+}
+
 /// Metadata a hosting service advertises to clients.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "client/src/protocol/")]
@@ -263,5 +326,10 @@ mod tests {
         ServerMsg::export_all().unwrap();
         ClientMsg::export_all().unwrap();
         FsListing::export_all().unwrap();
+        FileContent::export_all().unwrap();
+        GitInfo::export_all().unwrap();
+        GitCommit::export_all().unwrap();
+        GitChange::export_all().unwrap();
+        GitDiff::export_all().unwrap();
     }
 }

@@ -20,6 +20,8 @@ beforeEach(() => {
     cursors: {},
     recentTools: {},
     selectedKey: undefined,
+    selectedWorkspaceId: undefined,
+    editorState: {},
     createError: undefined,
   });
 });
@@ -352,5 +354,89 @@ describe("workspaces", () => {
     const s = useStore.getState();
     expect(s.taskWorkspace[convKey("s1", "t1")]).toBeUndefined();
     expect(s.titles[convKey("s1", "t1")]).toBeUndefined();
+  });
+});
+
+describe("workspace editor selection", () => {
+  it("selectWorkspace and select are mutually exclusive", () => {
+    const st = useStore.getState();
+    st.selectWorkspace("w1");
+    expect(useStore.getState().selectedWorkspaceId).toBe("w1");
+    expect(useStore.getState().selectedKey).toBeUndefined();
+
+    st.select(convKey("s1", "t1"));
+    expect(useStore.getState().selectedKey).toBe(convKey("s1", "t1"));
+    expect(useStore.getState().selectedWorkspaceId).toBeUndefined();
+
+    st.selectWorkspace("w2");
+    expect(useStore.getState().selectedWorkspaceId).toBe("w2");
+    expect(useStore.getState().selectedKey).toBeUndefined();
+  });
+
+  it("patchEditorState merges into a workspace's editor state", () => {
+    const st = useStore.getState();
+    st.patchEditorState("w1", { expandedDirs: ["/w/src"] });
+    st.patchEditorState("w1", { selectedCommit: "abc123" });
+    const es = useStore.getState().editorState["w1"];
+    expect(es.expandedDirs).toEqual(["/w/src"]);
+    expect(es.selectedCommit).toBe("abc123");
+    expect(es.openTabs).toEqual([]);
+  });
+
+  it("openTab adds/focuses tabs, dedupes, and closeTab focuses a neighbour", () => {
+    const st = useStore.getState();
+    st.openTab("w1", { path: "/w/a.ts", mode: "edit" });
+    st.openTab("w1", { path: "/w/b.ts", mode: "edit" });
+    // Re-opening an existing file focuses it without duplicating.
+    st.openTab("w1", { path: "/w/a.ts", mode: "edit" });
+    let es = useStore.getState().editorState["w1"];
+    expect(es.openTabs.map((t) => t.path)).toEqual(["/w/a.ts", "/w/b.ts"]);
+    expect(es.activeTab).toBe("edit::/w/a.ts");
+
+    // A diff of the same path is a distinct tab.
+    st.openTab("w1", { path: "/w/a.ts", mode: "diff", commit: "WORKING" });
+    es = useStore.getState().editorState["w1"];
+    expect(es.openTabs).toHaveLength(3);
+
+    // Closing the active tab focuses the neighbour that slides into its slot.
+    st.setActiveTab("w1", "edit::/w/a.ts");
+    st.closeTab("w1", "edit::/w/a.ts");
+    es = useStore.getState().editorState["w1"];
+    expect(es.openTabs.map((t) => t.path)).toEqual(["/w/b.ts", "/w/a.ts"]);
+    expect(es.activeTab).toBe("edit::/w/b.ts");
+
+    // Closing the last remaining tabs clears the active tab.
+    st.closeTab("w1", "edit::/w/b.ts");
+    st.closeTab("w1", "diff:WORKING:/w/a.ts");
+    es = useStore.getState().editorState["w1"];
+    expect(es.openTabs).toEqual([]);
+    expect(es.activeTab).toBeUndefined();
+  });
+
+  it("removeWorkspace drops its editor state and clears selection", () => {
+    const st = useStore.getState();
+    const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
+    st.openTab(ws, { path: "/w/a.ts", mode: "edit" });
+    st.selectWorkspace(ws);
+
+    useStore.getState().removeWorkspace(ws);
+
+    const s = useStore.getState();
+    expect(s.editorState[ws]).toBeUndefined();
+    expect(s.selectedWorkspaceId).toBeUndefined();
+  });
+
+  it("removeService drops editor state for its workspaces and clears selection", () => {
+    const st = useStore.getState();
+    st.addService({ id: "s1", name: "S1", url: "http://a", token: "t" });
+    const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
+    st.patchEditorState(ws, { selectedCommit: "WORKING" });
+    st.selectWorkspace(ws);
+
+    useStore.getState().removeService("s1");
+
+    const s = useStore.getState();
+    expect(s.editorState[ws]).toBeUndefined();
+    expect(s.selectedWorkspaceId).toBeUndefined();
   });
 });
