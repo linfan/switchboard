@@ -8,6 +8,7 @@ import type {
   GitChange,
   GitCommit,
   GitDiff,
+  GitFileDiff,
   GitInfo,
   ServiceInfo,
 } from "../protocol";
@@ -280,5 +281,22 @@ export function gitDiff(
     service,
     "GET",
     `/api/git/diff?cwd=${encodeURIComponent(cwd)}&commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
+  );
+}
+
+/**
+ * Fetch both sides (old + new contents) of one file's diff, for the editor's
+ * diff view. `commit` is a hash, or `"WORKING"` for uncommitted changes.
+ */
+export function gitFileDiff(
+  service: ServiceRef,
+  cwd: string,
+  commit: string,
+  path: string,
+): Promise<GitFileDiff> {
+  return apiRequest<GitFileDiff>(
+    service,
+    "GET",
+    `/api/git/filediff?cwd=${encodeURIComponent(cwd)}&commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
   );
 }

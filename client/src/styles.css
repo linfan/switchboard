@@ -748,6 +748,33 @@ body {
   align-self: center;
   margin: 0 8px;
 }
+/* Segmented inline/side-by-side toggle for diff tabs. */
+.weditor__difftoggle {
+  flex: none;
+  align-self: center;
+  display: flex;
+  margin: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.weditor__difftoggle-opt {
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+.weditor__difftoggle-opt:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--fg);
+}
+.weditor__difftoggle-opt.is-active {
+  background: var(--accent);
+  color: #fff;
+}
 .weditor__cm {
   flex: 1;
   min-height: 0;
@@ -759,4 +786,12 @@ body {
 }
 .weditor__cm .cm-scroller {
   overflow: auto;
+}
+/* Side-by-side diff (@codemirror/merge MergeView): fill height, two panes. */
+.weditor__cm .cm-mergeView,
+.weditor__cm .cm-mergeViewEditors {
+  height: 100%;
+}
+.weditor__cm .cm-mergeViewEditor {
+  min-width: 0;
 }

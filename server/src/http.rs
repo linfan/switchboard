@@ -12,7 +12,8 @@ use serde_json::{json, Value};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use switchboard_shared::{
-    FileContent, FsListing, GitChange, GitCommit, GitDiff, GitInfo, ServiceInfo, TaskInfo,
+    FileContent, FsListing, GitChange, GitCommit, GitDiff, GitFileDiff, GitInfo, ServiceInfo,
+    TaskInfo,
 };
 
 use crate::{auth, editor, error::AppResult, fs, state::SharedState, task::CreateParams, ws};
@@ -27,6 +28,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/git/log", get(git_log))
         .route("/git/changes", get(git_changes))
         .route("/git/diff", get(git_diff))
+        .route("/git/filediff", get(git_file_diff))
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", axum::routing::delete(terminate_task))
         .route_layer(middleware::from_fn_with_state(
@@ -125,6 +127,13 @@ struct DiffQuery {
 /// Unified diff for one file in a commit or the working tree.
 async fn git_diff(Query(q): Query<DiffQuery>) -> AppResult<Json<GitDiff>> {
     Ok(Json(editor::git_diff(&q.cwd, &q.commit, &q.path).await?))
+}
+
+/// Old + new contents of one file, for the editor's diff view.
+async fn git_file_diff(Query(q): Query<DiffQuery>) -> AppResult<Json<GitFileDiff>> {
+    Ok(Json(
+        editor::git_file_diff(&q.cwd, &q.commit, &q.path).await?,
+    ))
 }
 
 async fn list_tasks(State(state): State<SharedState>) -> AppResult<Json<Vec<TaskInfo>>> {

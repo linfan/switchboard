@@ -67,6 +67,9 @@ export function tabKey(f: OpenFile): string {
   return `${f.mode}:${f.commit ?? ""}:${f.path}`;
 }
 
+/** How a diff tab is rendered: unified inline, or two-pane side-by-side. */
+export type DiffLayout = "inline" | "split";
+
 /**
  * Persisted UI state of a workspace's file editor, so switching workspaces or
  * restarting the app restores what the user had open (content itself is
@@ -81,6 +84,8 @@ export interface WorkspaceEditorState {
   openTabs: OpenFile[];
   /** `tabKey` of the active tab, if any. */
   activeTab?: string;
+  /** Rendering style for diff tabs (defaults to `"inline"`). */
+  diffLayout?: DiffLayout;
 }
 
 /** Sentinel commit id for the working tree (uncommitted changes) node. */

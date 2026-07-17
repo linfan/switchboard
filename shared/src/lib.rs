@@ -111,6 +111,21 @@ pub struct GitDiff {
     pub diff: String,
 }
 
+/// Old + new contents of one file, for an editor diff view (REST `GET /api/git/filediff`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "client/src/protocol/")]
+pub struct GitFileDiff {
+    /// Path the diff is for (relative to the repo root).
+    pub path: String,
+    /// The "before" side. Empty for a file that was added (or is untracked).
+    pub old_text: String,
+    /// The "after" side. Empty for a file that was deleted.
+    pub new_text: String,
+    /// True when either side looks binary (contains a NUL); the client shows a
+    /// notice instead of attempting a diff.
+    pub binary: bool,
+}
+
 /// Metadata a hosting service advertises to clients.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "client/src/protocol/")]

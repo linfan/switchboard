@@ -1,6 +1,5 @@
 import { basicSetup } from "codemirror";
-import { StreamLanguage } from "@codemirror/language";
-import { diff as diffMode } from "@codemirror/legacy-modes/mode/diff";
+import { MergeView, unifiedMergeView } from "@codemirror/merge";
 import { EditorState, type Extension } from "@codemirror/state";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { EditorView, keymap } from "@codemirror/view";
@@ -15,8 +14,8 @@ import { html } from "@codemirror/lang-html";
 import { css } from "@codemirror/lang-css";
 
 import * as editors from "../net/editors";
-import { gitDiff, readFile, writeFile } from "../net/rest";
-import { tabKey, type OpenFile } from "../store/types";
+import { gitFileDiff, readFile, writeFile } from "../net/rest";
+import { tabKey, type DiffLayout, type OpenFile } from "../store/types";
 
 /** Map a file path's extension to a CodeMirror language extension (or none). */
 function langForPath(path: string): Extension {
@@ -58,11 +57,20 @@ function basename(path: string): string {
 
 type Status = "loading" | "ready" | "binary" | "error";
 
+/** A built diff view (inline `EditorView` or split `MergeView`), normalized. */
+interface BuiltDiff {
+  dom: HTMLElement;
+  destroy: () => void;
+  measure: () => void;
+}
+
 /**
  * The right-hand editor pane: a tab bar over the open files plus the active
- * file's CodeMirror. Tree files are editable (Cmd/Ctrl+S saves); diff files are
- * read-only. Each tab's live `EditorView` lives in the `editors` registry so
- * switching tabs — or workspaces — preserves unsaved edits, scroll, and undo.
+ * file's editor. Tree files are editable (Cmd/Ctrl+S saves). Diff files are
+ * read-only and rendered with a real diff editor — inline (unified) or
+ * side-by-side, switchable via the tab-bar toggle. Each tab's live view lives in
+ * the `editors` registry so switching tabs — or workspaces — preserves unsaved
+ * edits, scroll, and undo.
  */
 export function EditorArea({
   workspaceId,
@@ -70,16 +78,20 @@ export function EditorArea({
   cwd,
   tabs,
   activeKey,
+  diffLayout,
   onActivate,
   onClose,
+  onDiffLayout,
 }: {
   workspaceId: string;
   service: { url: string; token: string };
   cwd: string;
   tabs: OpenFile[];
   activeKey?: string;
+  diffLayout: DiffLayout;
   onActivate: (key: string) => void;
   onClose: (key: string) => void;
+  onDiffLayout: (layout: DiffLayout) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<Status>("loading");
@@ -113,15 +125,16 @@ export function EditorArea({
     if (!host || !path || !mode || !key) return;
 
     let cancelled = false;
-    let attached: EditorView | null = null;
+    let attachedDom: HTMLElement | null = null;
     setError(null);
 
-    const attach = (view: EditorView) => {
-      host.appendChild(view.dom);
-      attached = view;
+    const attach = (dom: HTMLElement, measure?: () => void, focus?: EditorView) => {
+      host.appendChild(dom);
+      attachedDom = dom;
       requestAnimationFrame(() => {
-        view.requestMeasure();
-        if (mode === "edit") view.focus();
+        if (cancelled) return;
+        measure?.();
+        if (mode === "edit") focus?.focus();
       });
     };
 
@@ -147,47 +160,126 @@ export function EditorArea({
         }),
       });
 
-    const buildDiffView = (text: string): EditorView =>
-      new EditorView({
+    // Read-only diff editor: inline (unified) or side-by-side, per `diffLayout`.
+    const buildDiffView = (
+      oldText: string,
+      newText: string,
+      layout: DiffLayout,
+    ): BuiltDiff => {
+      const readOnly = [
+        EditorState.readOnly.of(true),
+        EditorView.editable.of(false),
+      ];
+      const lang = langForPath(path);
+      const collapseUnchanged = { margin: 3, minSize: 4 };
+
+      if (layout === "split") {
+        const mv = new MergeView({
+          a: { doc: oldText, extensions: [basicSetup, oneDark, lang, ...readOnly] },
+          b: { doc: newText, extensions: [basicSetup, oneDark, lang, ...readOnly] },
+          gutter: true,
+          highlightChanges: true,
+          collapseUnchanged,
+        });
+        return {
+          dom: mv.dom,
+          destroy: () => mv.destroy(),
+          measure: () => {
+            mv.a.requestMeasure();
+            mv.b.requestMeasure();
+          },
+        };
+      }
+
+      const view = new EditorView({
         state: EditorState.create({
-          doc: text || "(no changes)",
+          doc: newText,
           extensions: [
             basicSetup,
             oneDark,
-            StreamLanguage.define(diffMode),
-            EditorState.readOnly.of(true),
-            EditorView.editable.of(false),
+            lang,
+            ...readOnly,
+            unifiedMergeView({
+              original: oldText,
+              mergeControls: false,
+              gutter: true,
+              collapseUnchanged,
+            }),
           ],
         }),
       });
+      return {
+        dom: view.dom,
+        destroy: () => view.destroy(),
+        measure: () => view.requestMeasure(),
+      };
+    };
 
-    const existing = editors.getView(workspaceId, key);
-    if (existing) {
-      // Tab already built — re-parent its live view, preserving edits/scroll.
-      setStatus("ready");
-      attach(existing);
-    } else {
-      setStatus("loading");
-      const load = async () => {
-        if (mode === "diff") {
-          const { diff } = await gitDiff(service, cwd, commit ?? "WORKING", path);
+    const registerDiff = (built: BuiltDiff, diff: { oldText: string; newText: string }) => {
+      editors.setDiffView(workspaceId, key, {
+        dom: built.dom,
+        destroy: built.destroy,
+        measure: built.measure,
+        layout: diffLayout,
+        diff,
+      });
+    };
+
+    const existing = editors.getEntry(workspaceId, key);
+
+    if (mode === "diff") {
+      if (existing && existing.layout === diffLayout) {
+        // Same layout — re-parent the live view, preserving scroll.
+        setStatus("ready");
+        attach(existing.dom, existing.measure);
+      } else if (existing?.diff) {
+        // Layout toggled — rebuild from the cached sides (no refetch).
+        const { oldText, newText } = existing.diff;
+        editors.disposeTab(workspaceId, key);
+        const built = buildDiffView(oldText, newText, diffLayout);
+        registerDiff(built, { oldText, newText });
+        attach(built.dom, built.measure);
+        setStatus("ready");
+      } else {
+        // First open — fetch both sides.
+        setStatus("loading");
+        const load = async () => {
+          const fd = await gitFileDiff(service, cwd, commit ?? "WORKING", path);
           if (cancelled) return;
-          const view = buildDiffView(diff);
-          editors.setView(workspaceId, key, view);
-          attach(view);
-          setStatus("ready");
-        } else {
-          const fc = await readFile(service, path);
-          if (cancelled) return;
-          if (fc.truncated) {
+          if (fd.binary) {
             setStatus("binary");
             return;
           }
-          const view = buildEditView(fc.content);
-          editors.setView(workspaceId, key, view);
-          attach(view);
+          const diff = { oldText: fd.old_text, newText: fd.new_text };
+          const built = buildDiffView(diff.oldText, diff.newText, diffLayout);
+          registerDiff(built, diff);
+          attach(built.dom, built.measure);
           setStatus("ready");
+        };
+        load().catch((e: unknown) => {
+          if (cancelled) return;
+          setError(e instanceof Error ? e.message : String(e));
+          setStatus("error");
+        });
+      }
+    } else if (existing?.editor) {
+      // Editable tab already built — re-parent, preserving edits/scroll.
+      const view = existing.editor;
+      setStatus("ready");
+      attach(view.dom, () => view.requestMeasure(), view);
+    } else {
+      setStatus("loading");
+      const load = async () => {
+        const fc = await readFile(service, path);
+        if (cancelled) return;
+        if (fc.truncated) {
+          setStatus("binary");
+          return;
         }
+        const view = buildEditView(fc.content);
+        editors.setView(workspaceId, key, view);
+        attach(view.dom, () => view.requestMeasure(), view);
+        setStatus("ready");
       };
       load().catch((e: unknown) => {
         if (cancelled) return;
@@ -199,12 +291,12 @@ export function EditorArea({
     return () => {
       cancelled = true;
       // Detach (but don't destroy) so the view survives a tab/workspace switch.
-      if (attached && attached.dom.parentElement === host) {
-        host.removeChild(attached.dom);
+      if (attachedDom && attachedDom.parentElement === host) {
+        host.removeChild(attachedDom);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, key, path, mode, commit]);
+  }, [workspaceId, key, path, mode, commit, diffLayout]);
 
   const closeTab = (k: string) => {
     editors.disposeTab(workspaceId, k);
@@ -259,6 +351,30 @@ export function EditorArea({
             );
           })}
         </div>
+        {mode === "diff" && (
+          <div
+            className="weditor__difftoggle"
+            role="radiogroup"
+            aria-label="Diff layout"
+          >
+            <button
+              role="radio"
+              aria-checked={diffLayout === "inline"}
+              className={`weditor__difftoggle-opt ${diffLayout === "inline" ? "is-active" : ""}`}
+              onClick={() => onDiffLayout("inline")}
+            >
+              Inline
+            </button>
+            <button
+              role="radio"
+              aria-checked={diffLayout === "split"}
+              className={`weditor__difftoggle-opt ${diffLayout === "split" ? "is-active" : ""}`}
+              onClick={() => onDiffLayout("split")}
+            >
+              Side-by-side
+            </button>
+          </div>
+        )}
         {mode === "edit" && key && (
           <button
             className="btn weditor__save"
@@ -277,7 +393,7 @@ export function EditorArea({
       {status === "binary" && (
         <p className="hint">This file is binary or too large to display.</p>
       )}
-      {/* CodeMirror mounts here; hidden (not unmounted) on binary/error states. */}
+      {/* Editor mounts here; hidden (not unmounted) on binary/error states. */}
       <div
         className="weditor__cm"
         ref={hostRef}

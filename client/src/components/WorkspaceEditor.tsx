@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { gitChanges, gitInfo, gitLog, listDir } from "../net/rest";
 import type {
@@ -8,7 +8,12 @@ import type {
   GitInfo,
 } from "../protocol";
 import { useStore } from "../store/store";
-import { tabKey, WORKING_COMMIT, type Workspace } from "../store/types";
+import {
+  tabKey,
+  WORKING_COMMIT,
+  type DiffLayout,
+  type Workspace,
+} from "../store/types";
 import { EditorArea } from "./EditorArea";
 
 type ServiceRef = { url: string; token: string };
@@ -59,6 +64,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
   const active = openTabs.find((t) => tabKey(t) === activeTab);
   const expandedDirs = editorState?.expandedDirs ?? [];
   const selectedCommit = editorState?.selectedCommit;
+  const diffLayout: DiffLayout = editorState?.diffLayout ?? "inline";
 
   const toggleDir = (path: string) => {
     const next = expandedDirs.includes(path)
@@ -139,8 +145,10 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
           cwd={workspace.cwd}
           tabs={openTabs}
           activeKey={activeTab}
+          diffLayout={diffLayout}
           onActivate={(k) => setActiveTab(workspace.id, k)}
           onClose={(k) => closeTab(workspace.id, k)}
+          onDiffLayout={(layout) => patch(workspace.id, { diffLayout: layout })}
         />
       </div>
 
@@ -357,6 +365,8 @@ function ChangedFiles({
 }) {
   const [changes, setChanges] = useState<GitChange[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Collapsed directory paths (default: everything expanded).
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (!commit) {
@@ -376,6 +386,16 @@ function ChangedFiles({
     };
   }, [service, cwd, commit]);
 
+  const tree = useMemo(() => buildChangeTree(changes ?? []), [changes]);
+
+  const toggle = (dirPath: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(dirPath)) next.delete(dirPath);
+      else next.add(dirPath);
+      return next;
+    });
+
   if (!commit) {
     return (
       <div className="weditor__row weditor__row--hint">
@@ -393,12 +413,114 @@ function ChangedFiles({
       {changes?.length === 0 && (
         <div className="weditor__row weditor__row--hint">No changes.</div>
       )}
-      {changes?.map((c) => (
+      {changes && changes.length > 0 && (
+        <ChangeTree
+          node={tree}
+          prefix=""
+          depth={0}
+          commit={commit}
+          collapsed={collapsed}
+          activePath={activePath}
+          onToggle={toggle}
+          onOpenDiff={onOpenDiff}
+        />
+      )}
+    </>
+  );
+}
+
+// --- changed-files tree -----------------------------------------------------
+
+/** A directory in the changed-files tree: subdirectories plus files directly in it. */
+interface ChangeTreeNode {
+  dirs: Map<string, ChangeTreeNode>;
+  files: GitChange[];
+}
+
+/** Group a flat list of changed files into a nested directory tree by path. */
+function buildChangeTree(changes: GitChange[]): ChangeTreeNode {
+  const root: ChangeTreeNode = { dirs: new Map(), files: [] };
+  for (const change of changes) {
+    const parts = change.path.split("/");
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const seg = parts[i];
+      let child = node.dirs.get(seg);
+      if (!child) {
+        child = { dirs: new Map(), files: [] };
+        node.dirs.set(seg, child);
+      }
+      node = child;
+    }
+    node.files.push(change);
+  }
+  return root;
+}
+
+/** Recursively render a changed-files directory node: folders first, then files. */
+function ChangeTree({
+  node,
+  prefix,
+  depth,
+  commit,
+  collapsed,
+  activePath,
+  onToggle,
+  onOpenDiff,
+}: {
+  node: ChangeTreeNode;
+  prefix: string;
+  depth: number;
+  commit: string;
+  collapsed: Set<string>;
+  activePath?: string;
+  onToggle: (dirPath: string) => void;
+  onOpenDiff: (path: string, commit: string) => void;
+}) {
+  const indent = { paddingLeft: `${depth * 12 + 8}px` };
+  const dirNames = [...node.dirs.keys()].sort((a, b) => a.localeCompare(b));
+  const files = [...node.files].sort((a, b) =>
+    (a.path.split("/").pop() ?? "").localeCompare(b.path.split("/").pop() ?? ""),
+  );
+
+  return (
+    <>
+      {dirNames.map((name) => {
+        const dirPath = prefix ? `${prefix}/${name}` : name;
+        const open = !collapsed.has(dirPath);
+        return (
+          <Fragment key={dirPath}>
+            <button
+              className="weditor__row weditor__row--dir"
+              style={indent}
+              title={name}
+              onClick={() => onToggle(dirPath)}
+            >
+              <span className={`weditor__twist ${open ? "is-open" : ""}`}>▸</span>
+              <span className="weditor__label">{name}</span>
+            </button>
+            {open && (
+              <ChangeTree
+                node={node.dirs.get(name)!}
+                prefix={dirPath}
+                depth={depth + 1}
+                commit={commit}
+                collapsed={collapsed}
+                activePath={activePath}
+                onToggle={onToggle}
+                onOpenDiff={onOpenDiff}
+              />
+            )}
+          </Fragment>
+        );
+      })}
+      {files.map((c) => (
         <button
           key={c.path}
           className={`weditor__row weditor__row--file ${
             activePath === c.path ? "is-active" : ""
           }`}
+          style={indent}
           title={c.path}
           onClick={() => onOpenDiff(c.path, commit)}
         >

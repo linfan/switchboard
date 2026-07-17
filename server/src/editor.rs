@@ -12,7 +12,7 @@ use std::process::Stdio;
 
 use tokio::process::Command;
 
-use switchboard_shared::{FileContent, GitChange, GitCommit, GitDiff, GitInfo};
+use switchboard_shared::{FileContent, GitChange, GitCommit, GitDiff, GitFileDiff, GitInfo};
 
 use crate::error::{AppError, AppResult};
 
@@ -293,6 +293,64 @@ pub async fn git_diff(cwd: &str, commit: &str, path: &str) -> AppResult<GitDiff>
     })
 }
 
+/// Old + new contents of one file, for the client's editor diff view. Unlike
+/// [`git_diff`] (which returns a pre-rendered unified diff), this hands back both
+/// sides so the client can render a real side-by-side/inline diff editor.
+pub async fn git_file_diff(cwd: &str, commit: &str, path: &str) -> AppResult<GitFileDiff> {
+    require_dir(cwd)?;
+    if path.trim().is_empty() {
+        return Err(AppError::BadRequest("missing file path".into()));
+    }
+    // Validate the commit-ish up front so a malicious value is rejected
+    // regardless of whether the folder turns out to be a repo.
+    if commit != WORKING {
+        validate_hash(commit)?;
+    }
+    let Some(root) = toplevel(cwd).await else {
+        return Ok(GitFileDiff {
+            path: path.to_string(),
+            old_text: String::new(),
+            new_text: String::new(),
+            binary: false,
+        });
+    };
+
+    // Content of `path` at a git rev via the `rev:path` syntax; empty when the
+    // rev/path doesn't resolve (root commit, added file, untracked, …).
+    async fn at_rev(root: &str, rev: &str, path: &str) -> String {
+        git(root, &["show", &format!("{rev}:{path}")])
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    let (old_text, new_text) = if commit == WORKING {
+        // New side is the current working-tree file; old side is HEAD's version.
+        let working = tokio::fs::read(PathBuf::from(&root).join(path))
+            .await
+            .unwrap_or_default();
+        let new_text = String::from_utf8_lossy(&working).into_owned();
+        let old_text = at_rev(&root, "HEAD", path).await;
+        (old_text, new_text)
+    } else {
+        // A commit vs its first parent.
+        let new_text = at_rev(&root, commit, path).await;
+        let old_text = at_rev(&root, &format!("{commit}^"), path).await;
+        (old_text, new_text)
+    };
+
+    // Treat an embedded NUL as "binary" (mirrors `read_file`): don't ship control
+    // bytes to the diff editor.
+    let binary = old_text.contains('\0') || new_text.contains('\0');
+    Ok(GitFileDiff {
+        path: path.to_string(),
+        old_text: if binary { String::new() } else { old_text },
+        new_text: if binary { String::new() } else { new_text },
+        binary,
+    })
+}
+
 /// Ensure `cwd` exists and is a directory before shelling out to git.
 fn require_dir(cwd: &str) -> AppResult<()> {
     if cwd.trim().is_empty() {
@@ -404,12 +462,34 @@ mod tests {
         let diff = git_diff(cwd, &log[0].hash, "a.txt").await.unwrap();
         assert!(diff.diff.contains("hello"));
 
+        // File-diff of the (added) file in the first commit: new side has the
+        // content, old side is empty (no parent).
+        let fd = git_file_diff(cwd, &log[0].hash, "a.txt").await.unwrap();
+        assert_eq!(fd.new_text, "hello\n");
+        assert_eq!(fd.old_text, "");
+        assert!(!fd.binary);
+
         // Working-tree change shows up under the WORKING sentinel.
         std::fs::write(dir.path().join("a.txt"), "hello\nworld\n").unwrap();
         let working = git_changes(cwd, WORKING).await.unwrap();
         assert!(working.iter().any(|c| c.path == "a.txt"));
         let wdiff = git_diff(cwd, WORKING, "a.txt").await.unwrap();
         assert!(wdiff.diff.contains("world"));
+
+        // File-diff of the working-tree change: old side is HEAD, new side is disk.
+        let wfd = git_file_diff(cwd, WORKING, "a.txt").await.unwrap();
+        assert_eq!(wfd.old_text, "hello\n");
+        assert_eq!(wfd.new_text, "hello\nworld\n");
+        assert!(!wfd.binary);
+
+        // A second commit modifying the file: old side is the first commit's version.
+        run(dir.path(), &["add", "a.txt"]);
+        run(dir.path(), &["commit", "-q", "-m", "second"]);
+        let log2 = git_log(cwd).await.unwrap();
+        let head = &log2[0].hash;
+        let mfd = git_file_diff(cwd, head, "a.txt").await.unwrap();
+        assert_eq!(mfd.old_text, "hello\n");
+        assert_eq!(mfd.new_text, "hello\nworld\n");
     }
 
     #[tokio::test]

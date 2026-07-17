@@ -14,3 +14,4 @@ export type { GitInfo } from "./GitInfo";
 export type { GitCommit } from "./GitCommit";
 export type { GitChange } from "./GitChange";
 export type { GitDiff } from "./GitDiff";
+export type { GitFileDiff } from "./GitFileDiff";
