@@ -11,8 +11,8 @@ import {
 } from "../store/types";
 import { AddServiceDialog } from "./AddServiceDialog";
 import { AddWorkspaceDialog } from "./AddWorkspaceDialog";
-import { ConfirmButton } from "./ConfirmButton";
 import { InlineEdit } from "./InlineEdit";
+import { Menu } from "./Menu";
 import { NewTaskDialog } from "./NewTaskDialog";
 
 function Caret({ collapsed }: { collapsed: boolean }) {
@@ -139,39 +139,27 @@ function ServiceGroup({ service }: { service: Service }) {
         <span className={`dot dot--${status}`} title={status} />
         <span className="service__name">{service.name}</span>
         <span className="service__spacer" />
-        <button
-          className="icon-btn icon-btn--sm"
-          title="Add workspace"
-          onClick={() => setAddingWorkspace(true)}
-        >
-          +ws
-        </button>
-        <button
-          className="icon-btn icon-btn--sm"
-          title="Edit service"
-          onClick={() => setEditing(true)}
-        >
-          ✎
-        </button>
-        <button
-          className="icon-btn icon-btn--sm"
-          title="Reconnect now"
-          onClick={() => pool.reconnect(service.id)}
-        >
-          ↻
-        </button>
-        <ConfirmButton
-          className="icon-btn icon-btn--sm"
-          armedClassName="icon-btn--danger"
-          title="Remove service"
-          armedTitle="Click again to remove this service"
-          onConfirm={() => {
-            for (const w of serviceWorkspaces) editors.dispose(w.id);
-            removeService(service.id);
-          }}
-        >
-          ×
-        </ConfirmButton>
+        <Menu
+          triggerClassName="icon-btn icon-btn--sm row-menu"
+          title="Service actions"
+          items={[
+            {
+              label: "Add workspace",
+              onClick: () => setAddingWorkspace(true),
+            },
+            { label: "Edit service", onClick: () => setEditing(true) },
+            { label: "Reconnect now", onClick: () => pool.reconnect(service.id) },
+            {
+              label: "Remove service",
+              confirm: "Click again to remove",
+              danger: true,
+              onClick: () => {
+                for (const w of serviceWorkspaces) editors.dispose(w.id);
+                removeService(service.id);
+              },
+            },
+          ]}
+        />
       </div>
       {status !== "online" && (
         <div className="service__status">
@@ -271,26 +259,23 @@ function WorkspaceGroup({
           onCommit={(name) => updateWorkspace(workspace.id, { name })}
         />
         <span className="service__spacer" />
-        <button
-          className="icon-btn icon-btn--sm"
-          title="New task"
-          disabled={!online}
-          onClick={(e) => {
-            e.stopPropagation();
-            setAddingTask(true);
-          }}
-        >
-          +task
-        </button>
-        <ConfirmButton
-          className="icon-btn icon-btn--sm"
-          armedClassName="icon-btn--danger"
-          title="Remove workspace"
-          armedTitle="Click again to remove this workspace and delete its tasks"
-          onConfirm={remove}
-        >
-          ×
-        </ConfirmButton>
+        <Menu
+          triggerClassName="icon-btn icon-btn--sm row-menu"
+          title="Workspace actions"
+          items={[
+            {
+              label: "New task",
+              disabled: !online,
+              onClick: () => setAddingTask(true),
+            },
+            {
+              label: "Remove workspace",
+              confirm: "Click again to remove (deletes its tasks)",
+              danger: true,
+              onClick: remove,
+            },
+          ]}
+        />
       </div>
       {!collapsed && (
         <TaskList
@@ -365,15 +350,18 @@ function TaskList({
               <span className={`badge badge--${c.task.status.state}`}>
                 {c.task.status.state}
               </span>
-              <ConfirmButton
-                className="icon-btn icon-btn--sm conv__del"
-                armedClassName="icon-btn--danger"
-                title="Delete task"
-                armedTitle="Click again to delete this task and its history"
-                onConfirm={() => pool.deleteTask(serviceId, c.task.id)}
-              >
-                ×
-              </ConfirmButton>
+              <Menu
+                triggerClassName="icon-btn icon-btn--sm row-menu"
+                title="Task actions"
+                items={[
+                  {
+                    label: "Delete task",
+                    confirm: "Click again to delete",
+                    danger: true,
+                    onClick: () => pool.deleteTask(serviceId, c.task.id),
+                  },
+                ]}
+              />
             </span>
           </li>
         );

@@ -16,6 +16,7 @@ import { css } from "@codemirror/lang-css";
 import * as editors from "../net/editors";
 import { gitFileDiff, readFile, writeFile } from "../net/rest";
 import { tabKey, type DiffLayout, type OpenFile } from "../store/types";
+import { ContextMenu } from "./Menu";
 
 /** Map a file path's extension to a CodeMirror language extension (or none). */
 function langForPath(path: string): Extension {
@@ -81,6 +82,10 @@ export function EditorArea({
   diffLayout,
   onActivate,
   onClose,
+  onReorder,
+  onCloseOthers,
+  onCloseToRight,
+  onCloseAll,
   onDiffLayout,
 }: {
   workspaceId: string;
@@ -91,6 +96,10 @@ export function EditorArea({
   diffLayout: DiffLayout;
   onActivate: (key: string) => void;
   onClose: (key: string) => void;
+  onReorder: (fromKey: string, toKey: string) => void;
+  onCloseOthers: (key: string) => void;
+  onCloseToRight: (key: string) => void;
+  onCloseAll: () => void;
   onDiffLayout: (layout: DiffLayout) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -98,6 +107,20 @@ export function EditorArea({
   const [error, setError] = useState<string | null>(null);
   // Per-tab dirty flags, mirrored from the registry so the tab bar re-renders.
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
+  // Drag-to-reorder state: the tab key being dragged, and the one hovered over.
+  // A ref mirrors the source key so drag handlers read it synchronously,
+  // without waiting for the state update from dragstart to flush.
+  const dragKeyRef = useRef<string | null>(null);
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [dragOverKey, setDragOverKey] = useState<string | null>(null);
+  // True while hovering the empty area past the last tab (drop = move to end).
+  const [dragOverEnd, setDragOverEnd] = useState(false);
+  // Right-click context menu: cursor position + the tab it targets.
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    key: string;
+  } | null>(null);
 
   const active =
     tabs.find((t) => tabKey(t) === activeKey) ?? tabs[tabs.length - 1];
@@ -298,14 +321,40 @@ export function EditorArea({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, key, path, mode, commit, diffLayout]);
 
-  const closeTab = (k: string) => {
-    editors.disposeTab(workspaceId, k);
+  // Dispose the live views for a set of tab keys and forget their dirty flags.
+  // The store still owns the tab list; this just tears down the CM editors.
+  const disposeKeys = (keys: string[]) => {
+    if (keys.length === 0) return;
+    keys.forEach((k) => editors.disposeTab(workspaceId, k));
     setDirty((m) => {
       const next = { ...m };
-      delete next[k];
+      keys.forEach((k) => delete next[k]);
       return next;
     });
+  };
+
+  const closeTab = (k: string) => {
+    disposeKeys([k]);
     onClose(k);
+  };
+
+  const keysOf = (list: OpenFile[]) => list.map((t) => tabKey(t));
+
+  const closeOthers = (k: string) => {
+    disposeKeys(keysOf(tabs).filter((tk) => tk !== k));
+    onCloseOthers(k);
+  };
+
+  const closeToRight = (k: string) => {
+    const idx = tabs.findIndex((t) => tabKey(t) === k);
+    if (idx === -1) return;
+    disposeKeys(keysOf(tabs.slice(idx + 1)));
+    onCloseToRight(k);
+  };
+
+  const closeAll = () => {
+    disposeKeys(keysOf(tabs));
+    onCloseAll();
   };
 
   if (tabs.length === 0 || !active) {
@@ -321,16 +370,81 @@ export function EditorArea({
   return (
     <div className="weditor__area">
       <div className="weditor__tabbar">
-        <div className="weditor__tabs">
+        <div
+          className={`weditor__tabs ${dragOverEnd ? "is-dragover-end" : ""}`}
+          onDragOver={(e) => {
+            // Fires only for the empty area past the tabs: tabs stopPropagation.
+            if (!dragKeyRef.current) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+            if (dragOverKey) setDragOverKey(null);
+            if (!dragOverEnd) setDragOverEnd(true);
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            const src = dragKeyRef.current;
+            const lastKey = tabs.length ? tabKey(tabs[tabs.length - 1]) : null;
+            if (src && lastKey && src !== lastKey) onReorder(src, lastKey);
+            dragKeyRef.current = null;
+            setDragKey(null);
+            setDragOverKey(null);
+            setDragOverEnd(false);
+          }}
+        >
           {tabs.map((t) => {
             const k = tabKey(t);
             const d = isDirty(k) && t.mode === "edit";
             return (
               <div
                 key={k}
-                className={`weditor__tab ${k === key ? "is-active" : ""}`}
+                className={`weditor__tab ${k === key ? "is-active" : ""} ${
+                  k === dragKey ? "is-dragging" : ""
+                } ${k === dragOverKey ? "is-dragover" : ""}`}
                 title={t.mode === "diff" ? `${t.path} (diff)` : t.path}
+                draggable
                 onClick={() => onActivate(k)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setCtxMenu({ x: e.clientX, y: e.clientY, key: k });
+                }}
+                onDragStart={(e) => {
+                  dragKeyRef.current = k;
+                  setDragKey(k);
+                  e.dataTransfer.effectAllowed = "move";
+                  // WebKit/Firefox only fire drop events if drag data is set.
+                  e.dataTransfer.setData("text/plain", k);
+                }}
+                onDragOver={(e) => {
+                  const src = dragKeyRef.current;
+                  if (!src) return;
+                  // Handle here so the container's end-drop zone stays inactive
+                  // while pointing at a tab.
+                  e.stopPropagation();
+                  if (dragOverEnd) setDragOverEnd(false);
+                  if (src === k) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                  if (dragOverKey !== k) setDragOverKey(k);
+                }}
+                onDragLeave={() => {
+                  if (dragOverKey === k) setDragOverKey(null);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const src = dragKeyRef.current;
+                  if (src && src !== k) onReorder(src, k);
+                  dragKeyRef.current = null;
+                  setDragKey(null);
+                  setDragOverKey(null);
+                  setDragOverEnd(false);
+                }}
+                onDragEnd={() => {
+                  dragKeyRef.current = null;
+                  setDragKey(null);
+                  setDragOverKey(null);
+                  setDragOverEnd(false);
+                }}
               >
                 <span className="weditor__tab-name">
                   {t.mode === "diff" ? "◈ " : ""}
@@ -400,6 +514,34 @@ export function EditorArea({
         style={{ display: status === "ready" ? "block" : "none" }}
       />
       {status === "loading" && <p className="hint">Loading…</p>}
+
+      {ctxMenu &&
+        (() => {
+          const idx = tabs.findIndex((t) => tabKey(t) === ctxMenu.key);
+          const isLast = idx === tabs.length - 1;
+          const onlyOne = tabs.length <= 1;
+          return (
+            <ContextMenu
+              x={ctxMenu.x}
+              y={ctxMenu.y}
+              onClose={() => setCtxMenu(null)}
+              items={[
+                { label: "Close", onClick: () => closeTab(ctxMenu.key) },
+                {
+                  label: "Close Others",
+                  disabled: onlyOne,
+                  onClick: () => closeOthers(ctxMenu.key),
+                },
+                {
+                  label: "Close to the Right",
+                  disabled: isLast,
+                  onClick: () => closeToRight(ctxMenu.key),
+                },
+                { label: "Close All Tabs", onClick: () => closeAll() },
+              ]}
+            />
+          );
+        })()}
     </div>
   );
 }

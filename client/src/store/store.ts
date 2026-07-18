@@ -36,6 +36,8 @@ export interface AppState {
   pendingWorkspace: Record<string, string[]>;
   /** Whether the left control panel is collapsed (persisted). */
   sidebarCollapsed: boolean;
+  /** Width of the left control panel in px when expanded (persisted). */
+  sidebarWidth: number;
   /** Per-service live connection state (in-memory). */
   runtime: Record<string, ServiceRuntime>;
   /** Conversations keyed by `serviceId::taskId`. */
@@ -87,6 +89,8 @@ export interface AppState {
   // --- layout --------------------------------------------------------------
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebar: () => void;
+  /** Set the expanded sidebar width in px. */
+  setSidebarWidth: (width: number) => void;
 
   // --- sync application ----------------------------------------------------
   /** Apply one server (control-plane) message for a given service. */
@@ -108,6 +112,14 @@ export interface AppState {
   openTab: (workspaceId: string, file: OpenFile) => void;
   /** Close a tab; if it was active, focus a neighbouring tab. */
   closeTab: (workspaceId: string, key: string) => void;
+  /** Reorder open tabs: move the `fromKey` tab to `toKey`'s position. */
+  moveTab: (workspaceId: string, fromKey: string, toKey: string) => void;
+  /** Close every tab except `key`, which becomes active. */
+  closeOtherTabs: (workspaceId: string, key: string) => void;
+  /** Close all tabs positioned after `key`. */
+  closeTabsToRight: (workspaceId: string, key: string) => void;
+  /** Close every tab in the workspace. */
+  closeAllTabs: (workspaceId: string) => void;
   /** Make an already-open tab the active one. */
   setActiveTab: (workspaceId: string, key: string) => void;
 
@@ -135,6 +147,7 @@ export const useStore = create<AppState>()(
       titles: {},
       pendingWorkspace: {},
       sidebarCollapsed: false,
+      sidebarWidth: 260,
       runtime: {},
       conversations: {},
       cursors: {},
@@ -292,6 +305,9 @@ export const useStore = create<AppState>()(
       toggleSidebar: () =>
         set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 
+      setSidebarWidth: (width) =>
+        set({ sidebarWidth: Math.min(560, Math.max(180, Math.round(width))) }),
+
       applyServerMsg: (serviceId, msg) =>
         set((s) => applyMsg(s, serviceId, msg)),
 
@@ -365,6 +381,76 @@ export const useStore = create<AppState>()(
           };
         }),
 
+      moveTab: (workspaceId, fromKey, toKey) =>
+        set((s) => {
+          const editorState = s.editorState ?? {};
+          const cur = editorState[workspaceId];
+          if (!cur) return {};
+          const tabs = cur.openTabs ?? [];
+          const from = tabs.findIndex((t) => tabKey(t) === fromKey);
+          const to = tabs.findIndex((t) => tabKey(t) === toKey);
+          if (from === -1 || to === -1 || from === to) return {};
+          const openTabs = [...tabs];
+          const [moved] = openTabs.splice(from, 1);
+          openTabs.splice(to, 0, moved);
+          return {
+            editorState: {
+              ...editorState,
+              [workspaceId]: { ...cur, openTabs },
+            },
+          };
+        }),
+
+      closeOtherTabs: (workspaceId, key) =>
+        set((s) => {
+          const editorState = s.editorState ?? {};
+          const cur = editorState[workspaceId];
+          if (!cur) return {};
+          const tabs = cur.openTabs ?? [];
+          const openTabs = tabs.filter((t) => tabKey(t) === key);
+          if (openTabs.length === tabs.length) return {};
+          return {
+            editorState: {
+              ...editorState,
+              [workspaceId]: { ...cur, openTabs, activeTab: key },
+            },
+          };
+        }),
+
+      closeTabsToRight: (workspaceId, key) =>
+        set((s) => {
+          const editorState = s.editorState ?? {};
+          const cur = editorState[workspaceId];
+          if (!cur) return {};
+          const tabs = cur.openTabs ?? [];
+          const idx = tabs.findIndex((t) => tabKey(t) === key);
+          if (idx === -1 || idx === tabs.length - 1) return {};
+          const openTabs = tabs.slice(0, idx + 1);
+          // If the active tab was among those closed, focus the anchor tab.
+          const activeTab = openTabs.some((t) => tabKey(t) === cur.activeTab)
+            ? cur.activeTab
+            : key;
+          return {
+            editorState: {
+              ...editorState,
+              [workspaceId]: { ...cur, openTabs, activeTab },
+            },
+          };
+        }),
+
+      closeAllTabs: (workspaceId) =>
+        set((s) => {
+          const editorState = s.editorState ?? {};
+          const cur = editorState[workspaceId];
+          if (!cur || (cur.openTabs ?? []).length === 0) return {};
+          return {
+            editorState: {
+              ...editorState,
+              [workspaceId]: { ...cur, openTabs: [], activeTab: undefined },
+            },
+          };
+        }),
+
       setActiveTab: (workspaceId, key) =>
         set((s) => {
           const editorState = s.editorState ?? {};
@@ -397,6 +483,7 @@ export const useStore = create<AppState>()(
         titles: s.titles,
         recentTools: s.recentTools,
         sidebarCollapsed: s.sidebarCollapsed,
+        sidebarWidth: s.sidebarWidth,
         selectedWorkspaceId: s.selectedWorkspaceId,
         editorState: s.editorState,
       }),

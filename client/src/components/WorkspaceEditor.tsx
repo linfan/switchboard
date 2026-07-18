@@ -31,6 +31,10 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
   const openTab = useStore((s) => s.openTab);
   const closeTab = useStore((s) => s.closeTab);
   const setActiveTab = useStore((s) => s.setActiveTab);
+  const moveTab = useStore((s) => s.moveTab);
+  const closeOtherTabs = useStore((s) => s.closeOtherTabs);
+  const closeTabsToRight = useStore((s) => s.closeTabsToRight);
+  const closeAllTabs = useStore((s) => s.closeAllTabs);
 
   const [git, setGit] = useState<GitInfo | null>(null);
   const [gitError, setGitError] = useState<string | null>(null);
@@ -180,6 +184,10 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
           diffLayout={diffLayout}
           onActivate={(k) => setActiveTab(workspace.id, k)}
           onClose={(k) => closeTab(workspace.id, k)}
+          onReorder={(from, to) => moveTab(workspace.id, from, to)}
+          onCloseOthers={(k) => closeOtherTabs(workspace.id, k)}
+          onCloseToRight={(k) => closeTabsToRight(workspace.id, k)}
+          onCloseAll={() => closeAllTabs(workspace.id)}
           onDiffLayout={(layout) => patch(workspace.id, { diffLayout: layout })}
         />
       </div>

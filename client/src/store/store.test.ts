@@ -413,6 +413,67 @@ describe("workspace editor selection", () => {
     expect(es.activeTab).toBeUndefined();
   });
 
+  it("moveTab reorders open tabs without changing the active tab", () => {
+    const st = useStore.getState();
+    st.openTab("w1", { path: "/w/a.ts", mode: "edit" });
+    st.openTab("w1", { path: "/w/b.ts", mode: "edit" });
+    st.openTab("w1", { path: "/w/c.ts", mode: "edit" });
+    st.setActiveTab("w1", "edit::/w/b.ts");
+
+    // Move the first tab to the last tab's slot.
+    st.moveTab("w1", "edit::/w/a.ts", "edit::/w/c.ts");
+    const es = useStore.getState().editorState["w1"];
+    expect(es.openTabs.map((t) => t.path)).toEqual([
+      "/w/b.ts",
+      "/w/c.ts",
+      "/w/a.ts",
+    ]);
+    expect(es.activeTab).toBe("edit::/w/b.ts");
+  });
+
+  it("closeOthers/closeToRight/closeAll prune the tab list", () => {
+    const open = () => {
+      const st = useStore.getState();
+      st.closeAllTabs("w1");
+      st.openTab("w1", { path: "/w/a.ts", mode: "edit" });
+      st.openTab("w1", { path: "/w/b.ts", mode: "edit" });
+      st.openTab("w1", { path: "/w/c.ts", mode: "edit" });
+    };
+
+    // Close others keeps only the target and makes it active.
+    open();
+    useStore.getState().setActiveTab("w1", "edit::/w/a.ts");
+    useStore.getState().closeOtherTabs("w1", "edit::/w/b.ts");
+    let es = useStore.getState().editorState["w1"];
+    expect(es.openTabs.map((t) => t.path)).toEqual(["/w/b.ts"]);
+    expect(es.activeTab).toBe("edit::/w/b.ts");
+
+    // Close to the right drops tabs after the anchor; active falls back to it.
+    open();
+    useStore.getState().setActiveTab("w1", "edit::/w/c.ts");
+    useStore.getState().closeTabsToRight("w1", "edit::/w/a.ts");
+    es = useStore.getState().editorState["w1"];
+    expect(es.openTabs.map((t) => t.path)).toEqual(["/w/a.ts"]);
+    expect(es.activeTab).toBe("edit::/w/a.ts");
+
+    // Close all empties the list and clears the active tab.
+    open();
+    useStore.getState().closeAllTabs("w1");
+    es = useStore.getState().editorState["w1"];
+    expect(es.openTabs).toEqual([]);
+    expect(es.activeTab).toBeUndefined();
+  });
+
+  it("setSidebarWidth clamps to the allowed range", () => {
+    const st = useStore.getState();
+    st.setSidebarWidth(50);
+    expect(useStore.getState().sidebarWidth).toBe(180);
+    st.setSidebarWidth(9999);
+    expect(useStore.getState().sidebarWidth).toBe(560);
+    st.setSidebarWidth(320);
+    expect(useStore.getState().sidebarWidth).toBe(320);
+  });
+
   it("removeWorkspace drops its editor state and clears selection", () => {
     const st = useStore.getState();
     const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });

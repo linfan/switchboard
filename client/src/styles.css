@@ -27,8 +27,25 @@ body {
 .app {
   position: relative;
   display: grid;
+  /* Default column width; overridden inline from the persisted sidebarWidth. */
   grid-template-columns: 260px 1fr;
   height: 100vh;
+}
+
+/* Draggable handle sitting over the sidebar's right border. Positioned inline
+   from the current sidebar width. */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  margin-left: -3px;
+  cursor: col-resize;
+  z-index: 15;
+}
+.sidebar-resizer:hover {
+  background: var(--accent);
+  opacity: 0.5;
 }
 .app--collapsed {
   grid-template-columns: 1fr;
@@ -368,6 +385,69 @@ body {
 .caret-btn:hover:not(:disabled) {
   border: none;
   color: var(--fg);
+}
+
+/* --- row action menu (⋯ dropdown trigger) --- */
+/* The per-row trigger is hidden until the row is hovered, or the menu is open. */
+.row-menu {
+  visibility: hidden;
+}
+.service__head:hover .row-menu,
+.workspace__head:hover .row-menu,
+.workspace__head--active .row-menu,
+.conv:hover .row-menu,
+.conv--active .row-menu,
+.row-menu.is-open {
+  visibility: visible;
+}
+.row-menu.is-open {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+/* --- popup menu (dropdown + context menu) --- */
+.menu__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+}
+.menu {
+  position: fixed;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.menu__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  border-radius: 5px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.menu__item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+}
+.menu__item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.menu__item--danger {
+  color: #f85149;
+}
+.menu__item--danger:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.14);
 }
 
 /* --- panel header --- */
@@ -712,6 +792,14 @@ body {
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
 }
+/* Insertion indicator when dropping past the last tab (move to end). */
+.weditor__tabs.is-dragover-end::after {
+  content: "";
+  flex: none;
+  align-self: stretch;
+  width: 2px;
+  background: var(--accent);
+}
 .weditor__tab {
   flex: none;
   display: flex;
@@ -730,6 +818,13 @@ body {
 .weditor__tab.is-active {
   color: var(--fg);
   background: var(--bg);
+}
+.weditor__tab.is-dragging {
+  opacity: 0.4;
+}
+/* Drop indicator: a left accent border on the tab being hovered over. */
+.weditor__tab.is-dragover {
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .weditor__tab-name {
   overflow: hidden;
