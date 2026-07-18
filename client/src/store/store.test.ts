@@ -464,6 +464,27 @@ describe("workspace editor selection", () => {
     expect(es.activeTab).toBeUndefined();
   });
 
+  it("closeTabsUnder closes a path and its descendants", () => {
+    const st = useStore.getState();
+    st.closeAllTabs("w1");
+    st.openTab("w1", { path: "/w/a.ts", mode: "edit" });
+    st.openTab("w1", { path: "/w/sub/b.ts", mode: "edit" });
+    st.openTab("w1", { path: "/w/sub/c.ts", mode: "edit" });
+
+    // Closing the folder closes both descendants, keeps the sibling file.
+    st.setActiveTab("w1", "edit::/w/sub/b.ts");
+    st.closeTabsUnder("w1", "/w/sub");
+    let es = useStore.getState().editorState["w1"];
+    expect(es.openTabs.map((t) => t.path)).toEqual(["/w/a.ts"]);
+    expect(es.activeTab).toBe("edit::/w/a.ts");
+
+    // Closing an exact file path closes just that tab.
+    st.openTab("w1", { path: "/w/a.ts.bak", mode: "edit" });
+    st.closeTabsUnder("w1", "/w/a.ts");
+    es = useStore.getState().editorState["w1"];
+    expect(es.openTabs.map((t) => t.path)).toEqual(["/w/a.ts.bak"]);
+  });
+
   it("setSidebarWidth clamps to the allowed range", () => {
     const st = useStore.getState();
     st.setSidebarWidth(50);

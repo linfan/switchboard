@@ -233,6 +233,23 @@ export function writeFile(
   return apiRequest<void>(service, "PUT", `/api/file`, { path, content });
 }
 
+/** Rename a file/directory to a sibling `newName` in the same parent. */
+export function renamePath(
+  service: ServiceRef,
+  path: string,
+  newName: string,
+): Promise<void> {
+  return apiRequest<void>(service, "POST", `/api/fs/rename`, {
+    path,
+    new_name: newName,
+  });
+}
+
+/** Delete a file, or a directory and its contents. */
+export function deletePath(service: ServiceRef, path: string): Promise<void> {
+  return apiRequest<void>(service, "POST", `/api/fs/delete`, { path });
+}
+
 /** Report git availability + repo state for a workspace folder. */
 export function gitInfo(service: ServiceRef, cwd: string): Promise<GitInfo> {
   return apiRequest<GitInfo>(

@@ -120,6 +120,8 @@ export interface AppState {
   closeTabsToRight: (workspaceId: string, key: string) => void;
   /** Close every tab in the workspace. */
   closeAllTabs: (workspaceId: string) => void;
+  /** Close tabs for `path` or any descendant (after a rename/delete). */
+  closeTabsUnder: (workspaceId: string, path: string) => void;
   /** Make an already-open tab the active one. */
   setActiveTab: (workspaceId: string, key: string) => void;
 
@@ -447,6 +449,34 @@ export const useStore = create<AppState>()(
             editorState: {
               ...editorState,
               [workspaceId]: { ...cur, openTabs: [], activeTab: undefined },
+            },
+          };
+        }),
+
+      closeTabsUnder: (workspaceId, path) =>
+        set((s) => {
+          const editorState = s.editorState ?? {};
+          const cur = editorState[workspaceId];
+          if (!cur) return {};
+          const tabs = cur.openTabs ?? [];
+          const prefix = `${path}/`;
+          const affected = (t: OpenFile) =>
+            t.path === path || t.path.startsWith(prefix);
+          const openTabs = tabs.filter((t) => !affected(t));
+          if (openTabs.length === tabs.length) return {};
+          // Keep the active tab unless it was one of the closed ones.
+          const activeStillOpen = openTabs.some(
+            (t) => tabKey(t) === cur.activeTab,
+          );
+          const activeTab = activeStillOpen
+            ? cur.activeTab
+            : openTabs.length
+              ? tabKey(openTabs[openTabs.length - 1])
+              : undefined;
+          return {
+            editorState: {
+              ...editorState,
+              [workspaceId]: { ...cur, openTabs, activeTab },
             },
           };
         }),

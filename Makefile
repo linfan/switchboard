@@ -76,8 +76,8 @@ lint: ## Lint Rust (clippy) + client
 	cd client && $(NPM) run lint --if-present
 
 # ---------------------------------------------------------------- deploy
-.PHONY: deploy-server package-client clean
-deploy-server: build-server ## Produce a self-contained server release artifact
+.PHONY: package-server package-client clean
+package-server: build-server ## Produce a self-contained server release artifact
 	@mkdir -p dist
 	cp target/release/$(SERVER_BIN) dist/ 2>/dev/null || true
 	@echo "Server binary staged in ./dist"

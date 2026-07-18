@@ -727,6 +727,12 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Inline rename input inside a tree row: fit the row, don't inflate its height. */
+.weditor__row .inline-edit {
+  padding: 0 4px;
+  font: inherit;
+  font-size: 13px;
+}
 .weditor__twist {
   flex: none;
   display: inline-block;

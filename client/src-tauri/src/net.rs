@@ -76,6 +76,69 @@ pub async fn http_request(
     Ok(HttpResponse { status, body })
 }
 
+/// A self-signed-cert-tolerant reqwest client (shared shape with `http_request`).
+fn insecure_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Download a file from the hosting service to a local `dest` path. Fetches the
+/// raw bytes (bearer-authed, self-signed OK) and writes them to disk — binary
+/// safe, no base64 round-trip through the frontend.
+#[tauri::command]
+pub async fn download_file(url: String, token: String, dest: String) -> Result<(), String> {
+    let client = insecure_client()?;
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let message = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or_else(|| format!("HTTP {status}"));
+        return Err(message);
+    }
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    tokio::fs::write(&dest, &bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Upload a local file at `src` to the hosting service by POSTing its raw bytes to
+/// `url` (which carries the target `?dir=&name=`).
+#[tauri::command]
+pub async fn upload_file(url: String, token: String, src: String) -> Result<(), String> {
+    let bytes = tokio::fs::read(&src).await.map_err(|e| e.to_string())?;
+    let client = insecure_client()?;
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let message = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or_else(|| format!("HTTP {status}"));
+        return Err(message);
+    }
+    Ok(())
+}
+
 /// A frame delivered to the frontend on the per-connection `ws:{id}` event.
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "lowercase")]

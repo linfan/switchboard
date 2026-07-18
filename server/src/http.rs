@@ -1,10 +1,12 @@
 //! REST API: health, service info, and task CRUD.
 
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{header, StatusCode},
     middleware,
-    routing::get,
+    response::{IntoResponse, Response},
+    routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -23,6 +25,14 @@ pub fn router(state: SharedState) -> Router {
     let api = Router::new()
         .route("/info", get(info))
         .route("/fs", get(list_dir))
+        .route("/fs/rename", post(rename_entry))
+        .route("/fs/delete", post(delete_entry))
+        .route(
+            "/fs/upload",
+            // Raw file bytes in the body; lift the ~2 MiB default to 100 MiB.
+            post(upload_file).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
+        )
+        .route("/fs/download", get(download_file))
         .route("/file", get(read_file).put(write_file))
         .route("/git/info", get(git_info))
         .route("/git/log", get(git_log))
@@ -66,6 +76,59 @@ struct FsQuery {
 /// List a directory on the hosting machine (for the working-dir folder picker).
 async fn list_dir(Query(q): Query<FsQuery>) -> AppResult<Json<FsListing>> {
     Ok(Json(fs::list_dir(q.path.as_deref())?))
+}
+
+#[derive(Deserialize)]
+struct RenameBody {
+    path: String,
+    new_name: String,
+}
+
+/// Rename a file/directory to a sibling name (file-tree context menu).
+async fn rename_entry(Json(body): Json<RenameBody>) -> AppResult<StatusCode> {
+    fs::rename(&body.path, &body.new_name)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct DeleteBody {
+    path: String,
+}
+
+/// Delete a file, or a directory and its contents (file-tree context menu).
+async fn delete_entry(Json(body): Json<DeleteBody>) -> AppResult<StatusCode> {
+    fs::delete(&body.path)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct UploadQuery {
+    dir: String,
+    name: String,
+}
+
+/// Write an uploaded file's raw bytes into `dir` as `name`.
+async fn upload_file(Query(q): Query<UploadQuery>, body: Bytes) -> AppResult<StatusCode> {
+    fs::upload(&q.dir, &q.name, &body)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Stream a file's raw bytes for download (client saves it locally).
+async fn download_file(Query(q): Query<PathQuery>) -> AppResult<Response> {
+    let (name, bytes) = fs::read_bytes(&q.path)?;
+    // A quoted filename with quotes/backslashes escaped keeps the header valid.
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{escaped}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]

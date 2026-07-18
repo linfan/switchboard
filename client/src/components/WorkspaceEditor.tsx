@@ -1,7 +1,17 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 
-import { gitChanges, gitInfo, gitLog, listDir } from "../net/rest";
+import * as editors from "../net/editors";
+import {
+  deletePath,
+  gitChanges,
+  gitInfo,
+  gitLog,
+  listDir,
+  renamePath,
+} from "../net/rest";
+import { downloadFile, uploadFile } from "../net/transfer";
 import type {
+  FsEntry,
   FsListing,
   GitChange,
   GitCommit,
@@ -15,6 +25,8 @@ import {
   type Workspace,
 } from "../store/types";
 import { EditorArea } from "./EditorArea";
+import { InlineEdit } from "./InlineEdit";
+import { ContextMenu, type MenuItem } from "./Menu";
 
 type ServiceRef = { url: string; token: string };
 
@@ -36,8 +48,13 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
   const closeTabsToRight = useStore((s) => s.closeTabsToRight);
   const closeAllTabs = useStore((s) => s.closeAllTabs);
 
+  const closeTabsUnder = useStore((s) => s.closeTabsUnder);
+
   const [git, setGit] = useState<GitInfo | null>(null);
   const [gitError, setGitError] = useState<string | null>(null);
+  // Bumped after a filesystem op so open directory listings re-fetch.
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [fsError, setFsError] = useState<string | null>(null);
 
   // Width of the left panel column, adjustable by dragging the divider.
   const [panelWidth, setPanelWidth] = useState(280);
@@ -99,6 +116,59 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
     patch(workspace.id, { expandedDirs: next });
   };
 
+  const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+  // A renamed/deleted path invalidates any tab for it (or, for a folder, its
+  // descendants): tear down the live editor views, then drop the tabs.
+  const dropTabsUnder = (path: string) => {
+    for (const t of openTabs) {
+      if (t.path === path || t.path.startsWith(`${path}/`)) {
+        editors.disposeTab(workspace.id, tabKey(t));
+      }
+    }
+    closeTabsUnder(workspace.id, path);
+  };
+
+  const handleRename = async (entry: FsEntry, newName: string) => {
+    setFsError(null);
+    try {
+      await renamePath(service, entry.path, newName);
+      dropTabsUnder(entry.path);
+      setRefreshKey((k) => k + 1);
+    } catch (e) {
+      setFsError(errMsg(e));
+    }
+  };
+
+  const handleDelete = async (entry: FsEntry) => {
+    setFsError(null);
+    try {
+      await deletePath(service, entry.path);
+      dropTabsUnder(entry.path);
+      setRefreshKey((k) => k + 1);
+    } catch (e) {
+      setFsError(errMsg(e));
+    }
+  };
+
+  const handleDownload = async (entry: FsEntry) => {
+    setFsError(null);
+    try {
+      await downloadFile(service, entry.path, entry.name);
+    } catch (e) {
+      setFsError(errMsg(e));
+    }
+  };
+
+  const handleUpload = async (entry: FsEntry) => {
+    setFsError(null);
+    try {
+      if (await uploadFile(service, entry.path)) setRefreshKey((k) => k + 1);
+    } catch (e) {
+      setFsError(errMsg(e));
+    }
+  };
+
   return (
     <main className="panel weditor">
       <header className="panel__header">
@@ -125,10 +195,15 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
                 root={workspace.cwd}
                 expanded={expandedDirs}
                 activePath={active?.mode === "edit" ? active.path : undefined}
+                refreshKey={refreshKey}
                 onToggleDir={toggleDir}
                 onOpenFile={(path) =>
                   openTab(workspace.id, { path, mode: "edit" })
                 }
+                onRename={handleRename}
+                onDelete={handleDelete}
+                onDownload={handleDownload}
+                onUpload={handleUpload}
               />
             </div>
           </section>
@@ -193,38 +268,107 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
       </div>
 
       {gitError && <p className="hint hint--error">{gitError}</p>}
+      {fsError && <p className="hint hint--error">{fsError}</p>}
     </main>
   );
 }
 
 // --- file tree --------------------------------------------------------------
 
+/** Shared handlers/state threaded through the recursive tree nodes. */
+interface TreeActions {
+  service: ServiceRef;
+  expanded: string[];
+  activePath?: string;
+  refreshKey: number;
+  renamingPath: string | null;
+  setRenamingPath: (path: string | null) => void;
+  onToggleDir: (path: string) => void;
+  onOpenFile: (path: string) => void;
+  onContextMenu: (entry: FsEntry, e: React.MouseEvent) => void;
+  onRename: (entry: FsEntry, newName: string) => void;
+}
+
 function FileTree({
   service,
   root,
   expanded,
   activePath,
+  refreshKey,
   onToggleDir,
   onOpenFile,
+  onRename,
+  onDelete,
+  onDownload,
+  onUpload,
 }: {
   service: ServiceRef;
   root: string;
   expanded: string[];
   activePath?: string;
+  refreshKey: number;
   onToggleDir: (path: string) => void;
   onOpenFile: (path: string) => void;
+  onRename: (entry: FsEntry, newName: string) => void;
+  onDelete: (entry: FsEntry) => void;
+  onDownload: (entry: FsEntry) => void;
+  onUpload: (entry: FsEntry) => void;
 }) {
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    entry: FsEntry;
+  } | null>(null);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
+
+  const actions: TreeActions = {
+    service,
+    expanded,
+    activePath,
+    refreshKey,
+    renamingPath,
+    setRenamingPath,
+    onToggleDir,
+    onOpenFile,
+    onContextMenu: (entry, e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setCtxMenu({ x: e.clientX, y: e.clientY, entry });
+    },
+    onRename: (entry, newName) => {
+      setRenamingPath(null);
+      onRename(entry, newName);
+    },
+  };
+
+  const menuItems = (entry: FsEntry): MenuItem[] => {
+    const rename: MenuItem = {
+      label: "Rename",
+      onClick: () => setRenamingPath(entry.path),
+    };
+    const del: MenuItem = {
+      label: entry.is_dir ? "Delete folder" : "Delete",
+      danger: true,
+      confirm: entry.is_dir ? "Click again to delete folder" : "Click again to delete",
+      onClick: () => onDelete(entry),
+    };
+    return entry.is_dir
+      ? [rename, { label: "Upload file…", onClick: () => onUpload(entry) }, del]
+      : [rename, { label: "Download", onClick: () => onDownload(entry) }, del];
+  };
+
   return (
-    <DirNode
-      service={service}
-      path={root}
-      depth={0}
-      isRoot
-      expanded={expanded}
-      activePath={activePath}
-      onToggleDir={onToggleDir}
-      onOpenFile={onOpenFile}
-    />
+    <>
+      <DirNode service={service} path={root} depth={0} isRoot actions={actions} />
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={menuItems(ctxMenu.entry)}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
+    </>
   );
 }
 
@@ -234,22 +378,16 @@ function DirNode({
   name,
   depth,
   isRoot,
-  expanded,
-  activePath,
-  onToggleDir,
-  onOpenFile,
+  actions,
 }: {
   service: ServiceRef;
   path: string;
   name?: string;
   depth: number;
   isRoot?: boolean;
-  expanded: string[];
-  activePath?: string;
-  onToggleDir: (path: string) => void;
-  onOpenFile: (path: string) => void;
+  actions: TreeActions;
 }) {
-  const open = isRoot || expanded.includes(path);
+  const open = isRoot || actions.expanded.includes(path);
   const [listing, setListing] = useState<FsListing | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -268,22 +406,39 @@ function DirNode({
     return () => {
       cancelled = true;
     };
-  }, [open, path, service]);
+    // refreshKey re-lists after a filesystem op (rename/delete/upload).
+  }, [open, path, service, actions.refreshKey]);
 
   const indent = { paddingLeft: `${depth * 12 + 8}px` };
 
   return (
     <>
       {!isRoot && (
-        <button
+        <div
+          role="button"
+          tabIndex={0}
           className="weditor__row weditor__row--dir"
           style={indent}
           title={name}
-          onClick={() => onToggleDir(path)}
+          onClick={() => {
+            if (actions.renamingPath !== path) actions.onToggleDir(path);
+          }}
+          onContextMenu={(e) =>
+            actions.onContextMenu({ name: name ?? "", path, is_dir: true }, e)
+          }
         >
           <span className={`weditor__twist ${open ? "is-open" : ""}`}>▸</span>
-          <span className="weditor__label">{name}</span>
-        </button>
+          <InlineEdit
+            className="weditor__label"
+            value={name ?? ""}
+            ariaLabel="Folder name"
+            editing={actions.renamingPath === path}
+            onEditingChange={(on) => actions.setRenamingPath(on ? path : null)}
+            onCommit={(newName) =>
+              actions.onRename({ name: name ?? "", path, is_dir: true }, newName)
+            }
+          />
+        </div>
       )}
       {open && loading && !listing && (
         <div className="weditor__row weditor__row--hint" style={indent}>
@@ -304,23 +459,34 @@ function DirNode({
               path={e.path}
               name={e.name}
               depth={depth + 1}
-              expanded={expanded}
-              activePath={activePath}
-              onToggleDir={onToggleDir}
-              onOpenFile={onOpenFile}
+              actions={actions}
             />
           ) : (
-            <button
+            <div
               key={e.path}
+              role="button"
+              tabIndex={0}
               className={`weditor__row weditor__row--file ${
-                activePath === e.path ? "is-active" : ""
+                actions.activePath === e.path ? "is-active" : ""
               }`}
               style={{ paddingLeft: `${(depth + 1) * 12 + 8}px` }}
               title={e.name}
-              onClick={() => onOpenFile(e.path)}
+              onClick={() => {
+                if (actions.renamingPath !== e.path) actions.onOpenFile(e.path);
+              }}
+              onContextMenu={(ev) => actions.onContextMenu(e, ev)}
             >
-              <span className="weditor__label">{e.name}</span>
-            </button>
+              <InlineEdit
+                className="weditor__label"
+                value={e.name}
+                ariaLabel="File name"
+                editing={actions.renamingPath === e.path}
+                onEditingChange={(on) =>
+                  actions.setRenamingPath(on ? e.path : null)
+                }
+                onCommit={(newName) => actions.onRename(e, newName)}
+              />
+            </div>
           ),
         )}
     </>

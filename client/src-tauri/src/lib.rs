@@ -8,12 +8,15 @@ mod net;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(net::new_state())
         .invoke_handler(tauri::generate_handler![
             net::http_request,
             net::ws_connect,
             net::ws_send,
-            net::ws_close
+            net::ws_close,
+            net::download_file,
+            net::upload_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

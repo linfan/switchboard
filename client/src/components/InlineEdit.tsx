@@ -4,6 +4,10 @@ import { useEffect, useRef, useState } from "react";
  * A label that turns into a text input on demand. Enter or blur commits the new
  * value via `onCommit`; Escape cancels and restores the original. Used for
  * editable workspace names and task titles in the sidebar.
+ *
+ * Editing state is internal by default (double-click to begin). Pass `editing` +
+ * `onEditingChange` to control it externally — e.g. a file-tree "Rename" menu
+ * action that starts editing without a double-click.
  */
 export function InlineEdit({
   value,
@@ -11,6 +15,8 @@ export function InlineEdit({
   className,
   title,
   ariaLabel,
+  editing: editingProp,
+  onEditingChange,
 }: {
   value: string;
   onCommit: (next: string) => void;
@@ -19,22 +25,33 @@ export function InlineEdit({
   title?: string;
   /** Accessible name for the edit input. */
   ariaLabel?: string;
+  /** Controlled editing state; when set, the component defers to the parent. */
+  editing?: boolean;
+  /** Notified when editing should begin (true) or end (false). */
+  onEditingChange?: (editing: boolean) => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const controlled = editingProp !== undefined;
+  const [editingState, setEditingState] = useState(false);
+  const editing = controlled ? editingProp : editingState;
   const [draft, setDraft] = useState(value);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const setEditing = (next: boolean) => {
+    if (next) setDraft(value);
+    if (controlled) onEditingChange?.(next);
+    else setEditingState(next);
+  };
+
   useEffect(() => {
     if (editing) {
+      // Reset the draft each time editing (re)starts so a controlled begin picks
+      // up the current value.
+      setDraft(value);
       inputRef.current?.focus();
       inputRef.current?.select();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing]);
-
-  const begin = () => {
-    setDraft(value);
-    setEditing(true);
-  };
 
   const commit = () => {
     if (!editing) return;
@@ -74,7 +91,7 @@ export function InlineEdit({
       title={title}
       onDoubleClick={(e) => {
         e.stopPropagation();
-        begin();
+        setEditing(true);
       }}
     >
       {value}
