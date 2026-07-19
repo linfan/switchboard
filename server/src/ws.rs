@@ -74,7 +74,14 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
     let (mut sink, mut stream) = socket.split();
 
     // 0. SWB-WS-v1 channel-bound challenge-response. Token is never sent.
-    if !ws_handshake(&mut sink, &mut stream, &state).await {
+    if !ws_handshake(
+        &mut sink,
+        &mut stream,
+        state.config.token.as_deref(),
+        &state.cert_fp,
+    )
+    .await
+    {
         return;
     }
 
@@ -211,12 +218,15 @@ pub async fn run_session(
 }
 
 /// Run the `SWB-WS-v1` handshake: send a random challenge, read the client's
-/// channel-bound MAC, and verify it against our token + cert fingerprint. Returns
-/// `true` on success (the connection may proceed to `Hello`).
-async fn ws_handshake(
+/// channel-bound MAC, and verify it against `token` + `cert_fp`. Returns `true` on
+/// success (the connection may proceed to `Hello`). Generic over the secret so the
+/// direct client leg (`SWITCHBOARD_TOKEN`) and the repeater's worker leg
+/// (`SWITCHBOARD_REPEATER_TOKEN`) share one implementation.
+pub(crate) async fn ws_handshake(
     sink: &mut futures::stream::SplitSink<WebSocket, Message>,
     stream: &mut futures::stream::SplitStream<WebSocket>,
-    state: &SharedState,
+    token: Option<&str>,
+    cert_fp: &[u8],
 ) -> bool {
     let server_nonce = random_nonce::<NONCE_LEN>();
     let challenge = AuthMsg::AuthChallenge {
@@ -246,13 +256,9 @@ async fn ws_handshake(
         }
     };
 
-    let ok = match (
-        state.config.token.as_deref(),
-        from_hex(&client_nonce),
-        from_hex(&mac),
-    ) {
+    let ok = match (token, from_hex(&client_nonce), from_hex(&mac)) {
         (Some(token), Some(cn), Some(presented)) => {
-            let expected = ws_mac(token.as_bytes(), &server_nonce, &cn, &state.cert_fp);
+            let expected = ws_mac(token.as_bytes(), &server_nonce, &cn, cert_fp);
             ct_eq(&expected, &presented)
         }
         _ => false,

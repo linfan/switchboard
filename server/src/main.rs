@@ -8,6 +8,7 @@ mod error;
 mod fs;
 mod http;
 mod pty_proc;
+mod repeater;
 mod state;
 mod store;
 mod task;
@@ -45,10 +46,7 @@ async fn main() -> anyhow::Result<()> {
     match config.role {
         Role::WorkerDirect => run_worker_direct(config).await,
         Role::WorkerRepeaterClient => run_worker_repeater_client(config).await,
-        // repeater.rs arrives in the next build step.
-        Role::Repeater => anyhow::bail!(
-            "repeater mode is configured but not yet implemented in this build"
-        ),
+        Role::Repeater => repeater::run(config).await,
     }
 }
 

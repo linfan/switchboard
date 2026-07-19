@@ -50,31 +50,54 @@ impl ReplayCache {
     }
 }
 
+/// Verify a `SWB-REST-v1` signature against the given secret and channel binding.
+/// Checks (in order) the clock-skew window, the MAC, then burns the nonce (only
+/// after the MAC checks out, so a forged request can't evict a legitimate one).
+/// This is the single source of truth for REST auth — both the worker-direct
+/// middleware and the repeater's client-facing ingress call it, so they can't
+/// drift. The three header values are passed as raw strings; `body` is the raw
+/// request body already buffered by the caller.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_signed(
+    token: &[u8],
+    cert_fp: &[u8],
+    cache: &ReplayCache,
+    method: &str,
+    path_and_query: &str,
+    ts_header: Option<&str>,
+    nonce_header: Option<&str>,
+    mac_header: Option<&str>,
+    body: &[u8],
+) -> bool {
+    let (Some(ts), Some(nonce), Some(presented_mac)) = (
+        ts_header.and_then(|v| v.parse::<i64>().ok()),
+        nonce_header.and_then(from_hex),
+        mac_header.and_then(from_hex),
+    ) else {
+        return false;
+    };
+
+    let now = now_millis();
+    if (now - ts).abs() > REST_MAX_SKEW_MS {
+        return false;
+    }
+
+    let expected = rest_mac(token, method, path_and_query, ts, &nonce, &sha256(body), cert_fp);
+    if !ct_eq(&expected, &presented_mac) {
+        return false;
+    }
+    cache.check_and_insert(&nonce, now, ts + REST_MAX_SKEW_MS)
+}
+
 /// Axum middleware enforcing the per-request `SWB-REST-v1` signature. Buffers the
-/// body to hash it, verifies the MAC, timestamp window, and nonce freshness, then
-/// forwards the reconstructed request downstream.
+/// body to hash it, verifies via [`verify_signed`], then forwards the
+/// reconstructed request downstream.
 pub async fn require_signed(
     State(state): State<SharedState>,
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, AppError> {
     let (parts, body) = req.into_parts();
-
-    let ts: i64 = header(&parts, H_TS)
-        .and_then(|v| v.parse().ok())
-        .ok_or(AppError::Unauthorized)?;
-    let nonce = header(&parts, H_NONCE)
-        .and_then(from_hex)
-        .ok_or(AppError::Unauthorized)?;
-    let presented_mac = header(&parts, H_MAC)
-        .and_then(from_hex)
-        .ok_or(AppError::Unauthorized)?;
-
-    // Clock-skew window: reject stale or far-future timestamps.
-    let now = now_millis();
-    if (now - ts).abs() > REST_MAX_SKEW_MS {
-        return Err(AppError::Unauthorized);
-    }
 
     // Sign over the full request target (path + query), including any `/api`
     // prefix stripped by nesting — so use the original URI when present.
@@ -97,27 +120,18 @@ pub async fn require_signed(
     let bytes = axum::body::to_bytes(body, MAX_SIGNED_BODY)
         .await
         .map_err(|_| AppError::BadRequest("request body too large".into()))?;
-    let body_hash = sha256(&bytes);
 
-    let expected = rest_mac(
+    if !verify_signed(
         token.as_bytes(),
+        &state.cert_fp,
+        &state.nonce_cache,
         &method,
         &path_and_query,
-        ts,
-        &nonce,
-        &body_hash,
-        &state.cert_fp,
-    );
-    if !ct_eq(&expected, &presented_mac) {
-        return Err(AppError::Unauthorized);
-    }
-
-    // Only burn the nonce after the MAC checks out, so a forged request can't
-    // evict a legitimate one.
-    if !state
-        .nonce_cache
-        .check_and_insert(&nonce, now, ts + REST_MAX_SKEW_MS)
-    {
+        header(&parts, H_TS),
+        header(&parts, H_NONCE),
+        header(&parts, H_MAC),
+        &bytes,
+    ) {
         return Err(AppError::Unauthorized);
     }
 
