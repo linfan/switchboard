@@ -14,19 +14,20 @@ use std::collections::HashMap;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        State,
     },
-    http::StatusCode,
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt};
-use serde::Deserialize;
-use switchboard_shared::{frame::Frame, ClientMsg, ServerMsg};
+use switchboard_shared::{
+    auth::{ct_eq, from_hex, hex, random_nonce, ws_mac, AuthMsg, NONCE_LEN},
+    frame::Frame,
+    ClientMsg, ServerMsg,
+};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::{
-    auth,
     state::SharedState,
     task::{CreateParams, Outbound},
 };
@@ -35,25 +36,22 @@ use crate::{
 /// replaying every raw chunk.
 const SNAPSHOT_THRESHOLD: u64 = 256;
 
-#[derive(Deserialize)]
-pub struct WsQuery {
-    token: String,
-}
-
-/// Axum handler: authenticate via query token, then upgrade.
+/// Axum handler: upgrade, then run the channel-bound auth handshake before any
+/// application traffic (no credential is carried in the URL).
 pub async fn ws_handler(
     State(state): State<SharedState>,
-    Query(q): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    if !auth::token_valid(&state, &q.token) {
-        return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
-    }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(socket: WebSocket, state: SharedState) {
     let (mut sink, mut stream) = socket.split();
+
+    // 0. SWB-WS-v1 channel-bound challenge-response. Token is never sent.
+    if !ws_handshake(&mut sink, &mut stream, &state).await {
+        return;
+    }
 
     // 1. Handshake: the first frame must be Hello.
     let (client_id, cursors) = match read_hello(&mut stream).await {
@@ -140,6 +138,69 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
         }
     }
     tracing::info!(%client_id, "client disconnected");
+}
+
+/// Run the `SWB-WS-v1` handshake: send a random challenge, read the client's
+/// channel-bound MAC, and verify it against our token + cert fingerprint. Returns
+/// `true` on success (the connection may proceed to `Hello`).
+async fn ws_handshake(
+    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    stream: &mut futures::stream::SplitStream<WebSocket>,
+    state: &SharedState,
+) -> bool {
+    let server_nonce = random_nonce::<NONCE_LEN>();
+    let challenge = AuthMsg::AuthChallenge {
+        server_nonce: hex(&server_nonce),
+    };
+    if !send_control(sink, &challenge).await {
+        return false;
+    }
+
+    let resp = loop {
+        match stream.next().await {
+            Some(Ok(Message::Text(t))) => match serde_json::from_str::<AuthMsg>(t.as_str()) {
+                Ok(m) => break m,
+                Err(_) => continue,
+            },
+            Some(Ok(Message::Close(_))) | None => return false,
+            Some(Ok(_)) => continue,
+            Some(Err(_)) => return false,
+        }
+    };
+
+    let (client_nonce, mac) = match resp {
+        AuthMsg::AuthResponse { client_nonce, mac } => (client_nonce, mac),
+        _ => {
+            let _ = send_control(sink, &auth_error("expected auth_response")).await;
+            return false;
+        }
+    };
+
+    let ok = match (from_hex(&client_nonce), from_hex(&mac)) {
+        (Some(cn), Some(presented)) => {
+            let expected = ws_mac(
+                state.config.token.as_bytes(),
+                &server_nonce,
+                &cn,
+                &state.cert_fp,
+            );
+            ct_eq(&expected, &presented)
+        }
+        _ => false,
+    };
+
+    if ok {
+        send_control(sink, &AuthMsg::AuthOk).await
+    } else {
+        let _ = send_control(sink, &auth_error("authentication failed")).await;
+        false
+    }
+}
+
+fn auth_error(message: &str) -> AuthMsg {
+    AuthMsg::AuthError {
+        message: message.to_string(),
+    }
 }
 
 /// Read frames until a `Hello` arrives; returns (client_id, cursors).
@@ -302,9 +363,9 @@ async fn handle_client_msg(
     }
 }
 
-async fn send_control(
+async fn send_control<T: serde::Serialize>(
     sink: &mut futures::stream::SplitSink<WebSocket, Message>,
-    msg: &ServerMsg,
+    msg: &T,
 ) -> bool {
     match serde_json::to_string(msg) {
         Ok(json) => sink.send(Message::Text(json.into())).await.is_ok(),

@@ -62,6 +62,19 @@ pub fn ensure_cert(tls: &TlsConfig) -> Result<Vec<String>> {
     Ok(labels)
 }
 
+/// SHA-256 of the leaf certificate's DER encoding — the channel-binding tag
+/// (`cb`) used by the `SWB-v1` auth protocol and the value clients pin. Reads the
+/// first certificate in the configured PEM (the leaf).
+pub fn leaf_cert_fingerprint(tls: &TlsConfig) -> Result<Vec<u8>> {
+    let der = rustls_pemfile::certs(&mut BufReader::new(
+        File::open(&tls.cert_path).with_context(|| format!("opening {}", tls.cert_path))?,
+    ))
+    .next()
+    .ok_or_else(|| anyhow!("no certificate found in {}", tls.cert_path))?
+    .context("reading leaf certificate DER")?;
+    Ok(switchboard_shared::auth::sha256(&der).to_vec())
+}
+
 /// Load the cert/key into a rustls `ServerConfig` pinned to HTTP/1.1. WebSocket
 /// upgrades run over HTTP/1.1; if the listener negotiated HTTP/2 (rustls's
 /// default ALPN offers it) the `/ws` upgrade fails with 405, so we advertise

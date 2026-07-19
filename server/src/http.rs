@@ -43,7 +43,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/tasks/{id}", axum::routing::delete(terminate_task))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            auth::require_bearer,
+            auth::require_signed,
         ));
 
     Router::new()

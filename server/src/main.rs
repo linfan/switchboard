@@ -36,6 +36,23 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env();
     tracing::info!(addr = %config.addr, db = %config.db_path, name = %config.service_name, "starting hosting service");
 
+    // Ensure the cert exists up front (when TLS is on) so we can derive the
+    // channel-binding fingerprint before building state.
+    let cert_fp = match &config.tls {
+        Some(tls_cfg) => {
+            // rustls 0.23 needs a process-wide crypto provider chosen explicitly.
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .ok();
+            let sans = tls::ensure_cert(tls_cfg)?;
+            tracing::info!(sans = ?sans, "tls certificate ready");
+            let fp = tls::leaf_cert_fingerprint(tls_cfg)?;
+            tracing::info!(fingerprint = %switchboard_shared::auth::hex(&fp), "tls leaf cert SHA-256 (pin this on the client)");
+            fp
+        }
+        None => Vec::new(),
+    };
+
     let store = Store::connect(&config.db_path).await?;
     let tasks = TaskManager::new(store.clone());
     tasks.reconcile_orphans().await?;
@@ -43,22 +60,19 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         store,
         tasks,
+        cert_fp,
+        nonce_cache: Default::default(),
     });
 
     let app = http::router(state.clone());
 
     match &config.tls {
         Some(tls_cfg) => {
-            // rustls 0.23 needs a process-wide crypto provider chosen explicitly.
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .ok();
-            let sans = tls::ensure_cert(tls_cfg)?;
             let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(
                 std::sync::Arc::new(tls::server_config(tls_cfg)?),
             );
             let addr: SocketAddr = config.addr.parse()?;
-            tracing::info!(addr = %config.addr, cert = %tls_cfg.cert_path, sans = ?sans, "listening (https)");
+            tracing::info!(addr = %config.addr, cert = %tls_cfg.cert_path, "listening (https)");
             axum_server::bind_rustls(addr, rustls_config)
                 .serve(app.into_make_service())
                 .await?;

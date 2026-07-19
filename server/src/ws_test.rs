@@ -9,7 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use switchboard_shared::{frame::Frame, now_millis, ClientMsg, ServerMsg, TaskInfo, TaskStatus};
+use switchboard_shared::{
+    auth::{from_hex, hex, random_nonce, ws_mac, AuthMsg, NONCE_LEN},
+    frame::Frame,
+    now_millis, ClientMsg, ServerMsg, TaskInfo, TaskStatus,
+};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -21,14 +25,14 @@ const TOKEN: &str = "test-token";
 // Two fixed v4-shaped UUIDs so the 16-byte frame headers parse.
 const T1: &str = "11111111-1111-4111-8111-111111111111";
 
-async fn start_server() -> (SocketAddr, Arc<AppState>) {
+async fn build_state() -> Arc<AppState> {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("t.db");
     std::mem::forget(dir); // keep the tempdir alive for the whole process
 
     let store = Store::connect(db.to_str().unwrap()).await.unwrap();
     let tasks = TaskManager::new(store.clone());
-    let state = Arc::new(AppState {
+    Arc::new(AppState {
         config: Config {
             addr: "127.0.0.1:0".into(),
             token: TOKEN.into(),
@@ -39,8 +43,13 @@ async fn start_server() -> (SocketAddr, Arc<AppState>) {
         },
         store,
         tasks,
-    });
+        cert_fp: Vec::new(),
+        nonce_cache: Default::default(),
+    })
+}
 
+async fn start_server() -> (SocketAddr, Arc<AppState>) {
+    let state = build_state().await;
     let app = crate::http::router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -68,9 +77,42 @@ type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect(addr: SocketAddr) -> WsStream {
-    let url = format!("ws://{addr}/ws?token={TOKEN}");
-    let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let url = format!("ws://{addr}/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    ws_auth(&mut ws).await;
     ws
+}
+
+/// Perform the `SWB-WS-v1` handshake. `cb` is empty here (the test server serves
+/// plain HTTP, so `cert_fp` is empty).
+async fn ws_auth(ws: &mut WsStream) {
+    let server_nonce = loop {
+        if let WsMessage::Text(t) = ws.next().await.unwrap().unwrap() {
+            if let Ok(AuthMsg::AuthChallenge { server_nonce }) =
+                serde_json::from_str::<AuthMsg>(t.as_str())
+            {
+                break from_hex(&server_nonce).unwrap();
+            }
+        }
+    };
+    let client_nonce = random_nonce::<NONCE_LEN>();
+    let mac = ws_mac(TOKEN.as_bytes(), &server_nonce, &client_nonce, &[]);
+    let resp = AuthMsg::AuthResponse {
+        client_nonce: hex(&client_nonce),
+        mac: hex(&mac),
+    };
+    ws.send(WsMessage::Text(serde_json::to_string(&resp).unwrap()))
+        .await
+        .unwrap();
+    loop {
+        if let WsMessage::Text(t) = ws.next().await.unwrap().unwrap() {
+            match serde_json::from_str::<AuthMsg>(t.as_str()) {
+                Ok(AuthMsg::AuthOk) => break,
+                Ok(AuthMsg::AuthError { message }) => panic!("ws auth failed: {message}"),
+                _ => {}
+            }
+        }
+    }
 }
 
 async fn send(ws: &mut WsStream, msg: &ClientMsg) {
@@ -337,4 +379,136 @@ async fn ping_pong_roundtrip() {
         }
     }
     assert!(got_pong, "expected a Pong echoing our ts");
+}
+
+#[tokio::test]
+async fn ws_handshake_rejects_wrong_token() {
+    let (addr, _state) = start_server().await;
+    let url = format!("ws://{addr}/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    // Read the challenge, then reply with a MAC computed under the wrong token.
+    let server_nonce = loop {
+        if let WsMessage::Text(t) = ws.next().await.unwrap().unwrap() {
+            if let Ok(AuthMsg::AuthChallenge { server_nonce }) =
+                serde_json::from_str::<AuthMsg>(t.as_str())
+            {
+                break from_hex(&server_nonce).unwrap();
+            }
+        }
+    };
+    let client_nonce = random_nonce::<NONCE_LEN>();
+    let mac = ws_mac(b"wrong-token", &server_nonce, &client_nonce, &[]);
+    let resp = AuthMsg::AuthResponse {
+        client_nonce: hex(&client_nonce),
+        mac: hex(&mac),
+    };
+    ws.send(WsMessage::Text(serde_json::to_string(&resp).unwrap()))
+        .await
+        .unwrap();
+    // Server must send AuthError and then close.
+    let mut got_error = false;
+    while let Some(Ok(frame)) = ws.next().await {
+        if let WsMessage::Text(t) = frame {
+            if matches!(
+                serde_json::from_str::<AuthMsg>(t.as_str()),
+                Ok(AuthMsg::AuthError { .. })
+            ) {
+                got_error = true;
+            }
+        }
+    }
+    assert!(got_error, "wrong-token handshake must be rejected");
+}
+
+// ---- REST per-request signing (SWB-REST-v1) --------------------------------
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use switchboard_shared::auth::{rest_mac, sha256, H_MAC, H_NONCE, H_TS};
+use tower::ServiceExt;
+
+/// Build a signed REST request. `cb` is empty (plain-HTTP test server).
+fn signed_request(token: &[u8], method: &str, path_and_query: &str, body: &[u8]) -> Request<Body> {
+    signed_request_at(token, method, path_and_query, body, now_millis(), None)
+}
+
+fn signed_request_at(
+    token: &[u8],
+    method: &str,
+    path_and_query: &str,
+    body: &[u8],
+    ts: i64,
+    nonce_override: Option<[u8; 16]>,
+) -> Request<Body> {
+    let nonce = nonce_override.unwrap_or_else(random_nonce::<16>);
+    let mac = rest_mac(token, method, path_and_query, ts, &nonce, &sha256(body), &[]);
+    Request::builder()
+        .method(method)
+        .uri(path_and_query)
+        .header(H_TS, ts.to_string())
+        .header(H_NONCE, hex(&nonce))
+        .header(H_MAC, hex(&mac))
+        .body(Body::from(body.to_vec()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn rest_valid_signature_passes() {
+    let state = build_state().await;
+    let app = crate::http::router(state);
+    let req = signed_request(TOKEN.as_bytes(), "GET", "/api/info", b"");
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn rest_rejects_tampered_and_replayed() {
+    let state = build_state().await;
+
+    // Wrong token.
+    let req = signed_request(b"wrong-token", "GET", "/api/info", b"");
+    let resp = crate::http::router(state.clone()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "wrong token");
+
+    // Tampered path: signed for /api/info but sent to /api/tasks.
+    let ts = now_millis();
+    let nonce = random_nonce::<16>();
+    let mac = rest_mac(TOKEN.as_bytes(), "GET", "/api/info", ts, &nonce, &sha256(b""), &[]);
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/tasks")
+        .header(H_TS, ts.to_string())
+        .header(H_NONCE, hex(&nonce))
+        .header(H_MAC, hex(&mac))
+        .body(Body::empty())
+        .unwrap();
+    let resp = crate::http::router(state.clone()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "tampered path");
+
+    // Stale timestamp (outside the skew window).
+    let req = signed_request_at(TOKEN.as_bytes(), "GET", "/api/info", b"", now_millis() - 60_000, None);
+    let resp = crate::http::router(state.clone()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "stale timestamp");
+
+    // Replayed nonce: first use passes, second identical request is rejected.
+    let fixed_nonce = [9u8; 16];
+    let ts = now_millis();
+    let first = signed_request_at(TOKEN.as_bytes(), "GET", "/api/info", b"", ts, Some(fixed_nonce));
+    let resp = crate::http::router(state.clone()).oneshot(first).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "first use of nonce");
+    let second = signed_request_at(TOKEN.as_bytes(), "GET", "/api/info", b"", ts, Some(fixed_nonce));
+    let resp = crate::http::router(state.clone()).oneshot(second).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "replayed nonce");
+}
+
+#[tokio::test]
+async fn rest_missing_signature_rejected() {
+    let state = build_state().await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/info")
+        .body(Body::empty())
+        .unwrap();
+    let resp = crate::http::router(state).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
