@@ -34,12 +34,16 @@ async fn build_state() -> Arc<AppState> {
     let tasks = TaskManager::new(store.clone());
     Arc::new(AppState {
         config: Config {
+            role: crate::config::Role::WorkerDirect,
             addr: "127.0.0.1:0".into(),
-            token: TOKEN.into(),
+            token: Some(TOKEN.into()),
             db_path: db.to_string_lossy().into(),
             service_name: "test-host".into(),
             agent_permission_mode: "default".into(),
             tls: None,
+            repeater_addr: None,
+            repeater_token: None,
+            repeater_ca: None,
         },
         store,
         tasks,
@@ -50,7 +54,7 @@ async fn build_state() -> Arc<AppState> {
 
 async fn start_server() -> (SocketAddr, Arc<AppState>) {
     let state = build_state().await;
-    let app = crate::http::router(state.clone());
+    let app = crate::http::router(state.clone(), true);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -455,7 +459,7 @@ fn signed_request_at(
 #[tokio::test]
 async fn rest_valid_signature_passes() {
     let state = build_state().await;
-    let app = crate::http::router(state);
+    let app = crate::http::router(state, true);
     let req = signed_request(TOKEN.as_bytes(), "GET", "/api/info", b"");
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -467,7 +471,7 @@ async fn rest_rejects_tampered_and_replayed() {
 
     // Wrong token.
     let req = signed_request(b"wrong-token", "GET", "/api/info", b"");
-    let resp = crate::http::router(state.clone()).oneshot(req).await.unwrap();
+    let resp = crate::http::router(state.clone(), true).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "wrong token");
 
     // Tampered path: signed for /api/info but sent to /api/tasks.
@@ -482,22 +486,22 @@ async fn rest_rejects_tampered_and_replayed() {
         .header(H_MAC, hex(&mac))
         .body(Body::empty())
         .unwrap();
-    let resp = crate::http::router(state.clone()).oneshot(req).await.unwrap();
+    let resp = crate::http::router(state.clone(), true).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "tampered path");
 
     // Stale timestamp (outside the skew window).
     let req = signed_request_at(TOKEN.as_bytes(), "GET", "/api/info", b"", now_millis() - 60_000, None);
-    let resp = crate::http::router(state.clone()).oneshot(req).await.unwrap();
+    let resp = crate::http::router(state.clone(), true).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "stale timestamp");
 
     // Replayed nonce: first use passes, second identical request is rejected.
     let fixed_nonce = [9u8; 16];
     let ts = now_millis();
     let first = signed_request_at(TOKEN.as_bytes(), "GET", "/api/info", b"", ts, Some(fixed_nonce));
-    let resp = crate::http::router(state.clone()).oneshot(first).await.unwrap();
+    let resp = crate::http::router(state.clone(), true).oneshot(first).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "first use of nonce");
     let second = signed_request_at(TOKEN.as_bytes(), "GET", "/api/info", b"", ts, Some(fixed_nonce));
-    let resp = crate::http::router(state.clone()).oneshot(second).await.unwrap();
+    let resp = crate::http::router(state.clone(), true).oneshot(second).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "replayed nonce");
 }
 
@@ -509,6 +513,6 @@ async fn rest_missing_signature_rejected() {
         .uri("/api/info")
         .body(Body::empty())
         .unwrap();
-    let resp = crate::http::router(state).oneshot(req).await.unwrap();
+    let resp = crate::http::router(state, true).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

@@ -90,13 +90,17 @@ pub async fn require_signed(
         .to_string();
     let method = parts.method.as_str().to_string();
 
+    // This middleware is only mounted where a client-facing token exists
+    // (worker-direct, repeater ingress). Absence means auth is misconfigured.
+    let token = state.config.token.as_deref().ok_or(AppError::Unauthorized)?;
+
     let bytes = axum::body::to_bytes(body, MAX_SIGNED_BODY)
         .await
         .map_err(|_| AppError::BadRequest("request body too large".into()))?;
     let body_hash = sha256(&bytes);
 
     let expected = rest_mac(
-        state.config.token.as_bytes(),
+        token.as_bytes(),
         &method,
         &path_and_query,
         ts,

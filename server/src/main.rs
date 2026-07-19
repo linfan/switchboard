@@ -23,7 +23,12 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-use crate::{config::Config, state::AppState, store::Store, task::TaskManager};
+use crate::{
+    config::{Config, Role},
+    state::AppState,
+    store::Store,
+    task::TaskManager,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -34,7 +39,24 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env();
-    tracing::info!(addr = %config.addr, db = %config.db_path, name = %config.service_name, "starting hosting service");
+    tracing::info!(role = ?config.role, db = %config.db_path, name = %config.service_name, "starting hosting service");
+
+    match config.role {
+        Role::WorkerDirect => run_worker_direct(config).await,
+        // repeater.rs / worker_link.rs arrive in the next build steps.
+        Role::Repeater => anyhow::bail!(
+            "repeater mode is configured but not yet implemented in this build"
+        ),
+        Role::WorkerRepeaterClient => anyhow::bail!(
+            "worker-repeater-client mode is configured but not yet implemented in this build"
+        ),
+    }
+}
+
+/// The classic single-process worker: bind the client-facing address, serve the
+/// authenticated API + WS, and run PTYs locally.
+async fn run_worker_direct(config: Config) -> anyhow::Result<()> {
+    tracing::info!(addr = %config.addr, "worker-direct");
 
     // Ensure the cert exists up front (when TLS is on) so we can derive the
     // channel-binding fingerprint before building state.
@@ -64,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
         nonce_cache: Default::default(),
     });
 
-    let app = http::router(state.clone());
+    let app = http::router(state.clone(), true);
 
     match &config.tls {
         Some(tls_cfg) => {

@@ -20,9 +20,13 @@ use switchboard_shared::{
 
 use crate::{auth, editor, error::AppResult, fs, state::SharedState, task::CreateParams, ws};
 
-/// Build the full application router (REST now; the WS route is added in P4).
-pub fn router(state: SharedState) -> Router {
-    let api = Router::new()
+/// Build the full application router. `require_auth` gates the per-request
+/// SWB-v1 signature check: `true` for a directly-connected worker or a
+/// repeater's client-facing ingress; `false` for the repeater→worker tunnel,
+/// where the repeater has already authenticated the client and the tunnel itself
+/// is authenticated by `SWITCHBOARD_REPEATER_TOKEN`.
+pub fn router(state: SharedState, require_auth: bool) -> Router {
+    let mut api = Router::new()
         .route("/info", get(info))
         .route("/fs", get(list_dir))
         .route("/fs/rename", post(rename_entry))
@@ -40,11 +44,13 @@ pub fn router(state: SharedState) -> Router {
         .route("/git/diff", get(git_diff))
         .route("/git/filediff", get(git_file_diff))
         .route("/tasks", get(list_tasks).post(create_task))
-        .route("/tasks/{id}", axum::routing::delete(terminate_task))
-        .route_layer(middleware::from_fn_with_state(
+        .route("/tasks/{id}", axum::routing::delete(terminate_task));
+    if require_auth {
+        api = api.route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_signed,
         ));
+    }
 
     Router::new()
         .route("/health", get(health))

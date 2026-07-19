@@ -246,14 +246,13 @@ async fn ws_handshake(
         }
     };
 
-    let ok = match (from_hex(&client_nonce), from_hex(&mac)) {
-        (Some(cn), Some(presented)) => {
-            let expected = ws_mac(
-                state.config.token.as_bytes(),
-                &server_nonce,
-                &cn,
-                &state.cert_fp,
-            );
+    let ok = match (
+        state.config.token.as_deref(),
+        from_hex(&client_nonce),
+        from_hex(&mac),
+    ) {
+        (Some(token), Some(cn), Some(presented)) => {
+            let expected = ws_mac(token.as_bytes(), &server_nonce, &cn, &state.cert_fp);
             ct_eq(&expected, &presented)
         }
         _ => false,

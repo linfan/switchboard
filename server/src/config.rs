@@ -1,12 +1,41 @@
 //! Runtime configuration, sourced from environment variables.
 
+/// Explicit deployment mode selector (`SWITCHBOARD_MODE`). A `Repeater` forwards
+/// client traffic to a paired worker; a `Worker` runs tasks itself (either
+/// directly bound, or dialing out to a repeater — distinguished by [`Role`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Worker,
+    Repeater,
+}
+
+/// The concrete role this process plays, derived from `Mode` plus which env vars
+/// are present. `main.rs` branches on this single value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Today's default: bind `SWITCHBOARD_ADDR`, serve the API + WS, run PTYs.
+    WorkerDirect,
+    /// Bind a client-facing and a worker-facing address; forward opaquely to the
+    /// one paired worker. Runs no tasks itself.
+    Repeater,
+    /// Run PTYs locally but, instead of binding, dial the repeater and serve all
+    /// client traffic through the reverse tunnel.
+    WorkerRepeaterClient,
+}
+
 /// Hosting-service configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// TCP address to bind, e.g. `127.0.0.1:8787`.
+    /// The role this process plays (derived in [`Config::from_env`]).
+    pub role: Role,
+    /// Client-facing TCP address to bind, e.g. `127.0.0.1:8787`. Bound by the
+    /// worker-direct and repeater roles; unused by the worker-repeater-client.
     pub addr: String,
-    /// Shared bearer token clients must present.
-    pub token: String,
+    /// Shared secret proving client identity (`SWITCHBOARD_TOKEN`). Never
+    /// transmitted — proven via the SWB-v1 handshake/signing. `None` for the
+    /// worker-repeater-client, which does no client-facing auth (the repeater
+    /// terminates it) and holds only `repeater_token`.
+    pub token: Option<String>,
     /// SQLite database path.
     pub db_path: String,
     /// Operator-facing service name advertised to clients.
@@ -17,6 +46,15 @@ pub struct Config {
     pub agent_permission_mode: String,
     /// TLS settings; `None` means serve plain HTTP.
     pub tls: Option<TlsConfig>,
+    /// Worker-facing address (`SWITCHBOARD_REPEATER_ADDR`). For a repeater this is
+    /// the HTTPS address workers dial in on; for a worker-repeater-client it is
+    /// the repeater address to dial out to.
+    pub repeater_addr: Option<String>,
+    /// Shared secret for the worker↔repeater tunnel (`SWITCHBOARD_REPEATER_TOKEN`).
+    pub repeater_token: Option<String>,
+    /// Path to a PEM whose leaf cert the worker pins for the repeater tunnel
+    /// (`SWITCHBOARD_REPEATER_CA`). Worker-repeater-client side only.
+    pub repeater_ca: Option<String>,
 }
 
 /// TLS/HTTPS configuration. Enabled with `SWITCHBOARD_TLS=1`.
@@ -34,8 +72,39 @@ pub struct TlsConfig {
 
 impl Config {
     pub fn from_env() -> Self {
-        let addr = env("SWITCHBOARD_ADDR", "127.0.0.1:8787");
-        let token = env("SWITCHBOARD_TOKEN", "dev-token");
+        // Read the role-selecting vars raw (presence matters) before defaulting.
+        let addr_env = env_opt("SWITCHBOARD_ADDR");
+        let token_env = env_opt("SWITCHBOARD_TOKEN");
+        let repeater_addr = env_opt("SWITCHBOARD_REPEATER_ADDR");
+        let repeater_token = env_opt("SWITCHBOARD_REPEATER_TOKEN");
+        let repeater_ca = env_opt("SWITCHBOARD_REPEATER_CA");
+
+        let mode = match env("SWITCHBOARD_MODE", "worker").to_ascii_lowercase().as_str() {
+            "repeater" => Mode::Repeater,
+            _ => Mode::Worker,
+        };
+        // A worker with no client-facing bind/token but a repeater target dials
+        // out through the tunnel; otherwise it binds and serves directly.
+        let role = match mode {
+            Mode::Repeater => Role::Repeater,
+            Mode::Worker
+                if addr_env.is_none()
+                    && token_env.is_none()
+                    && repeater_addr.is_some()
+                    && repeater_token.is_some() =>
+            {
+                Role::WorkerRepeaterClient
+            }
+            Mode::Worker => Role::WorkerDirect,
+        };
+
+        let addr = addr_env.unwrap_or_else(|| "127.0.0.1:8787".to_string());
+        // The worker-repeater-client authenticates only the tunnel, so it carries
+        // no client-facing token; the other roles default one for convenience.
+        let token = match role {
+            Role::WorkerRepeaterClient => None,
+            _ => Some(token_env.unwrap_or_else(|| "dev-token".to_string())),
+        };
         let db_path = env("SWITCHBOARD_DB", "server/data/switchboard.db");
         let service_name = std::env::var("SWITCHBOARD_NAME")
             .ok()
@@ -65,14 +134,23 @@ impl Config {
             None
         };
         Self {
+            role,
             addr,
             token,
             db_path,
             service_name,
             agent_permission_mode,
             tls,
+            repeater_addr,
+            repeater_token,
+            repeater_ca,
         }
     }
+}
+
+/// Read an env var, returning `Some` only when it is set and non-empty.
+fn env_opt(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
 }
 
 /// Interpret an env var as a boolean flag, falling back to `default` when the
