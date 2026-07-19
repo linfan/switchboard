@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod auth;
 pub mod frame;
+pub mod tunnel;
 
 /// Identifier for an agent CLI tool a hosting service can run (e.g. `claude`).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
