@@ -36,6 +36,27 @@ use crate::{
 /// replaying every raw chunk.
 const SNAPSHOT_THRESHOLD: u64 = 256;
 
+/// Buffer for the unified outbound writer. Bounded so a slow client applies
+/// backpressure to the session instead of growing memory without limit.
+const OUT_BUF: usize = 512;
+/// Buffer for inbound frames handed from the transport bridge to the session.
+const IN_BUF: usize = 64;
+
+/// A transport-neutral inbound frame. The direct-mode bridge produces these from
+/// an axum `WebSocket`; the repeater tunnel produces them from tunnel frames.
+pub enum WsIn {
+    Text(String),
+    Binary(Vec<u8>),
+    Close,
+}
+
+/// A transport-neutral outbound frame. `run_session` emits these; a transport
+/// bridge turns them back into WebSocket or tunnel frames.
+pub enum WsOut {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
 /// Axum handler: upgrade, then run the channel-bound auth handshake before any
 /// application traffic (no credential is carried in the URL).
 pub async fn ws_handler(
@@ -45,6 +66,10 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
+/// Direct mode: run the auth handshake on the raw socket, then bridge the axum
+/// `WebSocket` to transport-neutral channels and hand off to `run_session`. The
+/// session logic is shared verbatim with the repeater-worker path, which feeds
+/// the same channels from tunnel frames instead.
 async fn handle_socket(socket: WebSocket, state: SharedState) {
     let (mut sink, mut stream) = socket.split();
 
@@ -53,8 +78,54 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
         return;
     }
 
+    let (in_tx, in_rx) = mpsc::channel::<WsIn>(IN_BUF);
+    let (out_tx, mut out_rx) = mpsc::channel::<WsOut>(OUT_BUF);
+
+    // Inbound bridge: axum stream -> WsIn. A closed/errored socket ends the
+    // stream; forward a final Close so the session's reader loop terminates.
+    tokio::spawn(async move {
+        while let Some(Ok(msg)) = stream.next().await {
+            let win = match msg {
+                Message::Text(t) => WsIn::Text(t.to_string()),
+                Message::Binary(b) => WsIn::Binary(b.to_vec()),
+                Message::Close(_) => break,
+                _ => continue,
+            };
+            if in_tx.send(win).await.is_err() {
+                return;
+            }
+        }
+        let _ = in_tx.send(WsIn::Close).await;
+    });
+
+    // Outbound bridge: WsOut -> axum sink. Exiting on a sink error drops the
+    // receiver, so the session's next `out_tx.send` fails — its disconnect signal.
+    tokio::spawn(async move {
+        while let Some(out) = out_rx.recv().await {
+            let msg = match out {
+                WsOut::Text(t) => Message::Text(t.into()),
+                WsOut::Binary(b) => Message::Binary(b.into()),
+            };
+            if sink.send(msg).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    run_session(in_rx, out_tx, state).await;
+}
+
+/// The transport-neutral session: Hello handshake, Welcome, per-task
+/// reconstruction, then the live output loop. Speaks only `WsIn`/`WsOut`
+/// channels, so it is identical for a directly-connected client and for a client
+/// forwarded through the repeater tunnel.
+pub async fn run_session(
+    mut rx: mpsc::Receiver<WsIn>,
+    out_tx: mpsc::Sender<WsOut>,
+    state: SharedState,
+) {
     // 1. Handshake: the first frame must be Hello.
-    let (client_id, cursors) = match read_hello(&mut stream).await {
+    let (client_id, cursors) = match read_hello(&mut rx).await {
         Some(h) => h,
         None => return,
     };
@@ -65,19 +136,19 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
     let (direct_tx, mut direct_rx) = mpsc::unbounded_channel::<ServerMsg>();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
-    // 3. Reader task: handle inbound client messages until the socket closes.
+    // 3. Reader task: handle inbound client messages until the channel closes.
     {
         let state = state.clone();
         let client_id = client_id.clone();
         let direct_tx = direct_tx.clone();
         tokio::spawn(async move {
-            while let Some(Ok(msg)) = stream.next().await {
-                match msg {
-                    Message::Text(t) => match serde_json::from_str::<ClientMsg>(t.as_str()) {
+            while let Some(win) = rx.recv().await {
+                match win {
+                    WsIn::Text(t) => match serde_json::from_str::<ClientMsg>(&t) {
                         Ok(cm) => handle_client_msg(cm, &state, &client_id, &direct_tx).await,
                         Err(e) => tracing::warn!(%client_id, error=%e, "bad client message"),
                     },
-                    Message::Binary(b) => match Frame::decode(&b) {
+                    WsIn::Binary(b) => match Frame::decode(&b) {
                         Ok(Frame::Input { task_id, data }) => {
                             if let Err(e) = state.tasks.send_input(&task_id.to_string(), &data) {
                                 tracing::warn!(%client_id, %task_id, error=%e, "input dropped");
@@ -86,8 +157,7 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
                         Ok(_) => tracing::warn!(%client_id, "unexpected server-bound binary frame"),
                         Err(e) => tracing::warn!(%client_id, error=%e, "bad binary frame"),
                     },
-                    Message::Close(_) => break,
-                    _ => {}
+                    WsIn::Close => break,
                 }
             }
             let _ = shutdown_tx.send(());
@@ -99,11 +169,11 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
         service: state.service_info(),
         tasks: state.tasks.list().await.unwrap_or_default(),
     };
-    if !send_control(&mut sink, &welcome).await {
+    if !send_control(&out_tx, &welcome).await {
         return;
     }
     let mut last_sent: HashMap<String, u64> = HashMap::new();
-    if !replay(&mut sink, &state, &client_id, &cursors, &mut last_sent).await {
+    if !replay(&out_tx, &state, &client_id, &cursors, &mut last_sent).await {
         return;
     }
 
@@ -112,11 +182,11 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
         tokio::select! {
             _ = &mut shutdown_rx => break,
             Some(m) = direct_rx.recv() => {
-                if !send_control(&mut sink, &m).await { break; }
+                if !send_control(&out_tx, &m).await { break; }
             }
             r = broadcast_rx.recv() => match r {
                 Ok(Outbound::Control(m)) => {
-                    if !send_control(&mut sink, &m).await { break; }
+                    if !send_control(&out_tx, &m).await { break; }
                 }
                 Ok(Outbound::Pty { task_id, seq, bytes }) => {
                     if last_sent.get(&task_id).is_some_and(|&s| seq <= s) {
@@ -125,13 +195,13 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
                     last_sent.insert(task_id.clone(), seq);
                     if let Ok(uuid) = Uuid::parse_str(&task_id) {
                         let frame = Frame::Output { task_id: uuid, seq, data: bytes.to_vec() };
-                        if !send_binary(&mut sink, frame.encode()).await { break; }
+                        if !send_binary(&out_tx, frame.encode()).await { break; }
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(%client_id, skipped = n, "broadcast lagged; resyncing from store");
                     let from = last_sent.clone();
-                    if !replay(&mut sink, &state, &client_id, &from, &mut last_sent).await { break; }
+                    if !replay(&out_tx, &state, &client_id, &from, &mut last_sent).await { break; }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -152,7 +222,7 @@ async fn ws_handshake(
     let challenge = AuthMsg::AuthChallenge {
         server_nonce: hex(&server_nonce),
     };
-    if !send_control(sink, &challenge).await {
+    if !send_raw(sink, &challenge).await {
         return false;
     }
 
@@ -171,7 +241,7 @@ async fn ws_handshake(
     let (client_nonce, mac) = match resp {
         AuthMsg::AuthResponse { client_nonce, mac } => (client_nonce, mac),
         _ => {
-            let _ = send_control(sink, &auth_error("expected auth_response")).await;
+            let _ = send_raw(sink, &auth_error("expected auth_response")).await;
             return false;
         }
     };
@@ -190,10 +260,26 @@ async fn ws_handshake(
     };
 
     if ok {
-        send_control(sink, &AuthMsg::AuthOk).await
+        send_raw(sink, &AuthMsg::AuthOk).await
     } else {
-        let _ = send_control(sink, &auth_error("authentication failed")).await;
+        let _ = send_raw(sink, &auth_error("authentication failed")).await;
         false
+    }
+}
+
+/// Serialize and send one control message directly on the raw socket sink. Used
+/// only by the pre-session auth handshake, which runs before the transport
+/// bridge and `run_session` take over the socket.
+async fn send_raw<T: serde::Serialize>(
+    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    msg: &T,
+) -> bool {
+    match serde_json::to_string(msg) {
+        Ok(json) => sink.send(Message::Text(json.into())).await.is_ok(),
+        Err(e) => {
+            tracing::error!(error=%e, "serialize server message failed");
+            true
+        }
     }
 }
 
@@ -205,18 +291,18 @@ fn auth_error(message: &str) -> AuthMsg {
 
 /// Read frames until a `Hello` arrives; returns (client_id, cursors).
 async fn read_hello(
-    stream: &mut futures::stream::SplitStream<WebSocket>,
+    rx: &mut mpsc::Receiver<WsIn>,
 ) -> Option<(String, HashMap<String, u64>)> {
-    while let Some(Ok(msg)) = stream.next().await {
-        match msg {
-            Message::Text(t) => {
+    while let Some(win) = rx.recv().await {
+        match win {
+            WsIn::Text(t) => {
                 if let Ok(ClientMsg::Hello { client_id, cursors }) =
-                    serde_json::from_str::<ClientMsg>(t.as_str())
+                    serde_json::from_str::<ClientMsg>(&t)
                 {
                     return Some((client_id, cursors));
                 }
             }
-            Message::Close(_) => return None,
+            WsIn::Close => return None,
             _ => {}
         }
     }
@@ -229,7 +315,7 @@ async fn read_hello(
 /// leaves `last_sent` at the highest seq the client now holds, so live dedup is
 /// exact. Advances the durable server-side cursor to the client's position.
 async fn replay(
-    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    out: &mpsc::Sender<WsOut>,
     state: &SharedState,
     client_id: &str,
     cursors: &HashMap<String, u64>,
@@ -263,7 +349,7 @@ async fn replay(
                 seq: tail,
                 data: screen,
             };
-            if !send_binary(sink, frame.encode()).await {
+            if !send_binary(out, frame.encode()).await {
                 return false;
             }
             last_sent.insert(task.id.clone(), tail);
@@ -274,7 +360,7 @@ async fn replay(
                     seq,
                     data,
                 };
-                if !send_binary(sink, frame.encode()).await {
+                if !send_binary(out, frame.encode()).await {
                     return false;
                 }
                 last_sent.insert(task.id.clone(), seq);
@@ -285,7 +371,7 @@ async fn replay(
             task_id: task.id.clone(),
             last_seq: tail,
         };
-        if !send_control(sink, &done).await {
+        if !send_control(out, &done).await {
             return false;
         }
     }
@@ -363,12 +449,11 @@ async fn handle_client_msg(
     }
 }
 
-async fn send_control<T: serde::Serialize>(
-    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
-    msg: &T,
-) -> bool {
+/// Queue a control message on the unified outbound channel. A send error means
+/// the transport bridge exited (socket gone) — the session's disconnect signal.
+async fn send_control<T: serde::Serialize>(out: &mpsc::Sender<WsOut>, msg: &T) -> bool {
     match serde_json::to_string(msg) {
-        Ok(json) => sink.send(Message::Text(json.into())).await.is_ok(),
+        Ok(json) => out.send(WsOut::Text(json)).await.is_ok(),
         Err(e) => {
             tracing::error!(error=%e, "serialize server message failed");
             true
@@ -376,9 +461,7 @@ async fn send_control<T: serde::Serialize>(
     }
 }
 
-async fn send_binary(
-    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
-    bytes: Vec<u8>,
-) -> bool {
-    sink.send(Message::Binary(bytes.into())).await.is_ok()
+/// Queue a binary data-plane frame on the unified outbound channel.
+async fn send_binary(out: &mpsc::Sender<WsOut>, bytes: Vec<u8>) -> bool {
+    out.send(WsOut::Binary(bytes)).await.is_ok()
 }
