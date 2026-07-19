@@ -32,8 +32,12 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 futures = "0.3"
 portable-pty = "0.9"
 vt100 = "0.15"
+# `__rustls-tls` enables the rustls Connector + connect_async_tls_with_config
+# without bundling any CA set (we pin a custom verifier), matching the server's
+# rustls 0.23/ring stack.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "__rustls-tls"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = "3"
-tokio-tungstenite = "0.24"

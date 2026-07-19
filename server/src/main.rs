@@ -13,6 +13,7 @@ mod store;
 mod task;
 mod terminal;
 mod tls;
+mod worker_link;
 mod ws;
 #[cfg(test)]
 mod ws_test;
@@ -43,14 +44,34 @@ async fn main() -> anyhow::Result<()> {
 
     match config.role {
         Role::WorkerDirect => run_worker_direct(config).await,
-        // repeater.rs / worker_link.rs arrive in the next build steps.
+        Role::WorkerRepeaterClient => run_worker_repeater_client(config).await,
+        // repeater.rs arrives in the next build step.
         Role::Repeater => anyhow::bail!(
             "repeater mode is configured but not yet implemented in this build"
         ),
-        Role::WorkerRepeaterClient => anyhow::bail!(
-            "worker-repeater-client mode is configured but not yet implemented in this build"
-        ),
     }
+}
+
+/// The worker that dials out: run PTYs locally, but serve every client through a
+/// reverse tunnel to the repeater instead of binding a client-facing port.
+async fn run_worker_repeater_client(config: Config) -> anyhow::Result<()> {
+    tracing::info!(repeater = ?config.repeater_addr, "worker-repeater-client");
+
+    let store = Store::connect(&config.db_path).await?;
+    let tasks = TaskManager::new(store.clone());
+    tasks.reconcile_orphans().await?;
+    let state: state::SharedState = Arc::new(AppState {
+        config,
+        store,
+        tasks,
+        // No local TLS listener here; the channel binding for client auth is the
+        // repeater's cert, handled at the repeater. The tunnel leg pins the
+        // repeater cert itself inside `worker_link`.
+        cert_fp: Vec::new(),
+        nonce_cache: Default::default(),
+    });
+
+    worker_link::run(state).await
 }
 
 /// The classic single-process worker: bind the client-facing address, serve the
