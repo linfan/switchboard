@@ -5,7 +5,7 @@
 //! webview would reject. Injected via `wsFactory` when running under Tauri.
 
 import { base64ToArrayBuffer, bytesToBase64 } from "./b64";
-import type { WebSocketLike } from "./connection";
+import type { WebSocketFactory, WebSocketLike } from "./connection";
 import { invoke, listen, type UnlistenFn } from "./tauri";
 
 type WsEvt =
@@ -29,8 +29,8 @@ class TauriWebSocket implements WebSocketLike {
   private unlisten: UnlistenFn | null = null;
   private closed = false;
 
-  constructor(url: string) {
-    invoke<number>("ws_connect", { url })
+  constructor(url: string, pin?: string) {
+    invoke<number>("ws_connect", { url, pin: pin ?? null })
       .then(async (id) => {
         // A close() that raced the connect: tear the fresh socket right down.
         if (this.closed) {
@@ -87,5 +87,11 @@ class TauriWebSocket implements WebSocketLike {
   }
 }
 
-export const tauriWsFactory = (url: string): WebSocketLike =>
-  new TauriWebSocket(url);
+/**
+ * Build a factory bound to a service's pinned cert fingerprint, so every socket
+ * the pool opens for that service enforces the same leaf-cert pin in Rust.
+ */
+export const makeTauriWsFactory =
+  (pin?: string): WebSocketFactory =>
+  (url) =>
+    new TauriWebSocket(url, pin);

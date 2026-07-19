@@ -2,31 +2,41 @@
 //!
 //! The webview's own `fetch`/`WebSocket` enforce TLS trust and, on macOS, App
 //! Transport Security — which makes a self-signed hosting service unreachable
-//! from the frontend. We therefore run REST and the WebSocket here in Rust,
-//! where we can accept self-signed certificates, and bridge the results back to
-//! the frontend (REST as a command return, WS frames as per-connection events).
+//! from the frontend. We therefore run REST and the WebSocket here in Rust.
 //!
-//! Security note: certificate validation is intentionally disabled, matching
-//! the self-signed-cert use case. Traffic is still encrypted but not
-//! authenticated, so it is not safe against an active man-in-the-middle.
+//! Security model (see the `SWB-v1` protocol in `switchboard-shared::auth`):
+//!  1. **Authenticated channel** — TLS is verified by *pinning* the server's leaf
+//!     certificate (`SHA-256(leaf_DER)`). The hostname is ignored (so self-signed
+//!     works), but an active MITM presenting a different cert is rejected. On the
+//!     first probe the pin is unknown, so the verifier runs in *capture* mode
+//!     (accept + report the observed fingerprint) for trust-on-first-use.
+//!  2. **Channel-bound auth** — the shared token is never sent. The frontend
+//!     (`swbauth.ts`) computes all HMAC proofs in JS and hands us only the signed
+//!     headers / handshake frames, so this layer never sees the token at all.
+//!
+//! Thus this bridge is pure transport + pinning: it forwards request bytes and WS
+//! frames, and reports captured fingerprints back for TOFU.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{ring, verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use serde::Serialize;
+use switchboard_shared::auth::{ct_eq, from_hex, hex, sha256};
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::{mpsc, Mutex};
-use tokio_tungstenite::{
-    connect_async_tls_with_config, tungstenite::protocol::Message, Connector,
-};
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
+use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::protocol::Message, Connector};
 
 /// Live WebSocket connections, keyed by an id handed back to the frontend.
 #[derive(Default)]
 pub struct WsInner {
-    conns: Mutex<HashMap<u64, mpsc::UnboundedSender<Message>>>,
+    conns: AsyncMutex<HashMap<u64, mpsc::UnboundedSender<Message>>>,
     next: AtomicU64,
 }
 
@@ -40,31 +50,142 @@ fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
+/// Install the ring crypto provider process-wide (idempotent).
+fn ensure_crypto() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let _ = ring::default_provider().install_default();
+    });
+}
+
+/// A rustls verifier that pins the server's leaf certificate by SHA-256 of its
+/// DER encoding. With a pin it hard-fails on mismatch (defeating an active MITM);
+/// with no pin it accepts and records the fingerprint (trust-on-first-use). The
+/// hostname is never checked, so self-signed certs with any SAN work.
+#[derive(Debug)]
+struct PinnedVerifier {
+    /// Expected leaf fingerprint. `None` => capture mode (accept any, record it).
+    pin: Option<Vec<u8>>,
+    /// The most recently observed leaf fingerprint (for TOFU capture).
+    captured: Mutex<Option<Vec<u8>>>,
+    supported: WebPkiSupportedAlgorithms,
+}
+
+impl PinnedVerifier {
+    fn new(pin: Option<Vec<u8>>) -> Arc<Self> {
+        Arc::new(Self {
+            pin,
+            captured: Mutex::new(None),
+            supported: ring::default_provider().signature_verification_algorithms,
+        })
+    }
+}
+
+impl ServerCertVerifier for PinnedVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let fp = sha256(end_entity.as_ref()).to_vec();
+        *self.captured.lock().unwrap() = Some(fp.clone());
+        match &self.pin {
+            Some(p) if ct_eq(p, &fp) => Ok(ServerCertVerified::assertion()),
+            Some(_) => Err(rustls::Error::General(
+                "server certificate fingerprint does not match the pinned value".into(),
+            )),
+            None => Ok(ServerCertVerified::assertion()),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.supported)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.supported)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.supported.supported_schemes()
+    }
+}
+
+/// Build a rustls client config using the pinning verifier. Returns the config
+/// plus the verifier handle so the caller can read back the captured fingerprint.
+fn pinned_config(pin: Option<String>) -> Result<(Arc<ClientConfig>, Arc<PinnedVerifier>), String> {
+    ensure_crypto();
+    let pin_bytes = match pin {
+        Some(h) => Some(from_hex(&h).ok_or_else(|| "invalid pin hex".to_string())?),
+        None => None,
+    };
+    let verifier = PinnedVerifier::new(pin_bytes);
+    let config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier.clone())
+        .with_no_client_auth();
+    Ok((Arc::new(config), verifier))
+}
+
+fn reqwest_client(pin: Option<String>) -> Result<(reqwest::Client, Arc<PinnedVerifier>), String> {
+    let (config, verifier) = pinned_config(pin)?;
+    let client = reqwest::Client::builder()
+        // Hand rustls our pinning config; hostname verification is delegated to
+        // the verifier (which ignores it), matching the self-signed use case.
+        .use_preconfigured_tls((*config).clone())
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok((client, verifier))
+}
+
+/// Hex of the leaf fingerprint the verifier observed on the last handshake, if any.
+fn captured_fp(verifier: &PinnedVerifier) -> Option<String> {
+    verifier.captured.lock().unwrap().as_deref().map(hex)
+}
+
+/// Apply frontend-supplied headers (already includes the SWB signing headers).
+fn apply_headers(mut req: reqwest::RequestBuilder, headers: &[(String, String)]) -> reqwest::RequestBuilder {
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    req
+}
+
 #[derive(Serialize)]
 pub struct HttpResponse {
     status: u16,
     body: String,
+    /// SHA-256 of the server's leaf cert (hex), for trust-on-first-use capture.
+    cert_fp: Option<String>,
 }
 
-/// One-shot REST request (accepts self-signed certs). Returns the status and
-/// raw body text; the frontend interprets them exactly as it would a `fetch`.
+/// One-shot REST request. Certificate trust is enforced by the pin (or captured
+/// when `pin` is `None`); `headers` carries the frontend's SWB signing headers.
+/// Returns the status, raw body, and the observed cert fingerprint.
 #[tauri::command]
 pub async fn http_request(
     method: String,
     url: String,
-    token: Option<String>,
+    headers: Vec<(String, String)>,
     body: Option<String>,
+    pin: Option<String>,
 ) -> Result<HttpResponse, String> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let (client, verifier) = reqwest_client(pin)?;
     let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
-    let mut req = client.request(method, &url);
-    if let Some(t) = token {
-        req = req.bearer_auth(t);
-    }
+    let mut req = apply_headers(client.request(method, &url), &headers);
     if let Some(b) = body {
         req = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -73,38 +194,47 @@ pub async fn http_request(
     let resp = req.send().await.map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
     let body = resp.text().await.map_err(|e| e.to_string())?;
-    Ok(HttpResponse { status, body })
+    Ok(HttpResponse {
+        status,
+        body,
+        cert_fp: captured_fp(&verifier),
+    })
 }
 
-/// A self-signed-cert-tolerant reqwest client (shared shape with `http_request`).
-fn insecure_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
-        .build()
-        .map_err(|e| e.to_string())
-}
-
-/// Download a file from the hosting service to a local `dest` path. Fetches the
-/// raw bytes (bearer-authed, self-signed OK) and writes them to disk — binary
-/// safe, no base64 round-trip through the frontend.
+/// SHA-256 (hex) of a local file's contents. Lets the frontend sign an upload
+/// whose bytes live only on the Rust side (the body hash is part of the MAC).
 #[tauri::command]
-pub async fn download_file(url: String, token: String, dest: String) -> Result<(), String> {
-    let client = insecure_client()?;
-    let resp = client
-        .get(&url)
-        .bearer_auth(token)
+pub async fn hash_file(path: String) -> Result<String, String> {
+    let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+    Ok(hex(&sha256(&bytes)))
+}
+
+/// Extract a server error message from a JSON body, or fall back to the status.
+fn error_message(status: reqwest::StatusCode, body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+        .unwrap_or_else(|| format!("HTTP {status}"))
+}
+
+/// Download a file from the hosting service to a local `dest` path. Pinned TLS,
+/// signed via the frontend's `headers`; binary-safe (no base64 round-trip).
+#[tauri::command]
+pub async fn download_file(
+    url: String,
+    headers: Vec<(String, String)>,
+    pin: Option<String>,
+    dest: String,
+) -> Result<(), String> {
+    let (client, _) = reqwest_client(pin)?;
+    let resp = apply_headers(client.get(&url), &headers)
         .send()
         .await
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        let message = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
-            .unwrap_or_else(|| format!("HTTP {status}"));
-        return Err(message);
+        return Err(error_message(status, &body));
     }
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     tokio::fs::write(&dest, &bytes)
@@ -113,15 +243,18 @@ pub async fn download_file(url: String, token: String, dest: String) -> Result<(
     Ok(())
 }
 
-/// Upload a local file at `src` to the hosting service by POSTing its raw bytes to
-/// `url` (which carries the target `?dir=&name=`).
+/// Upload a local file at `src` to the hosting service by POSTing its raw bytes
+/// to `url` (which carries the target `?dir=&name=`). Pinned TLS, signed headers.
 #[tauri::command]
-pub async fn upload_file(url: String, token: String, src: String) -> Result<(), String> {
+pub async fn upload_file(
+    url: String,
+    headers: Vec<(String, String)>,
+    pin: Option<String>,
+    src: String,
+) -> Result<(), String> {
     let bytes = tokio::fs::read(&src).await.map_err(|e| e.to_string())?;
-    let client = insecure_client()?;
-    let resp = client
-        .post(&url)
-        .bearer_auth(token)
+    let (client, _) = reqwest_client(pin)?;
+    let resp = apply_headers(client.post(&url), &headers)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .body(bytes)
         .send()
@@ -130,11 +263,7 @@ pub async fn upload_file(url: String, token: String, src: String) -> Result<(), 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        let message = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
-            .unwrap_or_else(|| format!("HTTP {status}"));
-        return Err(message);
+        return Err(error_message(status, &body));
     }
     Ok(())
 }
@@ -149,24 +278,23 @@ enum WsEvt {
     Close,
 }
 
-/// Open a WebSocket to `url` (accepts self-signed certs) and stream its frames
-/// to the frontend as `ws:{id}` events. Returns the connection id.
+/// Open a WebSocket to `url` with pinned TLS and stream its frames to the
+/// frontend as `ws:{id}` events. This is a dumb byte pipe: the `SWB-WS-v1`
+/// channel-bound handshake is performed by the frontend over these frames (the
+/// token never reaches Rust). Returns the connection id.
 #[tauri::command]
 pub async fn ws_connect(
     app: AppHandle,
     state: State<'_, WsState>,
     url: String,
+    pin: Option<String>,
 ) -> Result<u64, String> {
-    let connector = Connector::NativeTls(
-        native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-            .map_err(|e| e.to_string())?,
-    );
-    let (stream, _resp) = connect_async_tls_with_config(&url, None, false, Some(connector))
-        .await
-        .map_err(|e| e.to_string())?;
+    let (config, _) = pinned_config(pin)?;
+    let connector = Connector::Rustls(config);
+    let (stream, _resp) =
+        connect_async_tls_with_config(&url, None, false, Some(connector))
+            .await
+            .map_err(|e| e.to_string())?;
     let (mut write, mut read) = stream.split();
 
     let inner = state.inner().clone();

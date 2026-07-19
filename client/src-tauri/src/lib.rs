@@ -12,6 +12,7 @@ pub fn run() {
         .manage(net::new_state())
         .invoke_handler(tauri::generate_handler![
             net::http_request,
+            net::hash_file,
             net::ws_connect,
             net::ws_send,
             net::ws_close,

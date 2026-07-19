@@ -15,8 +15,14 @@ export interface Service {
   name: string;
   /** Base URL, e.g. `http://127.0.0.1:8787` (ws:// derived from it). */
   url: string;
-  /** Shared bearer token. */
+  /** Shared secret. Never transmitted — used only to compute SWB-v1 HMAC proofs. */
   token: string;
+  /**
+   * SHA-256 (hex) of the server's pinned leaf TLS certificate, captured on first
+   * add (trust-on-first-use). Enforced on every later connection and mixed into
+   * every auth proof as the channel binding. Absent for plain-HTTP services.
+   */
+  certFingerprint?: string;
 }
 
 /**

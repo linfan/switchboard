@@ -4,6 +4,17 @@ import { probeService } from "./rest";
 
 const svc = { url: "http://host:8787", token: "tok" };
 
+// WebCrypto (crypto.subtle) resolves on the libuv threadpool, so under fake
+// timers it never settles via microtask flushing. Capture the real setTimeout
+// before faking and yield to genuine macrotasks to let the request signing
+// HMAC complete before we advance the fake clock.
+const realSetTimeout = globalThis.setTimeout;
+async function settleCrypto(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await new Promise<void>((r) => realSetTimeout(r, 0));
+  }
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -13,23 +24,26 @@ function mockFetch(impl: () => Response | Promise<Response>) {
 }
 
 describe("probeService", () => {
-  it("returns the service info on success", async () => {
+  it("returns the service info on success and signs without a bearer token", async () => {
     const info = { name: "Box", version: "1.0.0" };
     mockFetch(() => new Response(JSON.stringify(info), { status: 200 }));
-    await expect(probeService(svc)).resolves.toEqual(info);
-    expect(fetch).toHaveBeenCalledWith(
-      "http://host:8787/api/info",
-      expect.objectContaining({ headers: { Authorization: "Bearer tok" } }),
-    );
+    await expect(probeService(svc)).resolves.toEqual({ info });
+    const [url, init] = (fetch as unknown as { mock: { calls: any[][] } }).mock
+      .calls[0];
+    expect(url).toBe("http://host:8787/api/info");
+    // Token is proven via the SWB signature headers, never sent in the clear.
+    expect(init.headers["x-swb-mac"]).toEqual(expect.any(String));
+    expect(init.headers["x-swb-ts"]).toEqual(expect.any(String));
+    expect(init.headers["x-swb-nonce"]).toEqual(expect.any(String));
+    expect(init.headers.Authorization).toBeUndefined();
   });
 
   it("strips a trailing slash from the base url", async () => {
     mockFetch(() => new Response("{}", { status: 200 }));
     await probeService({ ...svc, url: "http://host:8787/" });
-    expect(fetch).toHaveBeenCalledWith(
-      "http://host:8787/api/info",
-      expect.anything(),
-    );
+    const [url] = (fetch as unknown as { mock: { calls: any[][] } }).mock
+      .calls[0];
+    expect(url).toBe("http://host:8787/api/info");
   });
 
   it("reports a wrong token distinctly on 401", async () => {
@@ -70,6 +84,9 @@ describe("probeService", () => {
       );
       const p = probeService(svc);
       const assertion = expect(p).rejects.toThrow(/within 5s/i);
+      // Let the WebCrypto request signing settle so `fetch` is actually called
+      // and its abort listener registered before the abort timer fires.
+      await settleCrypto();
       await vi.advanceTimersByTimeAsync(5000);
       await assertion;
     } finally {

@@ -10,6 +10,14 @@
 
 import type { ClientMsg, ServerMsg } from "../protocol";
 import type { ConnStatus } from "../store/types";
+import {
+  cbFromPin,
+  fromHex,
+  hex,
+  NONCE_LEN,
+  randomNonce,
+  wsMac,
+} from "./swbauth";
 
 /** Minimal WebSocket surface we depend on (injectable for tests). */
 export interface WebSocketLike {
@@ -62,7 +70,13 @@ export interface ConnectionDeps {
   clientId: string;
   /** HTTP base URL, e.g. `http://127.0.0.1:8787`. */
   url: string;
+  /** Shared secret. Never transmitted — used to answer the WS auth challenge. */
   token: string;
+  /**
+   * Pinned leaf-cert fingerprint (hex) of the server, mixed into the WS auth
+   * proof as the channel binding. Absent for plain-HTTP services.
+   */
+  certFingerprint?: string;
   /** Latest per-task cursors, read fresh on every (re)connect. */
   getCursors: () => Record<string, number>;
   /** Deliver a parsed server message (non-Pong) to the app. */
@@ -94,16 +108,15 @@ const DEFAULT_WAKE: WakeOptions = { checkMs: 2000, driftMs: 5000 };
 
 const WS_OPEN = 1;
 
-/** Convert an http(s) base URL into the service's ws(s) endpoint with token. */
-export function toWsUrl(base: string, token: string): string {
+/**
+ * Convert an http(s) base URL into the service's ws(s) endpoint. No credential
+ * is carried in the URL — the token is proven via the SWB-WS-v1 handshake.
+ */
+export function toWsUrl(base: string): string {
   const trimmed = base.replace(/\/+$/, "");
-  const ws = trimmed.replace(/^http/i, (m) =>
-    m.toLowerCase() === "http" ? "ws" : m,
-  );
-  // Handle https -> wss explicitly (the regex above only maps the http prefix).
-  const scheme = /^https/i.test(trimmed) ? "wss" : ws.startsWith("wss") ? "wss" : "ws";
+  const scheme = /^https/i.test(trimmed) ? "wss" : "ws";
   const rest = trimmed.replace(/^https?/i, "");
-  return `${scheme}${rest}/ws?token=${encodeURIComponent(token)}`;
+  return `${scheme}${rest}/ws`;
 }
 
 export class ConnectionManager {
@@ -118,6 +131,8 @@ export class ConnectionManager {
   private status: ConnStatus = "offline";
   private attempt = 0;
   private stopped = true;
+  /** True once the SWB-WS-v1 handshake has succeeded on the current socket. */
+  private authed = false;
   /** True while the browser reports the network as down. */
   private networkDown = false;
 
@@ -214,7 +229,7 @@ export class ConnectionManager {
       attempt: this.attempt,
     });
 
-    const url = toWsUrl(this.d.url, this.d.token);
+    const url = toWsUrl(this.d.url);
     let ws: WebSocketLike;
     try {
       ws = this.wsFactory(url);
@@ -233,19 +248,10 @@ export class ConnectionManager {
   }
 
   private onOpen(): void {
-    this.attempt = 0;
-    this.setStatus("online");
-    // Re-issue Hello with the freshest cursors so the server replays only what
-    // we have not durably applied.
-    this.send({
-      type: "hello",
-      client_id: this.d.clientId,
-      cursors: this.d.getCursors(),
-    });
-    this.startHeartbeat();
-    // Let the app re-assert per-task state that must survive a drop (e.g. the
-    // terminal geometry, in case the window was resized while offline).
-    this.d.onReady?.();
+    // The socket is open but not yet trusted: the server sends an AuthChallenge
+    // as its first frame, and no app traffic (Hello, heartbeat) may flow until
+    // we answer it and receive AuthOk. See `handleAuth`.
+    this.authed = false;
   }
 
   private onData(data: unknown): void {
@@ -260,17 +266,80 @@ export class ConnectionManager {
       return;
     }
     if (typeof data !== "string") return;
-    let msg: ServerMsg;
+    let msg: Record<string, unknown>;
     try {
-      msg = JSON.parse(data) as ServerMsg;
+      msg = JSON.parse(data) as Record<string, unknown>;
     } catch {
       return;
     }
-    if (msg.type === "pong") {
-      this.onPong(msg.ts);
+    // Until authenticated, the only frames the server sends are handshake ones.
+    if (!this.authed) {
+      void this.handleAuth(msg);
       return;
     }
-    this.d.onMessage(msg);
+    if (msg.type === "pong") {
+      this.onPong(msg.ts as number);
+      return;
+    }
+    this.d.onMessage(msg as unknown as ServerMsg);
+  }
+
+  /**
+   * Drive the SWB-WS-v1 channel-bound handshake. The server opens with
+   * `auth_challenge`; we reply with a client nonce and an HMAC over both nonces
+   * and the channel binding (cert fingerprint) — the token is never sent. On
+   * `auth_ok` the connection becomes live; `auth_error` triggers a reconnect.
+   */
+  private async handleAuth(msg: Record<string, unknown>): Promise<void> {
+    if (msg.type === "auth_challenge" && typeof msg.server_nonce === "string") {
+      const clientNonce = randomNonce(NONCE_LEN);
+      const mac = await wsMac(
+        this.d.token,
+        fromHex(msg.server_nonce),
+        clientNonce,
+        cbFromPin(this.d.certFingerprint),
+      );
+      // Hashing is async; the socket may have dropped meanwhile.
+      if (!this.ws || this.ws.readyState !== WS_OPEN) return;
+      this.ws.send(
+        JSON.stringify({
+          type: "auth_response",
+          client_nonce: hex(clientNonce),
+          mac: hex(mac),
+        }),
+      );
+      return;
+    }
+    if (msg.type === "auth_ok") {
+      this.onAuthed();
+      return;
+    }
+    if (msg.type === "auth_error") {
+      const message =
+        typeof msg.message === "string" ? msg.message : "rejected";
+      this.closeSocket();
+      if (!this.stopped && !this.networkDown) {
+        this.scheduleReconnect(`authentication failed: ${message}`);
+      }
+    }
+  }
+
+  /** Handshake accepted: go live — reset backoff, send Hello, start heartbeat. */
+  private onAuthed(): void {
+    this.authed = true;
+    this.attempt = 0;
+    this.setStatus("online");
+    // Re-issue Hello with the freshest cursors so the server replays only what
+    // we have not durably applied.
+    this.send({
+      type: "hello",
+      client_id: this.d.clientId,
+      cursors: this.d.getCursors(),
+    });
+    this.startHeartbeat();
+    // Let the app re-assert per-task state that must survive a drop (e.g. the
+    // terminal geometry, in case the window was resized while offline).
+    this.d.onReady?.();
   }
 
   private onClose(reason: string): void {
@@ -373,6 +442,7 @@ export class ConnectionManager {
   // --- helpers ------------------------------------------------------------
 
   private closeSocket(): void {
+    this.authed = false;
     if (this.ws) {
       this.ws.onopen = null;
       this.ws.onclose = null;

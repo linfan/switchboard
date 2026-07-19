@@ -229,6 +229,37 @@ mod tests {
     }
 
     #[test]
+    fn known_answer_vectors() {
+        // Fixed vectors that the TypeScript WebCrypto implementation
+        // (`client/src/net/swbauth.ts`) must reproduce byte-for-byte, so the two
+        // signers can never drift. Inputs are all-ASCII / fixed-byte so they are
+        // trivial to reconstruct on the JS side.
+        let token = b"kat-token";
+        let cb = b"kat-cb";
+        let server_nonce = [0x11u8; NONCE_LEN];
+        let client_nonce = [0x22u8; NONCE_LEN];
+        assert_eq!(
+            hex(&ws_mac(token, &server_nonce, &client_nonce, cb)),
+            "fe078d368552867c359838f41602bfaa8f83787e36de22b7040a39effc6ff78f"
+        );
+
+        let rest_nonce = [0x33u8; REST_NONCE_LEN];
+        let body_hash = sha256(b"{\"hello\":\"world\"}");
+        assert_eq!(
+            hex(&rest_mac(
+                token,
+                "POST",
+                "/api/file?x=1",
+                1_700_000_000_000,
+                &rest_nonce,
+                &body_hash,
+                cb,
+            )),
+            "b5f3a80f83747edddae69190dcc56a82f90d35f8cca9628efeae3c71409311e4"
+        );
+    }
+
+    #[test]
     fn domains_are_separated() {
         // Same key/fields under the two domains must not collide.
         let a = mac(TOKEN, WS_DOMAIN, &[b"x", b"y"]);

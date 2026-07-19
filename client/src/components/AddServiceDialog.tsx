@@ -50,16 +50,20 @@ export function AddServiceDialog({
     const svc = { name: name.trim(), url, token };
     setVerifying(true);
     setError(undefined);
+    let certFingerprint: string | undefined;
     try {
-      await probeService(svc);
+      // Trust-on-first-use: the probe captures the server's leaf-cert
+      // fingerprint, which we persist so every later connection can pin it.
+      ({ certFingerprint } = await probeService(svc));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setVerifying(false);
       return;
     }
     // Verified — commit to the store. The pool observes it and (re)connects.
-    if (editing) updateService(service.id, svc);
-    else addService(svc);
+    const verified = { ...svc, certFingerprint };
+    if (editing) updateService(service.id, verified);
+    else addService(verified);
     onClose();
   };
 

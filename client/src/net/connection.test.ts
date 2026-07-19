@@ -8,6 +8,15 @@ import {
   type WebSocketLike,
 } from "./connection";
 
+// WebCrypto (crypto.subtle) resolves on the libuv threadpool, not a timer or a
+// microtask, so it never settles under vitest fake timers via
+// `advanceTimersByTimeAsync`. Capture the real setTimeout before faking and
+// yield to a genuine macrotask to let the handshake HMAC complete.
+const realSetTimeout = globalThis.setTimeout;
+function settleCrypto(): Promise<void> {
+  return new Promise((r) => realSetTimeout(r, 0));
+}
+
 /** In-memory WebSocket the tests drive by hand. */
 class FakeSocket implements WebSocketLike {
   static instances: FakeSocket[] = [];
@@ -66,6 +75,19 @@ function mkManager(over: Partial<Parameters<typeof makeDeps>[0]> = {}) {
   return { mgr, ...state };
 }
 
+/**
+ * Drive the SWB-WS-v1 handshake to completion: open, answer the server's
+ * challenge, and accept. `auth_ok` is applied synchronously, so afterwards the
+ * manager is online with the heartbeat running. The interleaved
+ * `advanceTimersByTimeAsync(0)` lets the async WebCrypto HMAC settle.
+ */
+async function driveHandshake(s: FakeSocket): Promise<void> {
+  s.emitOpen();
+  s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
+  await settleCrypto();
+  s.emitMessage({ type: "auth_ok" });
+}
+
 function makeDeps(over: {
   cursors?: Record<string, number>;
   now?: () => number;
@@ -100,27 +122,60 @@ afterEach(() => {
 });
 
 describe("toWsUrl", () => {
-  it("maps http->ws and https->wss and appends token", () => {
-    expect(toWsUrl("http://127.0.0.1:8787", "t k")).toBe(
-      "ws://127.0.0.1:8787/ws?token=t%20k",
-    );
-    expect(toWsUrl("https://host/", "abc")).toBe("wss://host/ws?token=abc");
+  it("maps http->ws and https->wss with no token in the URL", () => {
+    expect(toWsUrl("http://127.0.0.1:8787")).toBe("ws://127.0.0.1:8787/ws");
+    expect(toWsUrl("https://host/")).toBe("wss://host/ws");
   });
 });
 
 describe("handshake", () => {
-  it("connects, sends Hello with cursors, goes online", () => {
+  it("stays connecting until the auth handshake completes", async () => {
+    const { mgr } = mkManager();
+    mgr.start();
+    const s = FakeSocket.last();
+    s.emitOpen();
+    // No Hello and not online until the challenge is answered and accepted.
+    expect(mgr.getStatus()).toBe("connecting");
+    expect(s.find("hello")).toBeUndefined();
+    s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
+    await settleCrypto();
+    expect(s.find("auth_response")).toMatchObject({
+      type: "auth_response",
+      client_nonce: expect.any(String),
+      mac: expect.any(String),
+    });
+    expect(mgr.getStatus()).toBe("connecting"); // still awaiting auth_ok
+    s.emitMessage({ type: "auth_ok" });
+    expect(mgr.getStatus()).toBe("online");
+    mgr.stop();
+  });
+
+  it("connects, sends Hello with cursors, goes online", async () => {
     const { mgr } = mkManager({ cursors: { t1: 5 } });
     mgr.start();
     expect(mgr.getStatus()).toBe("connecting");
     const s = FakeSocket.last();
-    s.emitOpen();
+    await driveHandshake(s);
     expect(mgr.getStatus()).toBe("online");
     expect(s.find("hello")).toEqual({
       type: "hello",
       client_id: "c1",
       cursors: { t1: 5 },
     });
+    mgr.stop();
+  });
+
+  it("reconnects when the server rejects the handshake", async () => {
+    const { mgr } = mkManager();
+    mgr.start();
+    const s = FakeSocket.last();
+    s.emitOpen();
+    const count = FakeSocket.instances.length;
+    s.emitMessage({ type: "auth_error", message: "bad token" });
+    expect(mgr.getStatus()).toBe("reconnecting");
+    expect(s.find("hello")).toBeUndefined();
+    vi.advanceTimersByTime(1000);
+    expect(FakeSocket.instances.length).toBe(count + 1);
     mgr.stop();
   });
 
@@ -204,11 +259,11 @@ describe("auto-reconnect", () => {
 });
 
 describe("heartbeat", () => {
-  it("declares the link dead when no Pong arrives", () => {
+  it("declares the link dead when no Pong arrives", async () => {
     const { mgr } = mkManager();
     mgr.start();
     const s = FakeSocket.last();
-    s.emitOpen();
+    await driveHandshake(s);
     vi.advanceTimersByTime(15000); // ping
     expect(s.find("ping")).toBeTruthy();
     vi.advanceTimersByTime(10000); // pong deadline elapses
@@ -216,11 +271,11 @@ describe("heartbeat", () => {
     mgr.stop();
   });
 
-  it("stays online when a Pong arrives in time", () => {
+  it("stays online when a Pong arrives in time", async () => {
     const { mgr } = mkManager();
     mgr.start();
     const s = FakeSocket.last();
-    s.emitOpen();
+    await driveHandshake(s);
     vi.advanceTimersByTime(15000);
     s.emitMessage({ type: "pong", ts: 1000 });
     vi.advanceTimersByTime(10000);
