@@ -18,6 +18,15 @@ Each task is an independent conversation with its own isolated context.
   screen snapshot when the backlog is large.
 - **Resilient client.** Exponential-backoff auto-reconnect + manual trigger;
   detects network drops *and* system resume-from-sleep; heartbeat watchdog.
+- **MITM-resistant transport (`SWB-v1`).** All legs are TLS with **certificate
+  pinning** (SHA-256 of the leaf DER, trust-on-first-use), and the shared token is
+  **never transmitted** — the client proves knowledge with a channel-bound
+  HMAC-SHA256, so a captured transcript can't be replayed or relayed onto another
+  channel.
+- **Repeater mode (no stable IP required).** A stable-IP **repeater** relays
+  traffic to one **worker that dials out**; both sides connect outbound. The
+  repeater forwards opaque bytes, so it's fully transparent — the client points at
+  a URL + token exactly as with a direct worker.
 
 ## Repository layout
 | Path       | What |
@@ -115,6 +124,70 @@ big-endian with a 16-byte raw-UUID task id:
 | `SNAPSHOT` | `[0x02][task_id:16][seq:u64][data]` | server → client |
 | `INPUT` | `[0x10][task_id:16][data]` | client → server |
 
+### Transport security (`SWB-v1`)
+
+Every leg (client↔worker, client↔repeater, repeater↔worker) resists an **active
+on-path attacker** who can sniff, modify, drop, inject, or attempt to terminate
+TLS. Two independent layers, both required (`shared/src/auth.rs`, shared verbatim
+by server and the client's Rust bridge so the two can't drift):
+
+1. **Authenticated channel — cert pinning.** The connecting side pins the
+   listener's leaf cert by `SHA-256(leaf_DER)` and hard-fails on mismatch
+   (hostname ignored, so self-signed just works). The client captures the pin on
+   first add (**trust-on-first-use**, during the `/api/info` probe) and enforces it
+   on every connection thereafter; a worker dialing a repeater pins the PEM at
+   `SWITCHBOARD_REPEATER_CA`.
+2. **Channel-bound challenge-response — the token is never on the wire.** The
+   shared token appears in no header, URL, or frame. Instead the client proves
+   knowledge with `HMAC-SHA256` over a server nonce and the channel's cert
+   fingerprint (`cb`), so a captured proof can't be replayed (per-connection nonce)
+   or relayed onto a different TLS channel (a MITM's channel has a different `cb`).
+   - **WS / tunnel** (one handshake per connection): server sends
+     `AuthChallenge { server_nonce }`; client replies `AuthResponse { client_nonce,
+     mac }` with `mac = HMAC(token, "SWB-WS-v1" ‖ server_nonce ‖ client_nonce ‖ cb)`.
+   - **REST** (stateless, per request): each `/api/*` request carries `X-Swb-Ts`,
+     `X-Swb-Nonce`, `X-Swb-Mac`, where the MAC also covers the method, path+query,
+     and `SHA-256(body)`. The server enforces a ±30 s clock-skew window plus a
+     single-use nonce cache.
+
+Domain-separation tags (`SWB-WS-v1` / `SWB-REST-v1`) prevent cross-context MAC
+reuse; every MAC input is length-prefixed so no field can be confused for another.
+The server logs its leaf-cert fingerprint on startup so an operator can convey it
+out-of-band for the client's first-use pin.
+
+### Repeater mode (no stable IP required)
+
+For a worker host **without** a stable, client-reachable IP, a **repeater** with a
+stable IP sits in the middle. Both the worker and the client dial *out* to it:
+
+```
+ client ──REST/WS──▶ repeater :SWITCHBOARD_ADDR        repeater :SWITCHBOARD_REPEATER_ADDR ◀──wss── worker (dials out)
+                     (validates SWITCHBOARD_TOKEN)       (validates SWITCHBOARD_REPEATER_TOKEN)     │ runs TaskManager/PTYs
+                              └──────── one multiplexed reverse tunnel (single WS) ─────────────────┘   locally
+```
+
+- **One binary, three roles**, selected by env: **worker-direct** (today's
+  default — binds `SWITCHBOARD_ADDR`, runs PTYs), **repeater**
+  (`SWITCHBOARD_MODE=repeater` — binds a client-facing and a worker-facing HTTPS
+  listener, runs nothing), and **worker-repeater-client** (a worker with no
+  `SWITCHBOARD_ADDR`/`SWITCHBOARD_TOKEN` but a `SWITCHBOARD_REPEATER_*` target —
+  dials out and serves all client traffic through the tunnel).
+- **Transparent by construction.** The repeater forwards **opaque application
+  bytes** over a single WebSocket, multiplexing every client interaction by a
+  `u64` stream id (`shared/src/tunnel.rs`). It never parses API semantics, so any
+  new REST route or `ClientMsg`/`ServerMsg` variant works with no repeater change.
+  `/health` is answered locally (reports paired/unpaired) so liveness works with no
+  worker.
+- **Auth terminated per hop.** The repeater validates the client's `SWB-v1` proof
+  at ingress (its own cert is the `cb`) and authenticates the worker tunnel with
+  `SWITCHBOARD_REPEATER_TOKEN` — **no client credential ever crosses the tunnel**.
+- **Single worker, self-healing.** Only one worker pairs at a time; a second is
+  rejected until the first's tunnel dies (TCP close or missed heartbeat). Bodies
+  are chunked with app-level `PING`/`PONG` heartbeats + idle timeout; a client
+  disconnect sends `RST` to cancel in-flight worker work. If no worker is paired
+  when a request arrives, the repeater waits a short grace window, then fails
+  (REST `502` / WS close) and the client's existing backoff retries.
+
 ### Agent integration
 
 In PTY mode each tool runs as an ordinary interactive terminal program (no `-p`,
@@ -136,8 +209,9 @@ screen for snapshots. Adding a new CLI agent is one registry entry in
 
 The server speaks **HTTPS by default — even on localhost** — generating a
 self-signed certificate on first run. The desktop client routes its networking
-through its native (Rust) layer, which **accepts self-signed certs**, so there
-is no certificate to install or trust: just point the client at the host.
+through its native (Rust) layer, which **pins** the server's certificate on first
+add (trust-on-first-use) rather than trusting a CA, so there is no certificate to
+install: just point the client at the host and it captures the pin automatically.
 
 ```bash
 make setup                  # install Rust + client + e2e deps
@@ -162,14 +236,35 @@ SWITCHBOARD_TOKEN='choose-a-strong-token' \
   cargo run -p switchboard-server --release
 ```
 
-In the client, add the service with the host's IP/hostname and that token — no
-cert step needed. Ensure the host firewall / cloud security group allows inbound
-TCP on the port.
+In the client, add the service with the host's IP/hostname and that token — the
+client pins the cert on first add. Ensure the host firewall / cloud security group
+allows inbound TCP on the port.
 
-> **Security note:** accepting self-signed certs keeps traffic encrypted but not
-> authenticated, so it does not protect against an active man-in-the-middle. For
-> untrusted networks, front the server with a reverse proxy holding a real CA
-> certificate (set `SWITCHBOARD_TLS=0` and terminate TLS there).
+> **Security note:** the `SWB-v1` layer resists an active man-in-the-middle even
+> with a self-signed cert — the pin (SHA-256 of the leaf, captured on first add)
+> authenticates the channel, and the token is never transmitted (proven via a
+> channel-bound HMAC). For maximum assurance on an untrusted network, confirm the
+> fingerprint the server logs on startup matches the one captured on first add, or
+> front the server with a reverse proxy holding a real CA certificate (set
+> `SWITCHBOARD_TLS=0` and terminate TLS there).
+
+### Running behind a repeater
+
+For a host with no stable inbound IP, run a **repeater** on a stable-IP box and
+have the worker dial out to it. On the repeater:
+
+```bash
+make run-repeater        # client-facing SERVER_ADDR + worker-facing REPEATER_ADDR (both HTTPS)
+```
+
+On the worker box (no client-facing bind; it pins the repeater's cert PEM):
+
+```bash
+make run-repeater-client # dials SWITCHBOARD_REPEATER_ADDR, pins SWITCHBOARD_REPEATER_CA
+```
+
+Point the client at the **repeater's** `SWITCHBOARD_ADDR` + `SWITCHBOARD_TOKEN` —
+it behaves identically to a direct worker.
 
 Prefer the browser during development? `cd client && npm run dev` serves the same
 UI at http://localhost:5173. The browser build uses the webview's own
@@ -184,8 +279,12 @@ Server (environment variables):
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `SWITCHBOARD_ADDR` | `127.0.0.1:8787` | Listen address |
-| `SWITCHBOARD_TOKEN` | `dev-token` | Shared bearer token |
+| `SWITCHBOARD_ADDR` | `127.0.0.1:8787` | Client-facing listen address |
+| `SWITCHBOARD_TOKEN` | `dev-token` | Shared client token (never transmitted; proven via HMAC) |
+| `SWITCHBOARD_MODE` | `worker` | `worker` or `repeater` |
+| `SWITCHBOARD_REPEATER_ADDR` | — | Repeater: worker-facing HTTPS bind. Worker-repeater-client: the repeater to dial |
+| `SWITCHBOARD_REPEATER_TOKEN` | — | Shared secret for the worker↔repeater tunnel |
+| `SWITCHBOARD_REPEATER_CA` | — | Worker-repeater-client: PEM whose leaf cert the worker pins on the tunnel |
 | `SWITCHBOARD_DB` | `server/data/switchboard.db` | SQLite path |
 | `SWITCHBOARD_NAME` | host name | Service display name |
 | `SWITCHBOARD_PERMISSION_MODE` | `default` | Passed to the agent's `--permission-mode` |
@@ -194,21 +293,30 @@ Server (environment variables):
 | `SWITCHBOARD_TLS_KEY` | `server/data/switchboard-key.pem` | PEM key path (auto-generated if missing) |
 | `SWITCHBOARD_TLS_SAN` | — | Extra SANs (comma-separated IPs/hostnames) for the generated cert |
 
-Auth: REST uses `Authorization: Bearer <token>`; the WebSocket uses
-`?token=<token>` (webviews can't set custom WS headers).
+Role selection: `SWITCHBOARD_MODE=repeater` → **repeater**. Otherwise a worker
+with **no** `SWITCHBOARD_ADDR`/`SWITCHBOARD_TOKEN` but a `SWITCHBOARD_REPEATER_ADDR`
++ `SWITCHBOARD_REPEATER_TOKEN` becomes a **worker-repeater-client** (dials out);
+any other worker is **worker-direct** (binds and serves).
+
+Auth (`SWB-v1`): the token is **never sent**. REST requests carry `X-Swb-Ts` /
+`X-Swb-Nonce` / `X-Swb-Mac` (a per-request HMAC over method, path+query,
+`SHA-256(body)`, timestamp, nonce, and the channel's cert fingerprint); the
+WebSocket runs a nonce challenge-response at connect. See
+[Transport security (`SWB-v1`)](#transport-security-swb-v1).
 
 TLS: HTTPS is on by default. When the cert/key files are absent the server
 generates a self-signed certificate (ECDSA P-256, ~13-month validity); the
 `SWITCHBOARD_TLS_SAN` entries (plus `localhost` and local interface addresses)
 become its SANs, which matters only if you later trust it in a browser. The
-desktop client accepts self-signed certs directly, so no trust step is needed
-there. To terminate TLS yourself (reverse proxy, real CA cert), set
-`SWITCHBOARD_TLS=0` and run the proxy in front.
+desktop client **pins** the self-signed leaf on first add (hostname ignored), so
+no CA trust step is needed there. To terminate TLS yourself (reverse proxy, real
+CA cert), set `SWITCHBOARD_TLS=0` and run the proxy in front.
 
 Networking: the desktop client performs REST and WebSocket I/O in its native
-(Rust) layer rather than the webview, so it can reach hosts with self-signed
-certificates that the webview's fetch/WebSocket would reject. Certificate
-validation is intentionally disabled for this self-signed use case.
+(Rust) layer rather than the webview, using **rustls with a pinning verifier** — it
+reaches self-signed hosts (which the webview's fetch/WebSocket would reject) while
+still authenticating the channel by the captured leaf-cert fingerprint, so an
+active MITM is rejected on pin mismatch.
 
 ## Testing
 ```bash
@@ -221,7 +329,12 @@ make test-live     # live agent-CLI round-trip (needs claude/qodercli auth)
 - **Server** integration tests drive a real axum server over `tokio-tungstenite`,
   asserting welcome, full/cursor-scoped byte replay, live streaming, gap-free
   reconnect, snapshot-on-large-backlog, multi-viewer convergence, and ping/pong;
-  the PTY supervisor and vt100 emulator have their own unit tests.
+  the PTY supervisor and vt100 emulator have their own unit tests. A repeater
+  suite boots a live repeater + a worker that dials in and re-runs the WS
+  assertions **through the tunnel** (the transparency proof), plus REST, a
+  >2 MiB chunked upload, unsigned-request rejection, and single-worker pairing.
+  Crypto has vectors in `shared/` (HMAC determinism, wrong-token/nonce/`cb`
+  rejects, domain separation, tunnel-codec round-trips).
 - **Client** vitest tests exercise the connection manager with a mock socket and
   fake timers (handshake, binary transport, backoff, manual reconnect, heartbeat
   death/recovery, offline suppression, sleep-triggered reconnect), the store

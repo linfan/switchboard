@@ -45,7 +45,7 @@ progress. It is updated at the end of every phase.
 |--------------|-----------------------------------|-----------|
 | Transport    | **WebSocket** (axum)              | Full-duplex, single conn, clean streaming + resume |
 | Persistence  | **SQLite** (sqlx)                 | Durable message log + delivery cursor across restarts |
-| Auth         | **Shared bearer token** per service | Simple, protects endpoints for self-hosted use |
+| Auth         | **`SWB-v1`: cert pinning + channel-bound HMAC** (token never transmitted) | MITM-resistant; replaces the original bearer-token-in-header/URL scheme (P15) |
 | Sequencing   | **Vertical slice first, then deepen every requirement** | Early demo, low integration risk |
 
 ---
@@ -320,6 +320,52 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done
   wrong token blocks the Add dialog then a correct one connects; a seeded
   bad-token service edited to the right token rebuilds the manager and comes
   online — suite 8 green), `tsc` + build clean. ✅
+
+### v3 — Repeater mode + MITM-resistant transport (`SWB-v1`)
+
+Goal: a second deployment shape for hosts with **no stable inbound IP** — a
+stable-IP **repeater** relays client traffic to one **worker that dials out** — and
+harden every leg (direct *and* repeated) against an active on-path attacker. The
+repeater forwards **opaque bytes**, so it is transparent to any current or future
+API. Delivered in 8 commits, each self-contained and green.
+
+- ✅ **P15.1 — Shared crypto + tunnel codec**: `shared/src/auth.rs`
+  (`HMAC-SHA256` `ws_mac`/`rest_mac`, constant-time compare, 32-byte CSPRNG
+  nonces, `SWB-WS-v1`/`SWB-REST-v1` domain separation, length-prefixed MAC inputs,
+  `AuthMsg` handshake enum) + `shared/src/tunnel.rs` (`[kind:1][stream_id:8][payload]`
+  frames: `REQ_*`/`RESP_*`/`WS_*`/`RST`/`PING`/`PONG`, 512 KiB body chunks).
+  *Test:* HMAC known-answer vectors (reproduced byte-for-byte by the TS signer),
+  wrong-token/nonce/`cb` rejects, domain separation, codec round-trips. ✅
+- ✅ **P15.2 — Server auth hardening (direct mode)**: expose the leaf-cert
+  fingerprint from `tls.rs` into `AppState`; `auth::verify_signed` REST middleware
+  (`X-Swb-Ts`/`X-Swb-Nonce`/`X-Swb-Mac`, ±30 s skew + single-use nonce cache) and
+  a WS `AuthChallenge`/`AuthResponse` handshake; `?token=` and the bearer path
+  removed; startup logs the fingerprint. ✅
+- ✅ **P15.3 — Client security parity**: swap the Tauri bridge (`net.rs`)
+  native-tls → **rustls** with a pinning `ServerCertVerifier` (trust-on-first-use
+  capture, hard-fail on mismatch); HMAC-sign REST + run the WS handshake; store +
+  `AddServiceDialog` capture/enforce a per-service `certFingerprintSha256`. ✅
+- ✅ **P15.4 — `ws.rs` transport refactor**: session speaks transport-neutral
+  `WsIn`/`WsOut` mpsc channels via `run_session`, with auth external — so both the
+  axum socket (direct) and the tunnel (repeated) reuse one session core. Bounded
+  writer unifies the old three writers. Behavior-preserving. ✅
+- ✅ **P15.5 — Config + role plumbing**: `Mode {Worker,Repeater}` +
+  `Role {WorkerDirect,Repeater,WorkerRepeaterClient}` derived from env;
+  `SWITCHBOARD_REPEATER_ADDR`/`_TOKEN`/`_CA`; `router(state, require_auth: bool)`;
+  `main.rs` branches on role. ✅
+- ✅ **P15.6 — Worker link (`worker_link.rs`)**: the dial-out worker — rustls
+  client pinning the PEM at `SWITCHBOARD_REPEATER_CA`, tunnel mux/demux, REST via
+  `Router::oneshot`, WS via `run_session`, exponential-backoff redial. ✅
+- ✅ **P15.7 — Repeater (`repeater.rs`)**: two HTTPS listeners; single-worker
+  pairing (reject-if-occupied, freed on tunnel death); `/health` answered locally;
+  client-auth terminated at ingress; opaque `REQ_*`/`RESP_*`/`WS_*` forwarding;
+  grace-window-then-`502`; `RST` on client drop + `PING`/`PONG` idle timeout. ✅
+- ✅ **P15.8 — E2E + docs**: `server/src/repeater_test.rs` boots a live repeater +
+  a worker that dials in and re-runs the WS suite **through the tunnel** (welcome,
+  byte/cursor replay, live streaming, multi-viewer, ping/pong, delete), plus REST
+  info, a >2 MiB chunked upload read back byte-for-byte, unsigned-request `401`,
+  local `/health`, and second-worker rejection. Makefile `run-repeater` /
+  `run-repeater-client` targets; README security + repeater sections. ✅
 
 Each phase ends with an atomic conventional commit and a PLAN.md update.
 

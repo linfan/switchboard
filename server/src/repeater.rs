@@ -127,16 +127,39 @@ impl RepeaterState {
 
 type Shared = Arc<RepeaterState>;
 
-/// Bind both listeners (sharing one TLS cert) and serve until one exits.
+/// Bind both listeners from the configured addresses, then serve until one exits.
 pub async fn run(config: Config) -> Result<()> {
-    let tls_cfg = config
-        .tls
-        .clone()
-        .ok_or_else(|| anyhow!("repeater mode requires TLS (the worker leg is HTTPS/WSS only)"))?;
     let repeater_addr = config
         .repeater_addr
         .clone()
         .ok_or_else(|| anyhow!("repeater mode requires SWITCHBOARD_REPEATER_ADDR"))?;
+
+    let client_listener =
+        std::net::TcpListener::bind(&config.addr).context("binding SWITCHBOARD_ADDR")?;
+    let worker_listener = std::net::TcpListener::bind(&repeater_addr)
+        .context("binding SWITCHBOARD_REPEATER_ADDR")?;
+    tracing::info!(
+        client = %client_listener.local_addr()?,
+        worker = %worker_listener.local_addr()?,
+        "repeater listening (https)"
+    );
+
+    serve(config, client_listener, worker_listener).await
+}
+
+/// Serve the repeater over two already-bound listeners (both upgraded to HTTPS
+/// with one shared self-signed cert). Split out from [`run`] so tests can bind
+/// ephemeral `:0` sockets and hand the *live* listeners over — closing the
+/// bind-then-rebind window that a "pick a free port, drop, rebind" dance leaves.
+pub(crate) async fn serve(
+    config: Config,
+    client_listener: std::net::TcpListener,
+    worker_listener: std::net::TcpListener,
+) -> Result<()> {
+    let tls_cfg = config
+        .tls
+        .clone()
+        .ok_or_else(|| anyhow!("repeater mode requires TLS (the worker leg is HTTPS/WSS only)"))?;
 
     rustls::crypto::ring::default_provider().install_default().ok();
     let sans = tls::ensure_cert(&tls_cfg)?;
@@ -167,15 +190,10 @@ pub async fn run(config: Config) -> Result<()> {
         .route("/repeater", get(worker_attach))
         .with_state(state.clone());
 
-    let client_addr: std::net::SocketAddr = config.addr.parse().context("parsing SWITCHBOARD_ADDR")?;
-    let worker_addr: std::net::SocketAddr =
-        repeater_addr.parse().context("parsing SWITCHBOARD_REPEATER_ADDR")?;
-    tracing::info!(client = %client_addr, worker = %worker_addr, "repeater listening (https)");
-
-    let client_srv = axum_server::bind_rustls(client_addr, rustls_config.clone())
+    let client_srv = axum_server::from_tcp_rustls(client_listener, rustls_config.clone())
         .serve(client_app.into_make_service());
-    let worker_srv =
-        axum_server::bind_rustls(worker_addr, rustls_config).serve(worker_app.into_make_service());
+    let worker_srv = axum_server::from_tcp_rustls(worker_listener, rustls_config)
+        .serve(worker_app.into_make_service());
 
     tokio::select! {
         r = client_srv => r.context("client-facing listener")?,

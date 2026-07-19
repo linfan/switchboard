@@ -41,3 +41,6 @@ http-body-util = "0.1"
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = "3"
+# Raw TLS client used by the repeater E2E tests to drive REST/WS through the
+# tunnel (matches the server's rustls 0.23/ring stack via tokio-rustls 0.26).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }

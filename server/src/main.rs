@@ -9,6 +9,8 @@ mod fs;
 mod http;
 mod pty_proc;
 mod repeater;
+#[cfg(test)]
+mod repeater_test;
 mod state;
 mod store;
 mod task;
