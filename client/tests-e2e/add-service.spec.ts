@@ -62,8 +62,10 @@ test("editing a service's token rebuilds the connection", async ({ page }) => {
   await expect(svc).toHaveCount(1);
   await expect(svc.locator(".dot--online")).toHaveCount(0);
 
-  // Open the edit dialog: fields are pre-filled with the current config.
-  await page.getByTitle("Edit service").click();
+  // Open the edit dialog (via the service's ⋯ menu): fields are pre-filled.
+  await page.locator(".service__head").hover();
+  await page.getByTitle("Service actions").click();
+  await page.getByRole("menuitem", { name: "Edit service" }).click();
   const edit = page.getByRole("dialog", { name: "Edit hosting service" });
   await expect(edit.getByPlaceholder("hostname or IP")).toHaveValue(HOST);
   await expect(edit.getByPlaceholder("8787")).toHaveValue(PORT);

@@ -4,6 +4,7 @@ export function Modal({
   title,
   onClose,
   onSubmit,
+  dismissOnScrimClick = true,
   children,
   footer,
 }: {
@@ -15,6 +16,13 @@ export function Modal({
    * doesn't also submit the form.
    */
   onSubmit?: () => void;
+  /**
+   * When false, clicking the backdrop outside the dialog does nothing — the
+   * dialog only closes via ESC, the × button, or an explicit footer button.
+   * Used for data-entry dialogs where a stray outside click shouldn't discard
+   * a half-filled form.
+   */
+  dismissOnScrimClick?: boolean;
   children: ReactNode;
   footer?: ReactNode;
 }) {
@@ -37,7 +45,22 @@ export function Modal({
   );
 
   return (
-    <div className="modal__scrim" onClick={onClose}>
+    <div
+      className="modal__scrim"
+      onClick={dismissOnScrimClick ? onClose : undefined}
+      // When outside-clicks are ignored, don't let a backdrop click steal focus
+      // out of the dialog — otherwise the (dialog-scoped) ESC handler below would
+      // stop working until the user clicks back inside. Only guard clicks that
+      // land on the scrim itself; clicks inside the dialog bubble up here too,
+      // and preventing their default would stop inputs from receiving focus.
+      onMouseDown={
+        dismissOnScrimClick
+          ? undefined
+          : (e) => {
+              if (e.target === e.currentTarget) e.preventDefault();
+            }
+      }
+    >
       <div
         ref={ref}
         className="modal"

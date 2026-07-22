@@ -72,6 +72,7 @@ export function AddServiceDialog({
       title={editing ? "Edit hosting service" : "Add hosting service"}
       onClose={onClose}
       onSubmit={submit}
+      dismissOnScrimClick={false}
       footer={
         <>
           <button

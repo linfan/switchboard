@@ -104,6 +104,7 @@ export function NewTaskDialog({
       title="New task"
       onClose={onClose}
       onSubmit={submit}
+      dismissOnScrimClick={false}
       footer={
         <>
           <button type="button" className="btn" onClick={onClose}>

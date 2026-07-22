@@ -24,9 +24,23 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
 });
 
+// Open a workspace's ⋯ actions menu and pick "New task". The ⋯ trigger is hidden
+// until its row is hovered, and its accessible name is the "⋯" text (target by
+// title).
+async function openNewTask(page: Page, workspace: string) {
+  // Scope to the named workspace's head: a prior test's server-persisted task
+  // can show up as a second ("Ungrouped") head on load.
+  const head = page.locator(".workspace__head").filter({ hasText: workspace });
+  await head.hover();
+  await head.getByTitle("Workspace actions").click();
+  await page.getByRole("menuitem", { name: "New task" }).click();
+}
+
 // Create a workspace by browsing the server's filesystem and picking a folder.
 async function addWorkspace(page: Page, name: string) {
-  await page.getByTitle("Add workspace").click();
+  await page.locator(".service__head").hover();
+  await page.getByTitle("Service actions").click();
+  await page.getByRole("menuitem", { name: "Add workspace" }).click();
   const dialog = page.getByRole("dialog", { name: "Add workspace" });
   await expect(dialog).toBeVisible();
   await dialog.getByPlaceholder("my-project").fill(name);
@@ -54,7 +68,7 @@ test("a workspace groups tasks and a task inherits its folder", async ({
   await expect(page.locator(".workspace", { hasText: "proj" })).toBeVisible();
 
   // New task under the workspace: only the command is asked for (no folder).
-  await page.getByTitle("New task").click();
+  await openNewTask(page, "proj");
   const dialog = page.getByRole("dialog", { name: "New task" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByPlaceholder("/path/to/project")).toHaveCount(0);
@@ -78,7 +92,7 @@ test("a command not found on the host surfaces inline and keeps the dialog open"
 }) => {
   await addWorkspace(page, "proj");
 
-  await page.getByTitle("New task").click();
+  await openNewTask(page, "proj");
   const dialog = page.getByRole("dialog", { name: "New task" });
   await expect(dialog).toBeVisible();
 

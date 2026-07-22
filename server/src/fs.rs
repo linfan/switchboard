@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use switchboard_shared::{FsEntry, FsListing};
+use switchboard_shared::{FsEntry, FsListing, FsStat};
 
 use crate::error::{AppError, AppResult};
 
@@ -64,6 +64,37 @@ fn default_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new("/").to_path_buf())
+}
+
+/// Report whether `path` exists on the hosting machine and, if so, whether it's
+/// a directory. A missing path is not an error — the caller (workspace creation)
+/// uses `exists == false` to offer creating the folder. Symlinks are followed.
+pub fn stat(path: &str) -> AppResult<FsStat> {
+    if path.trim().is_empty() {
+        return Err(AppError::BadRequest("missing path".into()));
+    }
+    match std::fs::metadata(path) {
+        Ok(m) => Ok(FsStat {
+            exists: true,
+            is_dir: m.is_dir(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FsStat {
+            exists: false,
+            is_dir: false,
+        }),
+        Err(e) => Err(AppError::BadRequest(format!("cannot stat '{path}': {e}"))),
+    }
+}
+
+/// Create directory `path` (and any missing parents) on the hosting machine.
+/// Idempotent: succeeds if the directory already exists.
+pub fn mkdir(path: &str) -> AppResult<()> {
+    if path.trim().is_empty() {
+        return Err(AppError::BadRequest("missing path".into()));
+    }
+    std::fs::create_dir_all(path)
+        .map_err(|e| AppError::BadRequest(format!("cannot create '{path}': {e}")))?;
+    Ok(())
 }
 
 /// Reject a proposed file/directory name that isn't a single, safe path segment.
@@ -259,6 +290,41 @@ mod tests {
         assert!(upload(d, "up.txt", b"world").is_err());
         // Bad names are rejected.
         assert!(upload(d, "../evil", b"z").is_err());
+    }
+
+    #[test]
+    fn stat_reports_dir_file_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let file = dir.path().join("f.txt");
+        fs::write(&file, b"x").unwrap();
+
+        let d = stat(sub.to_str().unwrap()).unwrap();
+        assert!(d.exists && d.is_dir);
+
+        let f = stat(file.to_str().unwrap()).unwrap();
+        assert!(f.exists && !f.is_dir);
+
+        let missing = stat(dir.path().join("nope").to_str().unwrap()).unwrap();
+        assert!(!missing.exists && !missing.is_dir);
+
+        assert!(stat("   ").is_err());
+    }
+
+    #[test]
+    fn mkdir_creates_nested_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a/b/c");
+        let p = nested.to_str().unwrap();
+
+        mkdir(p).unwrap();
+        assert!(nested.is_dir());
+        // Re-creating an existing directory succeeds.
+        mkdir(p).unwrap();
+        assert!(nested.is_dir());
+
+        assert!(mkdir("").is_err());
     }
 
     #[test]

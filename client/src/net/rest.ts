@@ -5,6 +5,7 @@
 import type {
   FileContent,
   FsListing,
+  FsStat,
   GitChange,
   GitCommit,
   GitDiff,
@@ -250,6 +251,20 @@ export function listDir(
 ): Promise<FsListing> {
   const qs = path ? `?path=${encodeURIComponent(path)}` : "";
   return apiRequest<FsListing>(service, "GET", `/api/fs${qs}`);
+}
+
+/** Report whether a path exists on the hosting machine and if it's a directory. */
+export function statPath(service: ServiceRef, path: string): Promise<FsStat> {
+  return apiRequest<FsStat>(
+    service,
+    "GET",
+    `/api/fs/stat?path=${encodeURIComponent(path)}`,
+  );
+}
+
+/** Create a directory (and any missing parents) on the hosting machine. */
+export function makeDir(service: ServiceRef, path: string): Promise<void> {
+  return apiRequest<void>(service, "POST", `/api/fs/mkdir`, { path });
 }
 
 // --- workspace file editor --------------------------------------------------

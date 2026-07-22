@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { makeDir, statPath } from "../net/rest";
 import { useStore } from "../store/store";
 import type { Service } from "../store/types";
 import { FolderPicker } from "./FolderPicker";
@@ -26,11 +27,22 @@ export function AddWorkspaceDialog({
   const [cwd, setCwd] = useState("");
   const [showPicker, setShowPicker] = useState(false);
   const [error, setError] = useState<string | undefined>();
+  const [busy, setBusy] = useState(false);
+  // When set, the chosen folder doesn't exist yet: a nested confirm dialog asks
+  // whether to create it before the workspace is committed.
+  const [confirmCreate, setConfirmCreate] = useState<string | undefined>();
 
-  const submit = () => {
+  // Commit the workspace to the store and jump into its editor.
+  const commit = (n: string, dir: string) => {
+    const id = addWorkspace({ serviceId: service.id, name: n, cwd: dir });
+    selectWorkspace(id);
+    onClose();
+  };
+
+  const submit = async () => {
     const n = name.trim();
     const dir = cwd.trim();
-    if (n === "" || dir === "") return;
+    if (n === "" || dir === "" || busy) return;
     const dup = workspaces.some(
       (w) => w.serviceId === service.id && w.cwd === dir,
     );
@@ -38,10 +50,53 @@ export function AddWorkspaceDialog({
       setError("A workspace for this folder already exists on this service.");
       return;
     }
-    const id = addWorkspace({ serviceId: service.id, name: n, cwd: dir });
-    // Jump straight into the new workspace's editor.
-    selectWorkspace(id);
-    onClose();
+    // Offline we can't check the host's filesystem — create the workspace as-is
+    // (the folder is validated later when a task is launched in it).
+    if (!online) {
+      commit(n, dir);
+      return;
+    }
+    setBusy(true);
+    setError(undefined);
+    let stat;
+    try {
+      stat = await statPath(service, dir);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+      return;
+    }
+    setBusy(false);
+    if (stat.exists && !stat.is_dir) {
+      setError("That path is a file, not a folder.");
+      return;
+    }
+    if (!stat.exists) {
+      // Ask before creating the folder on the host.
+      setConfirmCreate(dir);
+      return;
+    }
+    commit(n, dir);
+  };
+
+  // The user confirmed creating the missing folder: mkdir on the host, then
+  // commit the workspace.
+  const createAndCommit = async () => {
+    const dir = confirmCreate;
+    if (dir === undefined || busy) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await makeDir(service, dir);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+      setConfirmCreate(undefined);
+      return;
+    }
+    setBusy(false);
+    setConfirmCreate(undefined);
+    commit(name.trim(), dir);
   };
 
   const valid = name.trim() !== "" && cwd.trim() !== "";
@@ -51,18 +106,24 @@ export function AddWorkspaceDialog({
       title="Add workspace"
       onClose={onClose}
       onSubmit={submit}
+      dismissOnScrimClick={false}
       footer={
         <>
-          <button type="button" className="btn" onClick={onClose}>
+          <button
+            type="button"
+            className="btn"
+            onClick={onClose}
+            disabled={busy}
+          >
             Cancel
           </button>
           <button
             type="button"
             className="btn btn--primary"
-            disabled={!valid}
+            disabled={!valid || busy}
             onClick={submit}
           >
-            Add
+            {busy ? "Checking…" : "Add"}
           </button>
         </>
       }
@@ -118,6 +179,41 @@ export function AddWorkspaceDialog({
           }}
           onClose={() => setShowPicker(false)}
         />
+      )}
+
+      {confirmCreate !== undefined && (
+        <Modal
+          title="Create folder?"
+          onClose={() => !busy && setConfirmCreate(undefined)}
+          onSubmit={createAndCommit}
+          dismissOnScrimClick={false}
+          footer={
+            <>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setConfirmCreate(undefined)}
+                disabled={busy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn--primary"
+                onClick={createAndCommit}
+                disabled={busy}
+              >
+                {busy ? "Creating…" : "Create folder"}
+              </button>
+            </>
+          }
+        >
+          <p>This folder doesn't exist on the service yet:</p>
+          <p className="hint hint--muted" title={confirmCreate}>
+            {confirmCreate}
+          </p>
+          <p>Create it?</p>
+        </Modal>
       )}
     </Modal>
   );

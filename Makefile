@@ -42,7 +42,7 @@ build-shared: ## Build shared protocol crate + emit TS bindings into client/src/
 build-server: ## Build the hosting service (release)
 	$(CARGO) build -p switchboard-server --release
 build-client: build-shared ## Build the Tauri client
-	cd client && $(NPM) run build
+	cd client && $(NPM) install --silent && $(NPM) run build
 
 # ---------------------------------------------------------------- run
 .PHONY: run-server run-client
@@ -98,15 +98,17 @@ lint: ## Lint Rust (clippy) + client
 	cd client && $(NPM) run lint --if-present
 
 # ---------------------------------------------------------------- deploy
-.PHONY: package-server package-client clean
+.PHONY: package-server package-client clean distclean
 package-server: build-server ## Produce a self-contained server release artifact
 	@mkdir -p dist
 	cp target/release/$(SERVER_BIN) dist/ 2>/dev/null || true
 	@echo "Server binary staged in ./dist"
 package-client: build-client ## Package the desktop client (Tauri bundles)
 	cd client && $(NPM) run tauri build
-clean: ## Remove build artifacts
+clean: ## Remove build artifacts (keeps fetched deps)
 	$(CARGO) clean
 	cd client/src-tauri && $(CARGO) clean
-	rm -rf client/dist client/node_modules e2e/node_modules dist
+	rm -rf client/dist dist
 	rm -rf client/test-results client/playwright-report client/tests-e2e/.server.json
+distclean: clean ## Also remove fetched dependencies (node_modules)
+	rm -rf client/node_modules e2e/node_modules

@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use switchboard_shared::{
-    FileContent, FsListing, GitChange, GitCommit, GitDiff, GitFileDiff, GitInfo, ServiceInfo,
-    TaskInfo,
+    FileContent, FsListing, FsStat, GitChange, GitCommit, GitDiff, GitFileDiff, GitInfo,
+    ServiceInfo, TaskInfo,
 };
 
 use crate::{auth, editor, error::AppResult, fs, state::SharedState, task::CreateParams, ws};
@@ -29,6 +29,8 @@ pub fn router(state: SharedState, require_auth: bool) -> Router {
     let mut api = Router::new()
         .route("/info", get(info))
         .route("/fs", get(list_dir))
+        .route("/fs/stat", get(stat_path))
+        .route("/fs/mkdir", post(make_dir))
         .route("/fs/rename", post(rename_entry))
         .route("/fs/delete", post(delete_entry))
         .route(
@@ -82,6 +84,23 @@ struct FsQuery {
 /// List a directory on the hosting machine (for the working-dir folder picker).
 async fn list_dir(Query(q): Query<FsQuery>) -> AppResult<Json<FsListing>> {
     Ok(Json(fs::list_dir(q.path.as_deref())?))
+}
+
+/// Report whether a path exists on the host and whether it's a directory
+/// (before creating a workspace, so a missing folder can be offered for creation).
+async fn stat_path(Query(q): Query<PathQuery>) -> AppResult<Json<FsStat>> {
+    Ok(Json(fs::stat(&q.path)?))
+}
+
+#[derive(Deserialize)]
+struct MkdirBody {
+    path: String,
+}
+
+/// Create a directory (and any missing parents) on the host.
+async fn make_dir(Json(body): Json<MkdirBody>) -> AppResult<StatusCode> {
+    fs::mkdir(&body.path)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

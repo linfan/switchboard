@@ -50,6 +50,19 @@ pub struct FsListing {
     pub entries: Vec<FsEntry>,
 }
 
+/// Existence + type of a path on the hosting machine (REST `GET /api/fs/stat`).
+/// Used before creating a workspace: a missing folder prompts the client to
+/// offer creating it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "client/src/protocol/")]
+pub struct FsStat {
+    /// Whether anything exists at the path.
+    pub exists: bool,
+    /// Whether the existing entry is a directory (false when it doesn't exist
+    /// or is a file).
+    pub is_dir: bool,
+}
+
 /// Contents of a file on the hosting machine (REST `GET /api/file`), for the
 /// workspace file editor.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -343,6 +356,7 @@ mod tests {
         ServerMsg::export_all().unwrap();
         ClientMsg::export_all().unwrap();
         FsListing::export_all().unwrap();
+        FsStat::export_all().unwrap();
         FileContent::export_all().unwrap();
         GitInfo::export_all().unwrap();
         GitCommit::export_all().unwrap();
