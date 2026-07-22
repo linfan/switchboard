@@ -8,7 +8,6 @@ import type {
   FsStat,
   GitChange,
   GitCommit,
-  GitDiff,
   GitFileDiff,
   GitInfo,
   ServiceInfo,
@@ -341,20 +340,6 @@ export function gitChanges(
     service,
     "GET",
     `/api/git/changes?cwd=${encodeURIComponent(cwd)}&commit=${encodeURIComponent(commit)}`,
-  );
-}
-
-/** Fetch the unified diff for one file in a commit or the working tree. */
-export function gitDiff(
-  service: ServiceRef,
-  cwd: string,
-  commit: string,
-  path: string,
-): Promise<GitDiff> {
-  return apiRequest<GitDiff>(
-    service,
-    "GET",
-    `/api/git/diff?cwd=${encodeURIComponent(cwd)}&commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
   );
 }
 

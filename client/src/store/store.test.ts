@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { applyMsg, useStore, type AppState } from "./store";
+import { applyMsg } from "./reducer";
+import { useStore, type AppState } from "./store";
 import { convKey } from "./types";
 
 function baseState(): AppState {

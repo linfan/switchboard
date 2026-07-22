@@ -21,12 +21,9 @@ use axum::body::Body;
 use axum::http::Request;
 use futures::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::{ring, verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+use rustls::ClientConfig;
 use switchboard_shared::{
-    auth::{ct_eq, from_hex, hex, random_nonce, sha256, ws_mac, AuthMsg, NONCE_LEN},
+    auth::{from_hex, hex, random_nonce, ws_mac, AuthMsg, NONCE_LEN},
     tunnel::{
         RespHead, ReqHead, TunnelFrame, WsOpen, BODY_CHUNK, KIND_PING, KIND_PONG, KIND_REQ_BODY,
         KIND_REQ_END, KIND_REQ_HEAD, KIND_RESP_BODY, KIND_RESP_END, KIND_RESP_HEAD, KIND_RST,
@@ -41,6 +38,9 @@ use tokio_tungstenite::{
 
 use crate::state::SharedState;
 use crate::ws::{run_session, WsIn, WsOut};
+
+mod tls_pin;
+use tls_pin::{leaf_der_fingerprint, pinned_client_config};
 
 /// Outbound tunnel channel depth (encoded frames awaiting the socket writer).
 /// Bounded so a slow repeater applies backpressure instead of unbounded growth.
@@ -403,86 +403,6 @@ async fn tunnel_auth(
             Some(Err(e)) => return Err(e).context("reading auth verdict"),
             None => return Err(anyhow!("tunnel closed during auth")),
         }
-    }
-}
-
-/// SHA-256 of the leaf certificate DER in a PEM file — the pin and `cb`.
-fn leaf_der_fingerprint(pem_path: &str) -> Result<Vec<u8>> {
-    use std::io::BufReader;
-    let der = rustls_pemfile::certs(&mut BufReader::new(
-        std::fs::File::open(pem_path).with_context(|| format!("opening {pem_path}"))?,
-    ))
-    .next()
-    .ok_or_else(|| anyhow!("no certificate found in {pem_path}"))?
-    .context("reading leaf certificate DER")?;
-    Ok(sha256(&der).to_vec())
-}
-
-/// Build a rustls client config that pins the repeater's leaf cert by SHA-256.
-fn pinned_client_config(pin: Vec<u8>) -> ClientConfig {
-    let _ = ring::default_provider().install_default();
-    ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(PinnedVerifier::new(pin)))
-        .with_no_client_auth()
-}
-
-/// A rustls verifier that accepts exactly the pinned leaf fingerprint, ignoring
-/// hostname (so a self-signed repeater cert with any SAN works).
-#[derive(Debug)]
-struct PinnedVerifier {
-    pin: Vec<u8>,
-    supported: WebPkiSupportedAlgorithms,
-}
-
-impl PinnedVerifier {
-    fn new(pin: Vec<u8>) -> Self {
-        Self {
-            pin,
-            supported: ring::default_provider().signature_verification_algorithms,
-        }
-    }
-}
-
-impl ServerCertVerifier for PinnedVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        let fp = sha256(end_entity.as_ref());
-        if ct_eq(&self.pin, &fp) {
-            Ok(ServerCertVerified::assertion())
-        } else {
-            Err(rustls::Error::General(
-                "repeater certificate fingerprint does not match the pinned value".into(),
-            ))
-        }
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls12_signature(message, cert, dss, &self.supported)
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls13_signature(message, cert, dss, &self.supported)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.supported.supported_schemes()
     }
 }
 
