@@ -279,15 +279,22 @@ enum WsEvt {
 }
 
 /// Open a WebSocket to `url` with pinned TLS and stream its frames to the
-/// frontend as `ws:{id}` events. This is a dumb byte pipe: the `SWB-WS-v1`
+/// frontend as events on `chan`. This is a dumb byte pipe: the `SWB-WS-v1`
 /// channel-bound handshake is performed by the frontend over these frames (the
-/// token never reaches Rust). Returns the connection id.
+/// token never reaches Rust). Returns the connection id (for `ws_send`/`ws_close`).
+///
+/// The event channel is supplied by the caller — not derived from the returned
+/// id — so the frontend can `listen(chan)` *before* invoking this. The server
+/// sends the first frame (`auth_challenge`) the instant the upgrade completes;
+/// if we emitted on an id-derived channel the frontend could not have subscribed
+/// yet, and that first frame would be dropped, hanging the handshake forever.
 #[tauri::command]
 pub async fn ws_connect(
     app: AppHandle,
     state: State<'_, WsState>,
     url: String,
     pin: Option<String>,
+    chan: String,
 ) -> Result<u64, String> {
     let (config, _) = pinned_config(pin)?;
     let connector = Connector::Rustls(config);
@@ -312,8 +319,9 @@ pub async fn ws_connect(
         let _ = write.close().await;
     });
 
-    // Reader: forward inbound frames to the frontend, then signal close.
-    let event = format!("ws:{id}");
+    // Reader: forward inbound frames to the frontend, then signal close. Emit on
+    // the caller-supplied channel, which is already subscribed (see the doc note).
+    let event = chan;
     let cleanup = inner.clone();
     tokio::spawn(async move {
         while let Some(msg) = read.next().await {

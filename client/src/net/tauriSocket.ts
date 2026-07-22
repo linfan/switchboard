@@ -17,6 +17,9 @@ const CONNECTING = 0;
 const OPEN = 1;
 const CLOSED = 3;
 
+/** Monotonic suffix so each socket gets its own event channel within this app. */
+let chanSeq = 0;
+
 class TauriWebSocket implements WebSocketLike {
   readyState = CONNECTING;
   binaryType = "arraybuffer";
@@ -28,28 +31,66 @@ class TauriWebSocket implements WebSocketLike {
   private id: number | null = null;
   private unlisten: UnlistenFn | null = null;
   private closed = false;
+  private opened = false;
+  /**
+   * Frames delivered before the socket is reported open. The server sends its
+   * `auth_challenge` the instant the WS upgrades — which can reach us before the
+   * `ws_connect` invoke resolves — so we queue anything early and flush it on
+   * open, in order, rather than dropping it (which would hang the handshake).
+   */
+  private pending: WsEvt[] = [];
 
   constructor(url: string, pin?: string) {
-    invoke<number>("ws_connect", { url, pin: pin ?? null })
-      .then(async (id) => {
+    const chan = `ws:${chanSeq++}:${
+      globalThis.crypto?.randomUUID?.() ?? Date.now()
+    }`;
+    // Subscribe BEFORE connecting: the listener must exist before Rust can emit
+    // the server's first frame, or Tauri's fire-and-forget event bus drops it.
+    listen<WsEvt>(chan, (p) => this.onEvt(p))
+      .then((unlisten) => {
+        // A close() that raced the subscribe: undo it and never connect.
+        if (this.closed) {
+          unlisten();
+          return undefined;
+        }
+        this.unlisten = unlisten;
+        return invoke<number>("ws_connect", { url, pin: pin ?? null, chan });
+      })
+      .then((id) => {
+        if (id === undefined) return; // closed before we connected
         // A close() that raced the connect: tear the fresh socket right down.
         if (this.closed) {
           void invoke("ws_close", { id });
           return;
         }
         this.id = id;
-        this.unlisten = await listen<WsEvt>(`ws:${id}`, (p) => this.onEvt(p));
         this.readyState = OPEN;
+        this.opened = true;
         this.onopen?.();
+        // Flush frames that arrived ahead of this open notification.
+        const queued = this.pending;
+        this.pending = [];
+        for (const p of queued) this.deliver(p);
       })
       .catch(() => {
         this.readyState = CLOSED;
+        this.clearListener();
         this.onerror?.();
         this.onclose?.();
       });
   }
 
   private onEvt(p: WsEvt): void {
+    // Hold frames until the socket is reported open (and its id is known, so a
+    // reply can be sent); deliver in arrival order once open.
+    if (!this.opened) {
+      this.pending.push(p);
+      return;
+    }
+    this.deliver(p);
+  }
+
+  private deliver(p: WsEvt): void {
     if (p.kind === "text") {
       this.onmessage?.({ data: p.data });
     } else if (p.kind === "binary") {
