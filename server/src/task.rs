@@ -213,18 +213,25 @@ impl TaskManager {
 
     /// Delete a task entirely: kill its process if running, drop its in-memory
     /// screen/handles, remove all persisted state, and tell every client to drop
-    /// it. Idempotent-ish: deleting an unknown task is a `NotFound`.
+    /// it. Fully idempotent: deleting an unknown task still broadcasts
+    /// `TaskDeleted` and succeeds. A client whose copy is stale (e.g. it missed
+    /// the lossy `TaskDeleted` broadcast for an earlier delete) must be able to
+    /// clear it — erroring with `NotFound` would strand that row in the UI
+    /// forever, since the client has no way to force-drop it locally.
     pub async fn delete(&self, id: &str) -> AppResult<()> {
-        if self.store.get_task(id).await?.is_none() {
-            return Err(AppError::NotFound(format!("task {id}")));
-        }
-        // Mark deleting so the pump's later Exit doesn't broadcast a stray state.
-        self.deleting.lock().unwrap().insert(id.to_string());
+        // Only mark deleting when a live process exists: the marker exists so the
+        // pump swallows the process's final Exit (and buffered chunks) instead of
+        // broadcasting a stray lifecycle state. With no pump there is nothing to
+        // swallow, and an un-consumed marker would leak for every unknown-id
+        // delete. Insert before terminate() so the marker is set before the
+        // pump can observe the Exit.
         if let Some(handle) = self.running.lock().unwrap().remove(id) {
+            self.deleting.lock().unwrap().insert(id.to_string());
             handle.terminate();
         }
         self.terminating.lock().unwrap().remove(id);
         self.terminals.lock().unwrap().remove(id);
+        // A no-op when the row is already gone — the delete stays idempotent.
         self.store.delete_task(id).await?;
         let _ = self.events.send(Outbound::Control(ServerMsg::TaskDeleted {
             task_id: id.to_string(),

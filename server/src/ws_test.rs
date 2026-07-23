@@ -280,6 +280,35 @@ async fn delete_task_removes_state_and_notifies_clients() {
     }
 }
 
+/// Deleting a task the server no longer has must still broadcast `TaskDeleted`
+/// (not error out) so a client whose copy went stale — e.g. it missed the lossy
+/// `TaskDeleted` from an earlier delete — can finally drop the row. Regression:
+/// a stale/failed task used to be un-removable because the server 404'd and the
+/// client silently ignored the resulting `delete_failed`.
+#[tokio::test]
+async fn delete_unknown_task_is_idempotent() {
+    let (addr, _state) = start_server().await;
+
+    let mut ws = connect(addr).await;
+    hello(&mut ws, HashMap::new()).await;
+
+    // T1 was never seeded — the server has no such row.
+    send(&mut ws, &ClientMsg::DeleteTask { task_id: T1.into() }).await;
+
+    loop {
+        match next_rx(&mut ws).await {
+            Rx::Ctrl(ServerMsg::TaskDeleted { task_id }) => {
+                assert_eq!(task_id, T1, "delete of an unknown task must confirm removal");
+                break;
+            }
+            Rx::Ctrl(ServerMsg::Error { code, .. }) => {
+                panic!("delete of an unknown task must not error: {code:?}");
+            }
+            _ => {}
+        }
+    }
+}
+
 #[tokio::test]
 async fn reconnect_replays_only_missed_bytes() {
     let (addr, state) = start_server().await;
