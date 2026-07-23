@@ -91,6 +91,8 @@ async function driveHandshake(s: FakeSocket): Promise<void> {
 function makeDeps(over: {
   cursors?: Record<string, number>;
   now?: () => number;
+  wake?: { checkMs: number; driftMs: number };
+  heartbeat?: { intervalMs: number; timeoutMs: number };
 }) {
   const messages: ServerMsg[] = [];
   const binaries: Uint8Array[] = [];
@@ -107,8 +109,8 @@ function makeDeps(over: {
     wsFactory: (u: string) => new FakeSocket(u) as unknown as WebSocketLike,
     now: over.now ?? (() => 1000),
     reconnect: { baseDelayMs: 1000, factor: 2, jitter: 0, maxDelayMs: 30000 },
-    heartbeat: { intervalMs: 15000, timeoutMs: 10000 },
-    wake: { checkMs: 2000, driftMs: 5000 },
+    heartbeat: over.heartbeat ?? { intervalMs: 15000, timeoutMs: 10000 },
+    wake: over.wake ?? { checkMs: 2000, driftMs: 5000 },
   };
   return { deps, messages, binaries, statuses };
 }
@@ -321,6 +323,52 @@ describe("network + wake", () => {
     const count = FakeSocket.instances.length;
     vi.advanceTimersByTime(20000); // many wake ticks, no clock drift
     expect(FakeSocket.instances.length).toBe(count);
+    mgr.stop();
+  });
+
+  it("wake gap probes a live authed socket instead of tearing it down", async () => {
+    // A blocked main thread (e.g. a large replay burst) produces the same clock
+    // gap as a real sleep. On a healthy authed socket we must probe, not
+    // reconnect — reconnecting would re-replay and block the thread again.
+    let now = 1000;
+    const { mgr } = mkManager({ now: () => now });
+    mgr.start();
+    const s = FakeSocket.last();
+    await driveHandshake(s);
+    const count = FakeSocket.instances.length;
+    now = 1000 + 2000 + 6000; // elapsed 8000 > check(2000)+drift(5000)
+    vi.advanceTimersByTime(2000); // fire one wake tick
+    expect(FakeSocket.instances.length).toBe(count); // no reconnect
+    expect(FakeSocket.last()).toBe(s); // same socket, untouched
+    expect(s.find("ping")).toBeTruthy(); // probed instead
+    s.emitMessage({ type: "pong", ts: now }); // probe answered
+    expect(mgr.getStatus()).toBe("online");
+    mgr.stop();
+  });
+});
+
+describe("starvation-safe heartbeat", () => {
+  it("re-probes instead of dying when the pong timer fires late", async () => {
+    // Wake watchdog disabled so only the heartbeat timers fire here.
+    let now = 0;
+    const { mgr } = mkManager({
+      now: () => now,
+      wake: { checkMs: 10_000_000, driftMs: 5000 },
+      heartbeat: { intervalMs: 15000, timeoutMs: 10000 },
+    });
+    mgr.start();
+    const s = FakeSocket.last();
+    await driveHandshake(s);
+    now = 15000;
+    vi.advanceTimersByTime(15000); // heartbeat ping; pong deadline = 25000
+    const ping = (): number =>
+      s.parsed().filter((m) => m.type === "ping").length;
+    expect(ping()).toBe(1);
+    // The main thread was blocked: the pong timer runs 6s past its deadline.
+    now = 25000 + 6000;
+    vi.advanceTimersByTime(10000); // fire the pong timer at sim-time 25000
+    expect(mgr.getStatus()).toBe("online"); // re-probed, not torn down
+    expect(ping()).toBe(2);
     mgr.stop();
   });
 });

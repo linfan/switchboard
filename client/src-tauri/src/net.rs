@@ -29,7 +29,8 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use serde::Serialize;
 use switchboard_shared::auth::{ct_eq, from_hex, hex, sha256};
-use tauri::{AppHandle, Emitter, State};
+use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::State;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::protocol::Message, Connector};
 
@@ -268,33 +269,39 @@ pub async fn upload_file(
     Ok(())
 }
 
-/// A frame delivered to the frontend on the per-connection `ws:{id}` event.
-#[derive(Serialize, Clone)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-enum WsEvt {
-    Text { data: String },
-    /// Base64-encoded binary payload (JSON can't carry raw bytes).
-    Binary { data: String },
-    Close,
+/// Outer framing tags for the raw bytes streamed to the frontend over the
+/// Channel: `[tag][payload]`. Mirrors `tauriSocket.ts`. Raw bytes avoid the
+/// base64 + JSON tax the event bus imposed, which used to saturate the webview
+/// main thread on a large reconnect replay.
+const TAG_TEXT: u8 = 0;
+const TAG_BINARY: u8 = 1;
+const TAG_CLOSE: u8 = 2;
+
+fn tagged(tag: u8, payload: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(1 + payload.len());
+    v.push(tag);
+    v.extend_from_slice(payload);
+    v
 }
 
 /// Open a WebSocket to `url` with pinned TLS and stream its frames to the
-/// frontend as events on `chan`. This is a dumb byte pipe: the `SWB-WS-v1`
-/// channel-bound handshake is performed by the frontend over these frames (the
-/// token never reaches Rust). Returns the connection id (for `ws_send`/`ws_close`).
+/// frontend over `on_frame` as raw bytes. This is a dumb byte pipe: the
+/// `SWB-WS-v1` channel-bound handshake is performed by the frontend over these
+/// frames (the token never reaches Rust). Returns the connection id (for
+/// `ws_send`/`ws_close`).
 ///
-/// The event channel is supplied by the caller — not derived from the returned
-/// id — so the frontend can `listen(chan)` *before* invoking this. The server
-/// sends the first frame (`auth_challenge`) the instant the upgrade completes;
-/// if we emitted on an id-derived channel the frontend could not have subscribed
-/// yet, and that first frame would be dropped, hanging the handshake forever.
+/// A Tauri `Channel` (vs the event bus) both preserves ordering — so interleaved
+/// control (text) and data-plane (binary) frames arrive exactly as the server
+/// sent them — and carries binary payloads as raw bytes. Its callback is
+/// registered on the frontend *before* this command is invoked, so the server's
+/// first frame (`auth_challenge`, sent the instant the upgrade completes) can
+/// never be dropped.
 #[tauri::command]
 pub async fn ws_connect(
-    app: AppHandle,
     state: State<'_, WsState>,
     url: String,
     pin: Option<String>,
-    chan: String,
+    on_frame: Channel<InvokeResponseBody>,
 ) -> Result<u64, String> {
     let (config, _) = pinned_config(pin)?;
     let connector = Connector::Rustls(config);
@@ -319,30 +326,23 @@ pub async fn ws_connect(
         let _ = write.close().await;
     });
 
-    // Reader: forward inbound frames to the frontend, then signal close. Emit on
-    // the caller-supplied channel, which is already subscribed (see the doc note).
-    let event = chan;
+    // Reader: forward inbound frames to the frontend as tagged raw bytes, then
+    // signal close and clean up.
     let cleanup = inner.clone();
     tokio::spawn(async move {
         while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Text(t)) => {
-                    let _ = app.emit(&event, WsEvt::Text { data: t.to_string() });
-                }
-                Ok(Message::Binary(b)) => {
-                    let _ = app.emit(
-                        &event,
-                        WsEvt::Binary {
-                            data: b64().encode(&b),
-                        },
-                    );
-                }
+            let body = match msg {
+                Ok(Message::Text(t)) => tagged(TAG_TEXT, t.as_bytes()),
+                Ok(Message::Binary(b)) => tagged(TAG_BINARY, b.as_ref()),
                 Ok(Message::Close(_)) | Err(_) => break,
-                _ => {}
+                _ => continue,
+            };
+            if on_frame.send(InvokeResponseBody::Raw(body)).is_err() {
+                break;
             }
         }
         cleanup.conns.lock().await.remove(&id);
-        let _ = app.emit(&event, WsEvt::Close);
+        let _ = on_frame.send(InvokeResponseBody::Raw(vec![TAG_CLOSE]));
     });
 
     Ok(id)

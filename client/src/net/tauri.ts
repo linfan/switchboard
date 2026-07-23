@@ -15,13 +15,3 @@ export async function invoke<T>(
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(cmd, args);
 }
-
-export type UnlistenFn = () => void;
-
-export async function listen<T>(
-  event: string,
-  handler: (payload: T) => void,
-): Promise<UnlistenFn> {
-  const { listen } = await import("@tauri-apps/api/event");
-  return listen<T>(event, (e) => handler(e.payload));
-}

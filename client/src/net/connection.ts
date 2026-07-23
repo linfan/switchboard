@@ -382,10 +382,21 @@ export class ConnectionManager {
     if (!this.ws || this.ws.readyState !== WS_OPEN) return;
     this.lastPingTs = this.now();
     this.send({ type: "ping", ts: this.lastPingTs });
-    // Arm the pong deadline; if it fires, the link is dead.
+    // Arm the pong deadline; if it fires, the link is (probably) dead.
     if (this.pongTimer !== null) clearTimeout(this.pongTimer);
+    const deadline = this.now() + this.heartbeatOpts.timeoutMs;
     this.pongTimer = setTimeout(() => {
       this.pongTimer = null;
+      // If the timer itself fired well past its deadline, the main thread was
+      // blocked (e.g. applying a large replay burst), not the link — a pong
+      // could not have been processed in time regardless of link health. Treat
+      // that as inconclusive and re-probe rather than tearing down a socket that
+      // may be perfectly alive (which would reconnect and re-replay, blocking
+      // the thread again — a feedback loop).
+      if (this.now() - deadline > this.wakeOpts.driftMs) {
+        this.sendPing();
+        return;
+      }
       this.onClose("heartbeat timeout");
       this.closeSocket();
     }, this.heartbeatOpts.timeoutMs);
@@ -423,12 +434,20 @@ export class ConnectionManager {
     const nowT = this.now();
     const elapsed = nowT - this.lastWakeTick;
     this.lastWakeTick = nowT;
-    // A gap far larger than the tick means the process was suspended (sleep).
-    // The socket is almost certainly stale, so force a fresh reconnect.
-    if (elapsed > this.wakeOpts.checkMs + this.wakeOpts.driftMs) {
-      if (!this.stopped && !this.networkDown) {
-        this.reconnectNow();
-      }
+    // A gap far larger than the tick means either the process was suspended
+    // (real sleep — the socket is now stale) or the main thread was blocked for
+    // a long stretch (e.g. applying a large replay burst — the socket is fine).
+    // The clock alone can't tell them apart, so never tear down here: probe a
+    // live socket with a ping and let the pong deadline decide. A dead link
+    // fails the probe and reconnects; a healthy one is left untouched, so a busy
+    // thread can't trigger a needless reconnect (and the re-replay it would
+    // cause, which re-saturates the thread — a feedback loop).
+    if (elapsed <= this.wakeOpts.checkMs + this.wakeOpts.driftMs) return;
+    if (this.stopped || this.networkDown) return;
+    if (this.authed && this.ws && this.ws.readyState === WS_OPEN) {
+      this.sendPing();
+    } else {
+      this.reconnectNow();
     }
   }
 

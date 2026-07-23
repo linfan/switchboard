@@ -1,5 +1,6 @@
-//! Base64 <-> bytes, for carrying binary WebSocket frames over the Tauri IPC
-//! bridge (JSON event payloads can't hold raw bytes).
+//! Base64 encoding for the tiny client->server binary frames (keystrokes,
+//! resizes) sent over the Tauri IPC bridge, whose JSON args can't hold raw
+//! bytes. The high-volume inbound path uses a raw-bytes Channel instead.
 
 /** Encode bytes (any ArrayBuffer view or buffer) to a base64 string. */
 export function bytesToBase64(data: ArrayBufferLike | ArrayBufferView): string {
@@ -15,12 +16,4 @@ export function bytesToBase64(data: ArrayBufferLike | ArrayBufferView): string {
     bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
   }
   return btoa(bin);
-}
-
-/** Decode a base64 string to a fresh ArrayBuffer. */
-export function base64ToArrayBuffer(b64: string): ArrayBuffer {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out.buffer;
 }
