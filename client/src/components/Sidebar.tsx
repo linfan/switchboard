@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import * as editors from "../net/editors";
 import { pool } from "../net/pool";
+import { gitInfo } from "../net/rest";
 import { useStore } from "../store/store";
 import {
   convKey,
@@ -11,6 +12,7 @@ import {
 } from "../store/types";
 import { AddServiceDialog } from "./AddServiceDialog";
 import { AddWorkspaceDialog } from "./AddWorkspaceDialog";
+import { CreateWorktreeDialog } from "./CreateWorktreeDialog";
 import { InlineEdit } from "./InlineEdit";
 import { Menu } from "./Menu";
 import { NewTaskDialog } from "./NewTaskDialog";
@@ -217,8 +219,33 @@ function WorkspaceGroup({
   const removeWorkspace = useStore((s) => s.removeWorkspace);
   const selectWorkspace = useStore((s) => s.selectWorkspace);
   const selected = useStore((s) => s.selectedWorkspaceId === workspace.id);
+  const service = useStore((s) =>
+    s.services.find((sv) => sv.id === workspace.serviceId),
+  );
   const [addingTask, setAddingTask] = useState(false);
+  const [creatingWorktree, setCreatingWorktree] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  // Whether this workspace folder is a git repo (drives the "Create worktree"
+  // menu item). Probed once the service is online; null while unknown.
+  const [isRepo, setIsRepo] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (!service || !online) {
+      setIsRepo(null);
+      return;
+    }
+    let cancelled = false;
+    gitInfo(service, workspace.cwd)
+      .then((info) => {
+        if (!cancelled) setIsRepo(info.available && info.is_repo);
+      })
+      .catch(() => {
+        if (!cancelled) setIsRepo(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [service, online, workspace.cwd, workspace.id]);
 
   const remove = () => {
     // "Delete its tasks" model: drop every task on the server first, then
@@ -268,6 +295,15 @@ function WorkspaceGroup({
               disabled: !online,
               onClick: () => setAddingTask(true),
             },
+            ...(isRepo
+              ? [
+                  {
+                    label: "Create worktree",
+                    disabled: !online,
+                    onClick: () => setCreatingWorktree(true),
+                  },
+                ]
+              : []),
             {
               label: "Remove workspace",
               confirm: "Click again to remove (deletes its tasks)",
@@ -289,6 +325,13 @@ function WorkspaceGroup({
           workspaceId={workspace.id}
           cwd={workspace.cwd}
           onClose={() => setAddingTask(false)}
+        />
+      )}
+      {creatingWorktree && service && (
+        <CreateWorktreeDialog
+          service={service}
+          workspace={workspace}
+          onClose={() => setCreatingWorktree(false)}
         />
       )}
     </section>

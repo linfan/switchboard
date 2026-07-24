@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 
 import * as editors from "../net/editors";
 import {
+  createEntry,
   deletePath,
   gitChanges,
   gitInfo,
@@ -169,6 +170,21 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
     }
   };
 
+  const handleCreate = async (dir: string, name: string, isDir: boolean) => {
+    setFsError(null);
+    try {
+      await createEntry(service, dir, name, isDir);
+      setRefreshKey((k) => k + 1);
+      // Open a freshly-created file straight away for editing.
+      if (!isDir) {
+        const path = `${dir.replace(/\/+$/, "")}/${name}`;
+        openTab(workspace.id, { path, mode: "edit" });
+      }
+    } catch (e) {
+      setFsError(errMsg(e));
+    }
+  };
+
   return (
     <main className="panel weditor">
       <header className="panel__header">
@@ -204,6 +220,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
                 onDelete={handleDelete}
                 onDownload={handleDownload}
                 onUpload={handleUpload}
+                onCreate={handleCreate}
               />
             </div>
           </section>
@@ -283,10 +300,14 @@ interface TreeActions {
   refreshKey: number;
   renamingPath: string | null;
   setRenamingPath: (path: string | null) => void;
+  /** An in-progress "new file/folder" inline input inside directory `dir`. */
+  creating: { dir: string; isDir: boolean } | null;
+  setCreating: (c: { dir: string; isDir: boolean } | null) => void;
   onToggleDir: (path: string) => void;
   onOpenFile: (path: string) => void;
   onContextMenu: (entry: FsEntry, e: React.MouseEvent) => void;
   onRename: (entry: FsEntry, newName: string) => void;
+  onCreate: (dir: string, name: string, isDir: boolean) => void;
 }
 
 function FileTree({
@@ -301,6 +322,7 @@ function FileTree({
   onDelete,
   onDownload,
   onUpload,
+  onCreate,
 }: {
   service: ServiceRef;
   root: string;
@@ -313,13 +335,20 @@ function FileTree({
   onDelete: (entry: FsEntry) => void;
   onDownload: (entry: FsEntry) => void;
   onUpload: (entry: FsEntry) => void;
+  onCreate: (dir: string, name: string, isDir: boolean) => void;
 }) {
   const [ctxMenu, setCtxMenu] = useState<{
     x: number;
     y: number;
     entry: FsEntry;
+    /** True when opened on the tree background (workspace root, no entry). */
+    isRoot?: boolean;
   } | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [creating, setCreating] = useState<{
+    dir: string;
+    isDir: boolean;
+  } | null>(null);
 
   const actions: TreeActions = {
     service,
@@ -328,6 +357,8 @@ function FileTree({
     refreshKey,
     renamingPath,
     setRenamingPath,
+    creating,
+    setCreating,
     onToggleDir,
     onOpenFile,
     onContextMenu: (entry, e) => {
@@ -339,9 +370,32 @@ function FileTree({
       setRenamingPath(null);
       onRename(entry, newName);
     },
+    onCreate: (dir, name, isDir) => {
+      setCreating(null);
+      onCreate(dir, name, isDir);
+    },
   };
 
-  const menuItems = (entry: FsEntry): MenuItem[] => {
+  // Show the inline "new entry" input inside `dir`, expanding it if collapsed.
+  const startCreate = (dir: string, isDir: boolean) => {
+    if (dir !== root && !expanded.includes(dir)) onToggleDir(dir);
+    setCreating({ dir, isDir });
+  };
+
+  const menuItems = (entry: FsEntry, isRoot?: boolean): MenuItem[] => {
+    const newFile: MenuItem = {
+      label: "New file\u2026",
+      onClick: () => startCreate(entry.path, false),
+    };
+    const newFolder: MenuItem = {
+      label: "New folder\u2026",
+      onClick: () => startCreate(entry.path, true),
+    };
+    const upload: MenuItem = {
+      label: "Upload file\u2026",
+      onClick: () => onUpload(entry),
+    };
+    if (isRoot) return [newFile, newFolder, upload];
     const rename: MenuItem = {
       label: "Rename",
       onClick: () => setRenamingPath(entry.path),
@@ -353,22 +407,34 @@ function FileTree({
       onClick: () => onDelete(entry),
     };
     return entry.is_dir
-      ? [rename, { label: "Upload file…", onClick: () => onUpload(entry) }, del]
+      ? [newFile, newFolder, rename, upload, del]
       : [rename, { label: "Download", onClick: () => onDownload(entry) }, del];
   };
 
   return (
-    <>
+    <div
+      className="weditor__tree"
+      onContextMenu={(e) => {
+        // Right-click on the tree background targets the workspace root.
+        e.preventDefault();
+        setCtxMenu({
+          x: e.clientX,
+          y: e.clientY,
+          entry: { name: "", path: root, is_dir: true },
+          isRoot: true,
+        });
+      }}
+    >
       <DirNode service={service} path={root} depth={0} isRoot actions={actions} />
       {ctxMenu && (
         <ContextMenu
           x={ctxMenu.x}
           y={ctxMenu.y}
-          items={menuItems(ctxMenu.entry)}
+          items={menuItems(ctxMenu.entry, ctxMenu.isRoot)}
           onClose={() => setCtxMenu(null)}
         />
       )}
-    </>
+    </div>
   );
 }
 
@@ -448,6 +514,30 @@ function DirNode({
       {open && error && (
         <div className="weditor__row weditor__row--hint" style={indent}>
           {error}
+        </div>
+      )}
+      {open && actions.creating?.dir === path && (
+        <div
+          className="weditor__row weditor__row--new"
+          style={{ paddingLeft: `${(depth + 1) * 12 + 8}px` }}
+        >
+          <InlineEdit
+            className="weditor__label"
+            value=""
+            ariaLabel={
+              actions.creating.isDir ? "New folder name" : "New file name"
+            }
+            placeholder={
+              actions.creating.isDir ? "folder name\u2026" : "file name\u2026"
+            }
+            editing
+            onEditingChange={(on) => {
+              if (!on) actions.setCreating(null);
+            }}
+            onCommit={(newName) =>
+              actions.onCreate(path, newName, actions.creating?.isDir ?? false)
+            }
+          />
         </div>
       )}
       {open &&
@@ -543,7 +633,11 @@ function GitHistory({
           className={`weditor__row weditor__commit ${
             selected === c.hash ? "is-active" : ""
           }`}
-          title={`${c.subject}${c.body ? `\n\n${c.body}` : ""}\n\n${c.short} · ${c.author} · ${c.date}`}
+          title={`${c.subject}${c.body ? `
+
+${c.body}` : ""}
+
+${c.short} · ${c.author} · ${c.date}`}
           onClick={() => onSelect(c.hash)}
         >
           <span className="weditor__label">{c.subject}</span>

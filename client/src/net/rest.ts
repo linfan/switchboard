@@ -10,6 +10,7 @@ import type {
   GitCommit,
   GitFileDiff,
   GitInfo,
+  GitWorktree,
   ServiceInfo,
 } from "../protocol";
 import { invoke, isTauri } from "./tauri";
@@ -266,6 +267,20 @@ export function makeDir(service: ServiceRef, path: string): Promise<void> {
   return apiRequest<void>(service, "POST", `/api/fs/mkdir`, { path });
 }
 
+/** Create an empty file or a folder named `name` inside directory `dir`. */
+export function createEntry(
+  service: ServiceRef,
+  dir: string,
+  name: string,
+  isDir: boolean,
+): Promise<void> {
+  return apiRequest<void>(service, "POST", `/api/fs/create`, {
+    dir,
+    name,
+    is_dir: isDir,
+  });
+}
+
 // --- workspace file editor --------------------------------------------------
 
 /** Read a file's contents from the hosting machine. */
@@ -358,4 +373,25 @@ export function gitFileDiff(
     "GET",
     `/api/git/filediff?cwd=${encodeURIComponent(cwd)}&commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
   );
+}
+
+/**
+ * Create a git worktree for a workspace's repo at
+ * `$HOME/.switchboard/worktree/<workspaceName>/<worktreeName>` on the host.
+ * When `branch` is given, that existing branch is checked out; otherwise a new
+ * branch named `worktreeName` is created.
+ */
+export function gitCreateWorktree(
+  service: ServiceRef,
+  cwd: string,
+  workspaceName: string,
+  worktreeName: string,
+  branch?: string,
+): Promise<GitWorktree> {
+  return apiRequest<GitWorktree>(service, "POST", `/api/git/worktree`, {
+    cwd,
+    workspace_name: workspaceName,
+    worktree_name: worktreeName,
+    branch: branch && branch.trim() !== "" ? branch.trim() : null,
+  });
 }

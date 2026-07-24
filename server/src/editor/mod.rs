@@ -9,7 +9,7 @@
 
 mod git;
 
-pub use git::{git_changes, git_diff, git_file_diff, git_info, git_log};
+pub use git::{git_changes, git_diff, git_file_diff, git_info, git_log, git_worktree_add};
 
 use std::path::PathBuf;
 

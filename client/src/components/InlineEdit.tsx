@@ -15,6 +15,7 @@ export function InlineEdit({
   className,
   title,
   ariaLabel,
+  placeholder,
   editing: editingProp,
   onEditingChange,
 }: {
@@ -25,6 +26,8 @@ export function InlineEdit({
   title?: string;
   /** Accessible name for the edit input. */
   ariaLabel?: string;
+  /** Placeholder shown in the edit input while it is empty. */
+  placeholder?: string;
   /** Controlled editing state; when set, the component defers to the parent. */
   editing?: boolean;
   /** Notified when editing should begin (true) or end (false). */
@@ -66,6 +69,7 @@ export function InlineEdit({
         ref={inputRef}
         className={`inline-edit ${className ?? ""}`}
         aria-label={ariaLabel}
+        placeholder={placeholder}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}

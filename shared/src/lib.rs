@@ -141,6 +141,16 @@ pub struct GitFileDiff {
     pub binary: bool,
 }
 
+/// Result of creating a git worktree (REST `POST /api/git/worktree`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "client/src/protocol/")]
+pub struct GitWorktree {
+    /// Absolute path of the new worktree on the hosting machine.
+    pub path: String,
+    /// Branch checked out in the new worktree.
+    pub branch: String,
+}
+
 /// Metadata a hosting service advertises to clients.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "client/src/protocol/")]
@@ -362,5 +372,6 @@ mod tests {
         GitCommit::export_all().unwrap();
         GitChange::export_all().unwrap();
         GitDiff::export_all().unwrap();
+        GitWorktree::export_all().unwrap();
     }
 }

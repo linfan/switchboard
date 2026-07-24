@@ -10,7 +10,7 @@ use std::process::Stdio;
 
 use tokio::process::Command;
 
-use switchboard_shared::{GitChange, GitCommit, GitDiff, GitFileDiff, GitInfo};
+use switchboard_shared::{GitChange, GitCommit, GitDiff, GitFileDiff, GitInfo, GitWorktree};
 
 use crate::error::{AppError, AppResult};
 
@@ -278,6 +278,89 @@ pub async fn git_file_diff(cwd: &str, commit: &str, path: &str) -> AppResult<Git
     })
 }
 
+/// Create a git worktree for `cwd`'s repo at
+/// `$HOME/.switchboard/worktree/<workspace_name>/<worktree_name>` on the host.
+///
+/// When `branch` is given, that (existing) branch is checked out into the new
+/// worktree; otherwise a fresh branch named `worktree_name` is created at HEAD.
+/// Both name segments are validated so they can't escape their parent directory
+/// or be read by `git` as a flag.
+pub async fn git_worktree_add(
+    cwd: &str,
+    workspace_name: &str,
+    worktree_name: &str,
+    branch: Option<&str>,
+) -> AppResult<GitWorktree> {
+    require_dir(cwd)?;
+    validate_segment(workspace_name)?;
+    validate_segment(worktree_name)?;
+    if let Some(b) = branch {
+        validate_ref(b)?;
+    }
+    if !git_available().await {
+        return Err(AppError::BadRequest(
+            "git is not installed on the host".into(),
+        ));
+    }
+    let Some(root) = toplevel(cwd).await else {
+        return Err(AppError::BadRequest(format!(
+            "not a git repository: {cwd}"
+        )));
+    };
+
+    // Resolve $HOME/.switchboard/worktree/<workspace_name>/<worktree_name>.
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::BadRequest("HOME is not set on the host".into()))?;
+    let dest = home
+        .join(".switchboard")
+        .join("worktree")
+        .join(workspace_name)
+        .join(worktree_name);
+    if dest.exists() {
+        return Err(AppError::BadRequest(format!(
+            "worktree path already exists: {}",
+            dest.display()
+        )));
+    }
+    // Create the parent (…/worktree/<workspace_name>); git creates the leaf
+    // worktree directory itself.
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            AppError::BadRequest(format!("cannot create '{}': {e}", parent.display()))
+        })?;
+    }
+    let dest_str = dest.to_string_lossy().into_owned();
+
+    // `-b <name> <path>` creates a new branch; `<path> <branch>` checks out an
+    // existing one. Names are validated above, so they can't inject flags.
+    let args: Vec<&str> = match branch {
+        Some(b) => vec!["worktree", "add", dest_str.as_str(), b],
+        None => vec!["worktree", "add", "-b", worktree_name, dest_str.as_str()],
+    };
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(&args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to run git: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::BadRequest(format!(
+            "git worktree add failed: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(GitWorktree {
+        path: dest_str,
+        branch: branch
+            .map(str::to_string)
+            .unwrap_or_else(|| worktree_name.to_string()),
+    })
+}
+
 /// Ensure `cwd` exists and is a directory before shelling out to git.
 fn require_dir(cwd: &str) -> AppResult<()> {
     if cwd.trim().is_empty() {
@@ -300,6 +383,40 @@ fn validate_hash(commit: &str) -> AppResult<()> {
         Ok(())
     } else {
         Err(AppError::BadRequest(format!("invalid commit: {commit}")))
+    }
+}
+
+/// A safe single path segment (workspace/worktree folder name): non-empty, no
+/// path separators, no `.`/`..`, no NUL, and not starting with `-` (so it can't
+/// be read by `git` as a flag). Also used verbatim as a new branch name.
+fn validate_segment(name: &str) -> AppResult<()> {
+    let ok = !name.trim().is_empty()
+        && name != "."
+        && name != ".."
+        && !name.starts_with('-')
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0');
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!("invalid name: {name}")))
+    }
+}
+
+/// Validate an existing-branch ref to check out: allows `/` (e.g. `feature/x`)
+/// but forbids anything that could inject a flag or an unsafe git refname.
+fn validate_ref(name: &str) -> AppResult<()> {
+    let ok = !name.trim().is_empty()
+        && !name.starts_with('-')
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!("invalid branch: {name}")))
     }
 }
 

@@ -132,6 +132,30 @@ pub fn rename(path: &str, new_name: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Create an empty file or a directory named `name` inside existing directory
+/// `dir` (file-tree context menu). Rejects an existing target so a create never
+/// silently clobbers an entry.
+pub fn create(dir: &str, name: &str, is_dir: bool) -> AppResult<()> {
+    validate_name(name)?;
+    let canonical = PathBuf::from(dir)
+        .canonicalize()
+        .map_err(|e| AppError::BadRequest(format!("cannot open '{dir}': {e}")))?;
+    if !canonical.is_dir() {
+        return Err(AppError::BadRequest(format!("not a directory: {dir}")));
+    }
+    let target = canonical.join(name);
+    if target.exists() {
+        return Err(AppError::BadRequest(format!("already exists: {name}")));
+    }
+    let result = if is_dir {
+        std::fs::create_dir(&target)
+    } else {
+        std::fs::write(&target, b"")
+    };
+    result.map_err(|e| AppError::BadRequest(format!("cannot create '{name}': {e}")))?;
+    Ok(())
+}
+
 /// Delete a file, or a directory and all its contents.
 pub fn delete(path: &str) -> AppResult<()> {
     let canonical = PathBuf::from(path)
@@ -290,6 +314,26 @@ mod tests {
         assert!(upload(d, "up.txt", b"world").is_err());
         // Bad names are rejected.
         assert!(upload(d, "../evil", b"z").is_err());
+    }
+
+    #[test]
+    fn create_makes_empty_file_and_folder_and_rejects_clobber() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_str().unwrap();
+
+        create(d, "new.txt", false).unwrap();
+        assert_eq!(fs::read(dir.path().join("new.txt")).unwrap(), b"");
+
+        create(d, "newdir", true).unwrap();
+        assert!(dir.path().join("newdir").is_dir());
+
+        // Existing targets are rejected (no clobber), for both kinds.
+        assert!(create(d, "new.txt", false).is_err());
+        assert!(create(d, "newdir", true).is_err());
+        // Bad names are rejected before touching disk.
+        assert!(create(d, "../evil", false).is_err());
+        assert!(create(d, "a/b", true).is_err());
+        assert!(create(d, "", false).is_err());
     }
 
     #[test]

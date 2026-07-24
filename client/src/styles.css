@@ -686,6 +686,12 @@ body {
   scrollbar-color: var(--border) transparent;
 }
 
+/* The file tree fills its panel so a background right-click (new file/folder
+   at the workspace root) works anywhere below the last row. */
+.weditor__tree {
+  min-height: 100%;
+}
+
 /* A row in any of the left panels (tree entry, commit, changed file). */
 .weditor__row {
   display: flex;

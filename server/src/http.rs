@@ -15,7 +15,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use switchboard_shared::{
     FileContent, FsListing, FsStat, GitChange, GitCommit, GitDiff, GitFileDiff, GitInfo,
-    ServiceInfo, TaskInfo,
+    GitWorktree, ServiceInfo, TaskInfo,
 };
 
 use crate::{auth, editor, error::AppResult, fs, state::SharedState, task::CreateParams, ws};
@@ -31,6 +31,7 @@ pub fn router(state: SharedState, require_auth: bool) -> Router {
         .route("/fs", get(list_dir))
         .route("/fs/stat", get(stat_path))
         .route("/fs/mkdir", post(make_dir))
+        .route("/fs/create", post(create_entry))
         .route("/fs/rename", post(rename_entry))
         .route("/fs/delete", post(delete_entry))
         .route(
@@ -45,6 +46,7 @@ pub fn router(state: SharedState, require_auth: bool) -> Router {
         .route("/git/changes", get(git_changes))
         .route("/git/diff", get(git_diff))
         .route("/git/filediff", get(git_file_diff))
+        .route("/git/worktree", post(git_worktree))
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", axum::routing::delete(terminate_task));
     if require_auth {
@@ -100,6 +102,19 @@ struct MkdirBody {
 /// Create a directory (and any missing parents) on the host.
 async fn make_dir(Json(body): Json<MkdirBody>) -> AppResult<StatusCode> {
     fs::mkdir(&body.path)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct CreateBody {
+    dir: String,
+    name: String,
+    is_dir: bool,
+}
+
+/// Create an empty file or a folder inside a directory (file-tree context menu).
+async fn create_entry(Json(body): Json<CreateBody>) -> AppResult<StatusCode> {
+    fs::create(&body.dir, &body.name, body.is_dir)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -221,6 +236,31 @@ async fn git_diff(Query(q): Query<DiffQuery>) -> AppResult<Json<GitDiff>> {
 async fn git_file_diff(Query(q): Query<DiffQuery>) -> AppResult<Json<GitFileDiff>> {
     Ok(Json(
         editor::git_file_diff(&q.cwd, &q.commit, &q.path).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct WorktreeBody {
+    /// Repo folder to create the worktree from.
+    cwd: String,
+    /// Workspace name — the parent folder under `.switchboard/worktree`.
+    workspace_name: String,
+    /// Worktree name — the leaf folder (and, by default, the new branch name).
+    worktree_name: String,
+    /// Existing branch to check out; when omitted a new branch is created.
+    branch: Option<String>,
+}
+
+/// Create a git worktree at `$HOME/.switchboard/worktree/<workspace>/<name>`.
+async fn git_worktree(Json(body): Json<WorktreeBody>) -> AppResult<Json<GitWorktree>> {
+    Ok(Json(
+        editor::git_worktree_add(
+            &body.cwd,
+            &body.workspace_name,
+            &body.worktree_name,
+            body.branch.as_deref().filter(|s| !s.trim().is_empty()),
+        )
+        .await?,
     ))
 }
 
