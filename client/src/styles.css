@@ -863,6 +863,26 @@ body {
   align-self: center;
   margin: 0 8px;
 }
+/* "File changed on disk" notice: sits between the tab bar and the editor. */
+.weditor__notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(210, 153, 34, 0.12);
+  border-bottom: 1px solid rgba(210, 153, 34, 0.4);
+  font-size: 12px;
+  color: #d29922;
+}
+.weditor__notice-text {
+  flex: 1;
+  min-width: 0;
+}
+.weditor__notice-btn {
+  flex: none;
+  padding: 2px 10px;
+  font-size: 12px;
+}
 /* Segmented inline/side-by-side toggle for diff tabs. */
 .weditor__difftoggle {
   flex: none;

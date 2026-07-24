@@ -61,6 +61,11 @@ pub struct FsStat {
     /// Whether the existing entry is a directory (false when it doesn't exist
     /// or is a file).
     pub is_dir: bool,
+    /// Last-modified time, unix millis. `0` when the path doesn't exist or the
+    /// platform can't report one. The editor polls this to detect out-of-app
+    /// changes to an open file.
+    #[ts(type = "number")]
+    pub mtime: i64,
 }
 
 /// Contents of a file on the hosting machine (REST `GET /api/file`), for the
@@ -74,6 +79,10 @@ pub struct FileContent {
     pub content: String,
     /// True when the file was too large or looked binary and was not returned in full.
     pub truncated: bool,
+    /// Last-modified time at read, unix millis (`0` when unavailable). The
+    /// editor keeps this as the buffer's disk baseline for change detection.
+    #[ts(type = "number")]
+    pub mtime: i64,
 }
 
 /// Git availability + repo state for a workspace folder (REST `GET /api/git/info`).

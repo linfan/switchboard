@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use switchboard_shared::FileContent;
 
 use crate::error::{AppError, AppResult};
+use crate::fs::mtime_millis;
 
 /// Largest file the editor will read into memory (2 MiB). Beyond this we return
 /// an empty, `truncated` payload so the client shows a notice instead of hanging.
@@ -41,11 +42,13 @@ pub async fn read_file(path: &str) -> AppResult<FileContent> {
         )));
     }
     let out = canonical.to_string_lossy().into_owned();
+    let mtime = mtime_millis(&meta);
     if meta.len() > MAX_FILE_BYTES {
         return Ok(FileContent {
             path: out,
             content: String::new(),
             truncated: true,
+            mtime,
         });
     }
 
@@ -58,18 +61,22 @@ pub async fn read_file(path: &str) -> AppResult<FileContent> {
             path: out,
             content: String::new(),
             truncated: true,
+            mtime,
         });
     }
     Ok(FileContent {
         path: out,
         content: String::from_utf8_lossy(&bytes).into_owned(),
         truncated: false,
+        mtime,
     })
 }
 
 /// Overwrite a file with new contents (the editor's Save). The file must already
-/// exist (the editor only saves files it opened).
-pub async fn write_file(path: &str, content: &str) -> AppResult<()> {
+/// exist (the editor only saves files it opened). Returns the file's new mtime
+/// (unix millis) so the client can rebase its disk-change detection without a
+/// follow-up stat.
+pub async fn write_file(path: &str, content: &str) -> AppResult<i64> {
     if path.trim().is_empty() {
         return Err(AppError::BadRequest("missing file path".into()));
     }
@@ -85,7 +92,10 @@ pub async fn write_file(path: &str, content: &str) -> AppResult<()> {
     tokio::fs::write(&canonical, content)
         .await
         .map_err(|e| AppError::BadRequest(format!("cannot write '{path}': {e}")))?;
-    Ok(())
+    let meta = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("cannot stat '{path}': {e}")))?;
+    Ok(mtime_millis(&meta))
 }
 
 #[cfg(test)]

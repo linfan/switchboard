@@ -16,4 +16,9 @@ content: string,
 /**
  * True when the file was too large or looked binary and was not returned in full.
  */
-truncated: boolean, };
+truncated: boolean, 
+/**
+ * Last-modified time at read, unix millis (`0` when unavailable). The
+ * editor keeps this as the buffer's disk baseline for change detection.
+ */
+mtime: number, };

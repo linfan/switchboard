@@ -14,7 +14,7 @@ import { html } from "@codemirror/lang-html";
 import { css } from "@codemirror/lang-css";
 
 import * as editors from "../net/editors";
-import { gitFileDiff, readFile, writeFile } from "../net/rest";
+import { gitFileDiff, readFile, statPath, writeFile } from "../net/rest";
 import { tabKey, type DiffLayout, type OpenFile } from "../store/types";
 import { ContextMenu } from "./Menu";
 
@@ -107,6 +107,9 @@ export function EditorArea({
   const [error, setError] = useState<string | null>(null);
   // Per-tab dirty flags, mirrored from the registry so the tab bar re-renders.
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
+  // Per-tab "changed on disk" flags, mirrored from the registry so the notice
+  // banner re-renders. The registry copy survives workspace switches.
+  const [changed, setChanged] = useState<Record<string, boolean>>({});
   // Drag-to-reorder state: the tab key being dragged, and the one hovered over.
   // A ref mirrors the source key so drag handlers read it synchronously,
   // without waiting for the state update from dragstart to flush.
@@ -134,13 +137,58 @@ export function EditorArea({
     setDirty((m) => ({ ...m, [k]: d }));
   };
 
+  const markChanged = (k: string, c: boolean) => {
+    setChanged((m) => ({ ...m, [k]: c }));
+  };
+
   const save = (k: string, filePath: string, view: EditorView): boolean => {
+    // Suppress the staleness poll while our own write is in flight so its new
+    // mtime isn't misread as an out-of-app change.
+    editors.setSaving(workspaceId, k, true);
     writeFile(service, filePath, view.state.doc.toString())
-      .then(() => markDirty(k, false))
+      .then(({ mtime }) => {
+        editors.setMtime(workspaceId, k, mtime);
+        // Saving overwrites any pending disk-side change: the user kept theirs.
+        editors.clearDiskChange(workspaceId, k, false);
+        markDirty(k, false);
+        markChanged(k, false);
+      })
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      )
+      .finally(() => editors.setSaving(workspaceId, k, false));
+    return true;
+  };
+
+  /** Replace the buffer with the current on-disk contents (notice "Reload"). */
+  const reloadFromDisk = (k: string, filePath: string) => {
+    readFile(service, filePath)
+      .then((fc) => {
+        const view = editors.getView(workspaceId, k);
+        if (!view) return; // tab closed while the read was in flight
+        if (fc.truncated) {
+          setError("File on disk is now binary or too large to reload.");
+          return;
+        }
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: fc.content },
+        });
+        editors.setMtime(workspaceId, k, fc.mtime);
+        editors.clearDiskChange(workspaceId, k, false);
+        markDirty(k, false);
+        markChanged(k, false);
+      })
       .catch((e: unknown) =>
         setError(e instanceof Error ? e.message : String(e)),
       );
-    return true;
+  };
+
+  /** Dismiss the notice, keeping the buffer (notice "Keep editing"). */
+  const keepBuffer = (k: string) => {
+    // Adopt the observed disk mtime so the notice only returns if the file
+    // changes on disk again.
+    editors.clearDiskChange(workspaceId, k, true);
+    markChanged(k, false);
   };
 
   useEffect(() => {
@@ -300,7 +348,7 @@ export function EditorArea({
           return;
         }
         const view = buildEditView(fc.content);
-        editors.setView(workspaceId, key, view);
+        editors.setView(workspaceId, key, view, fc.mtime);
         attach(view.dom, () => view.requestMeasure(), view);
         setStatus("ready");
       };
@@ -321,12 +369,67 @@ export function EditorArea({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, key, path, mode, commit, diffLayout]);
 
+  // Watch the ACTIVE edit tab for out-of-app changes: an immediate stat on
+  // activation (so a change made while the tab was backgrounded surfaces the
+  // moment you switch back), a slow poll while it stays active, and a re-check
+  // on window focus (when outside edits most likely happened). The interval is
+  // cleared on tab switch/close/unmount, so no polling ever outlives an open
+  // file; a stat resolving after close finds no registry entry and is dropped.
+  useEffect(() => {
+    if (!key || !path || mode !== "edit" || status !== "ready") return;
+
+    let cancelled = false;
+    let inFlight = false;
+
+    const check = async () => {
+      if (cancelled || inFlight || document.hidden) return;
+      // Nothing to do while a save is in flight or a notice is already shown.
+      if (
+        editors.isSaving(workspaceId, key) ||
+        editors.isChangedOnDisk(workspaceId, key)
+      )
+        return;
+      inFlight = true;
+      try {
+        const st = await statPath(service, path);
+        if (cancelled) return;
+        const entry = editors.getEntry(workspaceId, key);
+        // Tab closed / workspace gone / save started meanwhile: drop the result.
+        if (!entry?.editor || entry.saving) return;
+        if (st.exists && entry.mtime !== undefined && st.mtime !== entry.mtime) {
+          editors.flagDiskChange(workspaceId, key, st.mtime);
+          markChanged(key, true);
+        }
+      } catch {
+        // Transient stat/network failure — try again on the next tick.
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void check();
+    const timer = setInterval(() => void check(), 3000);
+    const onFocus = () => void check();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, key, path, mode, status]);
+
   // Dispose the live views for a set of tab keys and forget their dirty flags.
   // The store still owns the tab list; this just tears down the CM editors.
   const disposeKeys = (keys: string[]) => {
     if (keys.length === 0) return;
     keys.forEach((k) => editors.disposeTab(workspaceId, k));
     setDirty((m) => {
+      const next = { ...m };
+      keys.forEach((k) => delete next[k]);
+      return next;
+    });
+    setChanged((m) => {
       const next = { ...m };
       keys.forEach((k) => delete next[k]);
       return next;
@@ -366,6 +469,8 @@ export function EditorArea({
   }
 
   const isDirty = (k: string) => dirty[k] ?? editors.isDirty(workspaceId, k);
+  const isChanged = (k: string) =>
+    changed[k] ?? editors.isChangedOnDisk(workspaceId, k);
 
   return (
     <div className="weditor__area">
@@ -503,6 +608,28 @@ export function EditorArea({
         )}
       </div>
 
+      {mode === "edit" && key && isChanged(key) && (
+        <div className="weditor__notice" role="alert">
+          <span className="weditor__notice-text">
+            This file changed on disk
+            {isDirty(key)
+              ? " — reloading will discard your unsaved edits."
+              : "."}
+          </span>
+          <button
+            className="btn weditor__notice-btn"
+            onClick={() => reloadFromDisk(key, path!)}
+          >
+            Reload
+          </button>
+          <button
+            className="btn weditor__notice-btn"
+            onClick={() => keepBuffer(key)}
+          >
+            Keep editing
+          </button>
+        </div>
+      )}
       {error && <p className="hint hint--error">{error}</p>}
       {status === "binary" && (
         <p className="hint">This file is binary or too large to display.</p>

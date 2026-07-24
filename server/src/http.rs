@@ -187,10 +187,11 @@ struct WriteFileBody {
     content: String,
 }
 
-/// Save a file's contents (the editor's Save).
-async fn write_file(Json(body): Json<WriteFileBody>) -> AppResult<StatusCode> {
-    editor::write_file(&body.path, &body.content).await?;
-    Ok(StatusCode::NO_CONTENT)
+/// Save a file's contents (the editor's Save). Responds with the file's new
+/// mtime so the editor can rebase its disk-change detection.
+async fn write_file(Json(body): Json<WriteFileBody>) -> AppResult<Json<Value>> {
+    let mtime = editor::write_file(&body.path, &body.content).await?;
+    Ok(Json(json!({ "mtime": mtime })))
 }
 
 #[derive(Deserialize)]

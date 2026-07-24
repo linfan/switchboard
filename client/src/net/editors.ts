@@ -29,6 +29,21 @@ interface Entry {
   diff?: { oldText: string; newText: string };
   /** Whether the buffer has unsaved edits. */
   dirty: boolean;
+  /**
+   * For edit tabs: last on-disk mtime (unix millis) known to match the
+   * buffer's origin — set on load, save, reload, or when the user dismisses a
+   * disk-change notice. The staleness poll compares stat results against this.
+   */
+  mtime?: number;
+  /** Disk mtime observed when an out-of-app change was flagged. */
+  diskMtime?: number;
+  /** True when the file changed on disk and the user hasn't resolved it yet. */
+  changedOnDisk?: boolean;
+  /**
+   * True while a save is in flight — suppresses the staleness poll so our own
+   * write's new mtime isn't misread as an out-of-app change.
+   */
+  saving?: boolean;
 }
 
 const entries = new Map<string, Entry>();
@@ -59,12 +74,14 @@ export function setView(
   workspaceId: string,
   tabKey: string,
   view: EditorView,
+  mtime?: number,
 ): void {
   entries.set(mapKey(workspaceId, tabKey), {
     dom: view.dom,
     destroy: () => view.destroy(),
     editor: view,
     dirty: false,
+    mtime,
   });
 }
 
@@ -105,6 +122,63 @@ export function setDirty(
 
 export function isDirty(workspaceId: string, tabKey: string): boolean {
   return entries.get(mapKey(workspaceId, tabKey))?.dirty ?? false;
+}
+
+/** Rebase the disk baseline after a load, save, or reload. */
+export function setMtime(
+  workspaceId: string,
+  tabKey: string,
+  mtime: number,
+): void {
+  const e = entries.get(mapKey(workspaceId, tabKey));
+  if (e) e.mtime = mtime;
+}
+
+export function setSaving(
+  workspaceId: string,
+  tabKey: string,
+  saving: boolean,
+): void {
+  const e = entries.get(mapKey(workspaceId, tabKey));
+  if (e) e.saving = saving;
+}
+
+export function isSaving(workspaceId: string, tabKey: string): boolean {
+  return entries.get(mapKey(workspaceId, tabKey))?.saving ?? false;
+}
+
+/** Flag an out-of-app change, remembering the observed disk mtime. */
+export function flagDiskChange(
+  workspaceId: string,
+  tabKey: string,
+  diskMtime: number,
+): void {
+  const e = entries.get(mapKey(workspaceId, tabKey));
+  if (!e) return;
+  e.changedOnDisk = true;
+  e.diskMtime = diskMtime;
+}
+
+/**
+ * Resolve a flagged disk change. `adoptDiskMtime` (the "keep my buffer" path)
+ * rebases the baseline onto the observed disk mtime so the notice only returns
+ * if the file changes *again*; reload/save pass `false` and set the baseline
+ * themselves via `setMtime`.
+ */
+export function clearDiskChange(
+  workspaceId: string,
+  tabKey: string,
+  adoptDiskMtime: boolean,
+): void {
+  const e = entries.get(mapKey(workspaceId, tabKey));
+  if (!e) return;
+  e.changedOnDisk = false;
+  if (adoptDiskMtime && e.diskMtime !== undefined) e.mtime = e.diskMtime;
+  e.diskMtime = undefined;
+}
+
+export function isChangedOnDisk(workspaceId: string, tabKey: string): boolean {
+  return entries.get(mapKey(workspaceId, tabKey))?.changedOnDisk ?? false;
 }
 
 function destroy(key: string): void {

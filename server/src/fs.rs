@@ -66,6 +66,17 @@ fn default_dir() -> PathBuf {
         .unwrap_or_else(|| Path::new("/").to_path_buf())
 }
 
+/// Modification time of `meta` as unix millis, `0` when the platform can't
+/// report one. Shared by [`stat`] and the editor's file read/write so the
+/// client compares a consistent representation.
+pub fn mtime_millis(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Report whether `path` exists on the hosting machine and, if so, whether it's
 /// a directory. A missing path is not an error — the caller (workspace creation)
 /// uses `exists == false` to offer creating the folder. Symlinks are followed.
@@ -77,10 +88,12 @@ pub fn stat(path: &str) -> AppResult<FsStat> {
         Ok(m) => Ok(FsStat {
             exists: true,
             is_dir: m.is_dir(),
+            mtime: mtime_millis(&m),
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FsStat {
             exists: false,
             is_dir: false,
+            mtime: 0,
         }),
         Err(e) => Err(AppError::BadRequest(format!("cannot stat '{path}': {e}"))),
     }

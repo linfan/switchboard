@@ -14,4 +14,10 @@ exists: boolean,
  * Whether the existing entry is a directory (false when it doesn't exist
  * or is a file).
  */
-is_dir: boolean, };
+is_dir: boolean, 
+/**
+ * Last-modified time, unix millis. `0` when the path doesn't exist or the
+ * platform can't report one. The editor polls this to detect out-of-app
+ * changes to an open file.
+ */
+mtime: number, };

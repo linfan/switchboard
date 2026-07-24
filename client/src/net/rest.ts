@@ -295,13 +295,20 @@ export function readFile(
   );
 }
 
-/** Save a file's contents back to the hosting machine. */
+/**
+ * Save a file's contents back to the hosting machine. Resolves with the file's
+ * new on-disk mtime (unix millis) so the editor can rebase its disk-change
+ * detection without a follow-up stat.
+ */
 export function writeFile(
   service: ServiceRef,
   path: string,
   content: string,
-): Promise<void> {
-  return apiRequest<void>(service, "PUT", `/api/file`, { path, content });
+): Promise<{ mtime: number }> {
+  return apiRequest<{ mtime: number }>(service, "PUT", `/api/file`, {
+    path,
+    content,
+  });
 }
 
 /** Rename a file/directory to a sibling `newName` in the same parent. */
