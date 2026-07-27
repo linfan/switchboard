@@ -337,6 +337,18 @@ export function gitInfo(service: ServiceRef, cwd: string): Promise<GitInfo> {
   );
 }
 
+/** List local branch names for a workspace folder's repo. */
+export function gitBranches(
+  service: ServiceRef,
+  cwd: string,
+): Promise<string[]> {
+  return apiRequest<string[]>(
+    service,
+    "GET",
+    `/api/git/branches?cwd=${encodeURIComponent(cwd)}`,
+  );
+}
+
 /** List commits on the current branch of a workspace folder. */
 export function gitLog(
   service: ServiceRef,
@@ -385,20 +397,22 @@ export function gitFileDiff(
 /**
  * Create a git worktree for a workspace's repo at
  * `$HOME/.switchboard/worktree/<workspaceName>/<worktreeName>` on the host.
- * When `branch` is given, that existing branch is checked out; otherwise a new
- * branch named `worktreeName` is created.
+ * When `newBranch` is false, the existing `branch` is checked out; when true, a
+ * fresh branch named `branch` is created at HEAD.
  */
 export function gitCreateWorktree(
   service: ServiceRef,
   cwd: string,
   workspaceName: string,
   worktreeName: string,
-  branch?: string,
+  branch: string,
+  newBranch: boolean,
 ): Promise<GitWorktree> {
   return apiRequest<GitWorktree>(service, "POST", `/api/git/worktree`, {
     cwd,
     workspace_name: workspaceName,
     worktree_name: worktreeName,
-    branch: branch && branch.trim() !== "" ? branch.trim() : null,
+    branch: branch.trim(),
+    new_branch: newBranch,
   });
 }

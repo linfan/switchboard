@@ -91,6 +91,31 @@ pub async fn git_info(cwd: &str) -> AppResult<GitInfo> {
     })
 }
 
+/// Local branch names for `cwd`'s repo, sorted by most-recent commit. Empty
+/// when the folder is not a repo or has no branches yet.
+pub async fn git_branches(cwd: &str) -> AppResult<Vec<String>> {
+    require_dir(cwd)?;
+    let Some(root) = toplevel(cwd).await else {
+        return Ok(Vec::new());
+    };
+    let out = match git(
+        &root,
+        &["branch", "--sort=-committerdate", "--format=%(refname:short)"],
+    )
+    .await
+    {
+        Ok(Some(s)) => s,
+        _ => return Ok(Vec::new()),
+    };
+    let branches = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    Ok(branches)
+}
+
 /// Commits on the current branch, newest first (capped at 200).
 pub async fn git_log(cwd: &str) -> AppResult<Vec<GitCommit>> {
     require_dir(cwd)?;
@@ -281,22 +306,21 @@ pub async fn git_file_diff(cwd: &str, commit: &str, path: &str) -> AppResult<Git
 /// Create a git worktree for `cwd`'s repo at
 /// `$HOME/.switchboard/worktree/<workspace_name>/<worktree_name>` on the host.
 ///
-/// When `branch` is given, that (existing) branch is checked out into the new
-/// worktree; otherwise a fresh branch named `worktree_name` is created at HEAD.
-/// Both name segments are validated so they can't escape their parent directory
+/// When `new_branch` is false, the existing branch `branch` is checked out into
+/// the new worktree; when true, a fresh branch named `branch` is created at HEAD.
+/// The name segments are validated so they can't escape their parent directory
 /// or be read by `git` as a flag.
 pub async fn git_worktree_add(
     cwd: &str,
     workspace_name: &str,
     worktree_name: &str,
-    branch: Option<&str>,
+    branch: &str,
+    new_branch: bool,
 ) -> AppResult<GitWorktree> {
     require_dir(cwd)?;
     validate_segment(workspace_name)?;
     validate_segment(worktree_name)?;
-    if let Some(b) = branch {
-        validate_ref(b)?;
-    }
+    validate_ref(branch)?;
     if !git_available().await {
         return Err(AppError::BadRequest(
             "git is not installed on the host".into(),
@@ -334,9 +358,10 @@ pub async fn git_worktree_add(
 
     // `-b <name> <path>` creates a new branch; `<path> <branch>` checks out an
     // existing one. Names are validated above, so they can't inject flags.
-    let args: Vec<&str> = match branch {
-        Some(b) => vec!["worktree", "add", dest_str.as_str(), b],
-        None => vec!["worktree", "add", "-b", worktree_name, dest_str.as_str()],
+    let args: Vec<&str> = if new_branch {
+        vec!["worktree", "add", "-b", branch, dest_str.as_str()]
+    } else {
+        vec!["worktree", "add", dest_str.as_str(), branch]
     };
     let output = Command::new("git")
         .arg("-C")
@@ -355,9 +380,7 @@ pub async fn git_worktree_add(
     }
     Ok(GitWorktree {
         path: dest_str,
-        branch: branch
-            .map(str::to_string)
-            .unwrap_or_else(|| worktree_name.to_string()),
+        branch: branch.to_string(),
     })
 }
 

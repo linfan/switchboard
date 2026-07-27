@@ -42,6 +42,7 @@ pub fn router(state: SharedState, require_auth: bool) -> Router {
         .route("/fs/download", get(download_file))
         .route("/file", get(read_file).put(write_file))
         .route("/git/info", get(git_info))
+        .route("/git/branches", get(git_branches))
         .route("/git/log", get(git_log))
         .route("/git/changes", get(git_changes))
         .route("/git/diff", get(git_diff))
@@ -204,6 +205,11 @@ async fn git_info(Query(q): Query<CwdQuery>) -> AppResult<Json<GitInfo>> {
     Ok(Json(editor::git_info(&q.cwd).await?))
 }
 
+/// List local branch names for a workspace folder's repo.
+async fn git_branches(Query(q): Query<CwdQuery>) -> AppResult<Json<Vec<String>>> {
+    Ok(Json(editor::git_branches(&q.cwd).await?))
+}
+
 /// List commits on the current branch.
 async fn git_log(Query(q): Query<CwdQuery>) -> AppResult<Json<Vec<GitCommit>>> {
     Ok(Json(editor::git_log(&q.cwd).await?))
@@ -246,10 +252,12 @@ struct WorktreeBody {
     cwd: String,
     /// Workspace name — the parent folder under `.switchboard/worktree`.
     workspace_name: String,
-    /// Worktree name — the leaf folder (and, by default, the new branch name).
+    /// Worktree name — the leaf folder under the workspace directory.
     worktree_name: String,
-    /// Existing branch to check out; when omitted a new branch is created.
-    branch: Option<String>,
+    /// Branch to check out (when `new_branch` is false) or create (when true).
+    branch: String,
+    /// Create `branch` as a new branch at HEAD rather than checking it out.
+    new_branch: bool,
 }
 
 /// Create a git worktree at `$HOME/.switchboard/worktree/<workspace>/<name>`.
@@ -259,7 +267,8 @@ async fn git_worktree(Json(body): Json<WorktreeBody>) -> AppResult<Json<GitWorkt
             &body.cwd,
             &body.workspace_name,
             &body.worktree_name,
-            body.branch.as_deref().filter(|s| !s.trim().is_empty()),
+            body.branch.trim(),
+            body.new_branch,
         )
         .await?,
     ))

@@ -1,9 +1,12 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { gitCreateWorktree } from "../net/rest";
+import { gitBranches, gitCreateWorktree } from "../net/rest";
 import { useStore } from "../store/store";
 import type { Service, Workspace } from "../store/types";
 import { Modal } from "./Modal";
+
+/** Characters allowed in a worktree name — no spaces or path separators. */
+const NAME_ALLOWED = /[^0-9a-zA-Z._-]/g;
 
 /**
  * Create a git worktree for a workspace's repo. The worktree lands at
@@ -25,14 +28,62 @@ export function CreateWorktreeDialog({
 
   const [name, setName] = useState("");
   const [branch, setBranch] = useState("");
+  const [branches, setBranches] = useState<string[]>([]);
+  // The branch combobox dropdown: open state + keyboard-highlighted row.
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  // Set once the user tries to create a worktree on a branch that doesn't
+  // exist yet — the primary button then confirms creating the new branch.
+  const [confirmNew, setConfirmNew] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
 
-  const valid = name.trim() !== "";
+  // Load the repo's existing branches so the combobox can filter them.
+  useEffect(() => {
+    let cancelled = false;
+    gitBranches(service, workspace.cwd)
+      .then((bs) => {
+        if (!cancelled) setBranches(bs);
+      })
+      .catch(() => {
+        if (!cancelled) setBranches([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [service, workspace.cwd]);
+
+  const trimmedBranch = branch.trim();
+  const branchExists = branches.includes(trimmedBranch);
+  // A non-empty branch that doesn't match any existing one → will be created.
+  const isNewBranch = trimmedBranch !== "" && !branchExists;
+
+  // Branches matching what's typed (case-insensitive substring), current
+  // exact match first is unnecessary — git already sorts by recency.
+  const filtered = useMemo(() => {
+    const q = trimmedBranch.toLowerCase();
+    if (q === "") return branches;
+    return branches.filter((b) => b.toLowerCase().includes(q));
+  }, [branches, trimmedBranch]);
+
+  const nameValid = name !== "";
+  const valid = nameValid && trimmedBranch !== "";
+
+  const choose = (b: string) => {
+    setBranch(b);
+    setOpen(false);
+    setConfirmNew(false);
+    setError(undefined);
+  };
 
   const submit = async () => {
-    const worktreeName = name.trim();
-    if (worktreeName === "" || busy) return;
+    if (!valid || busy) return;
+    // First submit on a not-yet-existing branch asks for confirmation instead
+    // of creating it silently.
+    if (isNewBranch && !confirmNew) {
+      setConfirmNew(true);
+      return;
+    }
     setBusy(true);
     setError(undefined);
     let result;
@@ -41,8 +92,9 @@ export function CreateWorktreeDialog({
         service,
         workspace.cwd,
         workspace.name,
-        worktreeName,
-        branch.trim() || undefined,
+        name,
+        trimmedBranch,
+        isNewBranch,
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -53,11 +105,31 @@ export function CreateWorktreeDialog({
     // into its editor.
     const id = addWorkspace({
       serviceId: service.id,
-      name: `${workspace.name}/${worktreeName}`,
+      name: `${workspace.name}/${name}`,
       cwd: result.path,
     });
     selectWorkspace(id);
     onClose();
+  };
+
+  // Keyboard nav for the branch combobox. When the dropdown is open, arrows
+  // move the highlight and ENTER picks it (rather than submitting the form).
+  const onBranchKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setOpen(true);
+      setHighlight((h) => Math.min(h + 1, filtered.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlight((h) => Math.max(h - 1, 0));
+    } else if (e.key === "Enter" && open && filtered[highlight]) {
+      e.preventDefault();
+      choose(filtered[highlight]);
+    } else if (e.key === "Escape" && open) {
+      // Close the dropdown without also closing the modal.
+      e.stopPropagation();
+      setOpen(false);
+    }
   };
 
   return (
@@ -82,7 +154,11 @@ export function CreateWorktreeDialog({
             disabled={!valid || busy}
             onClick={submit}
           >
-            {busy ? "Creating…" : "Create"}
+            {busy
+              ? "Creating…"
+              : isNewBranch && confirmNew
+                ? `Create branch “${trimmedBranch}”`
+                : "Create"}
           </button>
         </>
       }
@@ -97,7 +173,8 @@ export function CreateWorktreeDialog({
           value={name}
           placeholder="feature-x"
           onChange={(e) => {
-            setName(e.target.value);
+            // Strip anything outside [0-9a-zA-Z._-] so the name has no spaces.
+            setName(e.target.value.replace(NAME_ALLOWED, ""));
             setError(undefined);
           }}
           autoFocus
@@ -105,20 +182,61 @@ export function CreateWorktreeDialog({
       </label>
 
       <label className="field">
-        <span>Existing branch (optional)</span>
-        <input
-          value={branch}
-          placeholder="leave blank to create a new branch"
-          onChange={(e) => {
-            setBranch(e.target.value);
-            setError(undefined);
-          }}
-        />
+        <span>Branch</span>
+        <div className="combobox">
+          <input
+            value={branch}
+            placeholder="search or type a new branch name"
+            role="combobox"
+            aria-expanded={open}
+            aria-autocomplete="list"
+            autoComplete="off"
+            onChange={(e) => {
+              setBranch(e.target.value);
+              setOpen(true);
+              setHighlight(0);
+              setConfirmNew(false);
+              setError(undefined);
+            }}
+            onFocus={() => setOpen(true)}
+            onBlur={() => setOpen(false)}
+            onKeyDown={onBranchKeyDown}
+          />
+          {open && filtered.length > 0 && (
+            <ul className="combobox__list" role="listbox">
+              {filtered.map((b, i) => (
+                <li key={b} role="option" aria-selected={i === highlight}>
+                  <button
+                    type="button"
+                    className={`combobox__item${i === highlight ? " is-active" : ""}`}
+                    // mousedown fires before the input's blur, so the pick lands.
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      choose(b);
+                    }}
+                    onMouseEnter={() => setHighlight(i)}
+                  >
+                    {b}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </label>
+
+      {isNewBranch && (
+        <p className="hint">
+          Branch “{trimmedBranch}” doesn’t exist —{" "}
+          {confirmNew
+            ? "click Create again to make it."
+            : "a new branch will be created."}
+        </p>
+      )}
 
       <p className="hint hint--muted">
         Created at ~/.switchboard/worktree/{workspace.name}/
-        {name.trim() || "<name>"} on the host.
+        {name || "<name>"} on the host.
       </p>
 
       {error && <p className="hint hint--error">{error}</p>}
