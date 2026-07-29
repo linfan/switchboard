@@ -392,8 +392,20 @@ pub async fn git_worktree_add(
 /// so a worktree with uncommitted or untracked changes can still be discarded;
 /// the client guards this behind an explicit confirm. This deletes the worktree
 /// directory and prunes its administrative files, but leaves any branch intact.
+///
+/// If the worktree directory is already gone from the host, this is a no-op
+/// success so the caller can still forget the workspace.
 pub async fn git_worktree_remove(cwd: &str) -> AppResult<()> {
-    require_dir(cwd)?;
+    if cwd.trim().is_empty() {
+        return Err(AppError::BadRequest("missing cwd".into()));
+    }
+    // If the worktree directory has already been deleted from the host, there's
+    // nothing left to remove — report success so the caller can forget the
+    // workspace. git prunes the stale admin entry on its next worktree command
+    // in the main repo.
+    if !PathBuf::from(cwd).is_dir() {
+        return Ok(());
+    }
     if !git_available().await {
         return Err(AppError::BadRequest(
             "git is not installed on the host".into(),
@@ -629,5 +641,18 @@ mod tests {
         assert!(git_worktree_remove(dir.path().to_str().unwrap())
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn worktree_remove_missing_dir_is_ok() {
+        // When the worktree directory has already been deleted from disk, removal
+        // succeeds so the caller can forget the workspace.
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("already-gone");
+        assert!(!gone.exists());
+        git_worktree_remove(gone.to_str().unwrap()).await.unwrap();
+
+        // An empty cwd is still rejected.
+        assert!(git_worktree_remove("").await.is_err());
     }
 }
