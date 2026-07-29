@@ -92,6 +92,7 @@ async fn boot() -> Harness {
         repeater_addr: Some(worker_addr.clone()),
         repeater_token: Some(REPEATER_TOKEN.into()),
         repeater_ca: None,
+        log_file: None,
     };
     tokio::spawn(async move {
         let _ = crate::repeater::serve(rcfg, client_listener, worker_listener).await;
@@ -109,6 +110,7 @@ async fn boot() -> Harness {
         repeater_addr: Some(worker_addr),
         repeater_token: Some(REPEATER_TOKEN.into()),
         repeater_ca: Some(cert_path),
+        log_file: None,
     };
     let store = Store::connect(&wdb).await.unwrap();
     let tasks = TaskManager::new(store.clone());

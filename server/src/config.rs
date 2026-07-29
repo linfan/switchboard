@@ -1,5 +1,7 @@
 //! Runtime configuration, sourced from environment variables.
 
+use crate::log_file::LogFileConfig;
+
 /// Explicit deployment mode selector (`SWITCHBOARD_MODE`). A `Repeater` forwards
 /// client traffic to a paired worker; a `Worker` runs tasks itself (either
 /// directly bound, or dialing out to a repeater — distinguished by [`Role`]).
@@ -55,6 +57,8 @@ pub struct Config {
     /// Path to a PEM whose leaf cert the worker pins for the repeater tunnel
     /// (`SWITCHBOARD_REPEATER_CA`). Worker-repeater-client side only.
     pub repeater_ca: Option<String>,
+    /// Size-based rolling log file (`SWITCHBOARD_LOG`). `None` logs to stdout.
+    pub log_file: Option<LogFileConfig>,
 }
 
 /// TLS/HTTPS configuration. Enabled with `SWITCHBOARD_TLS=1`.
@@ -112,6 +116,17 @@ impl Config {
             .or_else(|| std::env::var("HOSTNAME").ok())
             .unwrap_or_else(|| "agent-host".to_string());
         let agent_permission_mode = env("SWITCHBOARD_PERMISSION_MODE", "default");
+        // Optional size-based rolling log file. A malformed spec is a
+        // configuration mistake worth surfacing, but shouldn't stop startup — warn
+        // to stderr (logging isn't wired up yet here) and fall back to stdout.
+        let log_file = env_opt("SWITCHBOARD_LOG").and_then(|spec| match LogFileConfig::parse(&spec)
+        {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                eprintln!("SWITCHBOARD_LOG ignored ({e}); logging to stdout");
+                None
+            }
+        });
         // HTTPS is the default protocol (even on localhost); opt out with
         // `SWITCHBOARD_TLS=0` for a plain-HTTP server.
         let tls = if flag("SWITCHBOARD_TLS", true) {
@@ -144,6 +159,7 @@ impl Config {
             repeater_addr,
             repeater_token,
             repeater_ca,
+            log_file,
         }
     }
 }

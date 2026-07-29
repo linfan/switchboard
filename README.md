@@ -275,16 +275,16 @@ keychain.
 
 ## Configuration
 
-Server (environment variables):
+### Server (worker) environment variables
+
+The default role: binds a client-facing address, serves the API + WS, and runs
+PTYs locally.
 
 | Var | Default | Meaning |
 |-----|---------|---------|
+| `SWITCHBOARD_MODE` | `worker` | Role selector: `worker` or `repeater` |
 | `SWITCHBOARD_ADDR` | `127.0.0.1:8787` | Client-facing listen address |
 | `SWITCHBOARD_TOKEN` | `dev-token` | Shared client token (never transmitted; proven via HMAC) |
-| `SWITCHBOARD_MODE` | `worker` | `worker` or `repeater` |
-| `SWITCHBOARD_REPEATER_ADDR` | — | Repeater: worker-facing HTTPS bind. Worker-repeater-client: the repeater to dial |
-| `SWITCHBOARD_REPEATER_TOKEN` | — | Shared secret for the worker↔repeater tunnel |
-| `SWITCHBOARD_REPEATER_CA` | — | Worker-repeater-client: PEM whose leaf cert the worker pins on the tunnel |
 | `SWITCHBOARD_DB` | `server/data/switchboard.db` | SQLite path |
 | `SWITCHBOARD_NAME` | host name | Service display name |
 | `SWITCHBOARD_PERMISSION_MODE` | `default` | Passed to the agent's `--permission-mode` |
@@ -292,6 +292,48 @@ Server (environment variables):
 | `SWITCHBOARD_TLS_CERT` | `server/data/switchboard-cert.pem` | PEM cert path (auto-generated if missing) |
 | `SWITCHBOARD_TLS_KEY` | `server/data/switchboard-key.pem` | PEM key path (auto-generated if missing) |
 | `SWITCHBOARD_TLS_SAN` | — | Extra SANs (comma-separated IPs/hostnames) for the generated cert |
+| `SWITCHBOARD_LOG` | — | Rolling log file, `<path>\|<max-size>*<max-archives>` (see [Log file rotation](#log-file-rotation-switchboard_log)) |
+
+To run a worker **behind a repeater** (worker-repeater-client), leave
+`SWITCHBOARD_ADDR` / `SWITCHBOARD_TOKEN` unset and set the `SWITCHBOARD_REPEATER_*`
+vars from the repeater table below; it dials out and needs no client-facing bind.
+
+### Repeater environment variables
+
+Set `SWITCHBOARD_MODE=repeater` to run the relay. It binds a client-facing **and**
+a worker-facing HTTPS listener, forwards opaque bytes to the one paired worker,
+and runs no tasks itself.
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `SWITCHBOARD_MODE` | `worker` | Must be `repeater` to select this role |
+| `SWITCHBOARD_ADDR` | `127.0.0.1:8787` | Client-facing HTTPS listen address |
+| `SWITCHBOARD_TOKEN` | `dev-token` | Client token validated at ingress (never transmitted) |
+| `SWITCHBOARD_REPEATER_ADDR` | — | Worker-facing HTTPS bind (on the worker-repeater-client, the repeater address to dial) |
+| `SWITCHBOARD_REPEATER_TOKEN` | — | Shared secret for the worker↔repeater tunnel |
+| `SWITCHBOARD_REPEATER_CA` | — | Worker-repeater-client only: PEM whose leaf cert the worker pins on the tunnel |
+| `SWITCHBOARD_TLS` / `_CERT` / `_KEY` / `_SAN` | as above | TLS for both listeners (same semantics as the server table) |
+| `SWITCHBOARD_NAME` | host name | Service display name |
+| `SWITCHBOARD_LOG` | — | Rolling log file, `<path>\|<max-size>*<max-archives>` (see [Log file rotation](#log-file-rotation-switchboard_log)) |
+
+### Log file rotation (`SWITCHBOARD_LOG`)
+
+Logs go to stdout by default. Set `SWITCHBOARD_LOG` to write to a **size-based
+rolling file** instead, in the format
+`<file-path>|<max-size><unit>*<max-archive-count>`:
+
+```bash
+SWITCHBOARD_LOG='logs/switchboard.log|100mb*5'
+```
+
+This writes to `logs/switchboard.log`, rolls it once a write would push it past
+100 MiB, and keeps at most **5** archived generations (`switchboard.log.1` …
+`switchboard.log.5`, newest first; the oldest is discarded on roll). Parent
+directories are created if missing. Size units are case-insensitive — `b`, `kb`,
+`mb`, `gb` (or the bare `k` / `m` / `g`); a plain number is bytes. Applies to
+every role (worker, repeater, worker-repeater-client), and `RUST_LOG` still
+controls the level/filter. A `count` of `0` keeps no archives (the file is
+truncated in place on roll).
 
 Role selection: `SWITCHBOARD_MODE=repeater` → **repeater**. Otherwise a worker
 with **no** `SWITCHBOARD_ADDR`/`SWITCHBOARD_TOKEN` but a `SWITCHBOARD_REPEATER_ADDR`

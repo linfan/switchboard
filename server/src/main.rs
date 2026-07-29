@@ -7,6 +7,7 @@ mod editor;
 mod error;
 mod fs;
 mod http;
+mod log_file;
 mod pty_proc;
 mod repeater;
 #[cfg(test)]
@@ -36,13 +37,34 @@ use crate::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let config = Config::from_env();
+
+    // Route logs to a size-based rolling file when `SWITCHBOARD_LOG` is set;
+    // otherwise keep the default stdout subscriber (with ANSI colors).
+    let env_filter =
+        || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    match &config.log_file {
+        Some(log_cfg) => {
+            let writer = log_file::RollingWriter::new(log_cfg).map_err(|e| {
+                anyhow::anyhow!("failed to open log file {}: {e}", log_cfg.path)
+            })?;
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter())
+                .with_ansi(false)
+                .with_writer(writer)
+                .init();
+            tracing::info!(
+                path = %log_cfg.path,
+                max_size = log_cfg.max_size,
+                max_files = log_cfg.max_files,
+                "logging to rolling file"
+            );
+        }
+        None => {
+            tracing_subscriber::fmt().with_env_filter(env_filter()).init();
+        }
+    }
+
     // The repeater is a stateless relay — it never opens the store, so don't log a
     // `db` path that would falsely imply it does.
     if config.role == Role::Repeater {
