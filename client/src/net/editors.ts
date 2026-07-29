@@ -181,6 +181,18 @@ export function isChangedOnDisk(workspaceId: string, tabKey: string): boolean {
   return entries.get(mapKey(workspaceId, tabKey))?.changedOnDisk ?? false;
 }
 
+/**
+ * Ask every live view to re-measure. Font size is applied via a CSS variable on
+ * the host, so the DOM restyles on its own; CodeMirror, however, caches line
+ * heights and must be told to recompute after the cell size changes.
+ */
+export function remeasureAll(): void {
+  for (const e of entries.values()) {
+    e.editor?.requestMeasure();
+    e.measure?.();
+  }
+}
+
 function destroy(key: string): void {
   const e = entries.get(key);
   if (!e) return;

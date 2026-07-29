@@ -1,6 +1,7 @@
 import { pool } from "../net/pool";
 import { useStore } from "../store/store";
 import { ConfirmButton } from "./ConfirmButton";
+import { ShortcutsHelp } from "./ShortcutsHelp";
 import { TerminalView } from "./TerminalView";
 
 export function ConversationPanel() {
@@ -20,7 +21,6 @@ export function ConversationPanel() {
     );
   }
 
-  const running = conv.task.status.state === "running";
   const { serviceId } = conv;
   const taskId = conv.task.id;
 
@@ -32,14 +32,7 @@ export function ConversationPanel() {
           {conv.task.status.state}
         </span>
         <span className="panel__spacer" />
-        {running && (
-          <button
-            className="btn"
-            onClick={() => pool.terminateTask(serviceId, taskId)}
-          >
-            Terminate
-          </button>
-        )}
+        <ShortcutsHelp />
         <ConfirmButton
           className="btn btn--danger"
           armedTitle="Click again to delete this task and its history"

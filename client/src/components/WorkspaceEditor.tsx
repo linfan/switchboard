@@ -28,6 +28,7 @@ import {
 import { EditorArea } from "./EditorArea";
 import { InlineEdit } from "./InlineEdit";
 import { ContextMenu, type MenuItem } from "./Menu";
+import { ShortcutsHelp } from "./ShortcutsHelp";
 
 type ServiceRef = { url: string; token: string };
 
@@ -196,6 +197,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
         )}
         <span className="panel__spacer" />
         {!online && <span className="weditor__offline">offline</span>}
+        <ShortcutsHelp />
       </header>
 
       <div

@@ -34,6 +34,10 @@ export interface AppState {
   sidebarCollapsed: boolean;
   /** Width of the left control panel in px when expanded (persisted). */
   sidebarWidth: number;
+  /** Terminal font size in px, adjustable via zoom shortcuts (persisted). */
+  terminalFontSize: number;
+  /** File-editor font size in px, adjustable via zoom shortcuts (persisted). */
+  editorFontSize: number;
   /** Per-service live connection state (in-memory). */
   runtime: Record<string, ServiceRuntime>;
   /** Conversations keyed by `serviceId::taskId`. */
@@ -87,6 +91,8 @@ export interface AppState {
   toggleSidebar: () => void;
   /** Set the expanded sidebar width in px. */
   setSidebarWidth: (width: number) => void;
+  /** Adjust a pane type's font size by `delta` px (clamped); used by zoom shortcuts. */
+  zoomFont: (target: "terminal" | "editor", delta: number) => void;
 
   // --- sync application ----------------------------------------------------
   /** Apply one server (control-plane) message for a given service. */
@@ -146,6 +152,8 @@ export const useStore = create<AppState>()(
       pendingWorkspace: {},
       sidebarCollapsed: false,
       sidebarWidth: 260,
+      terminalFontSize: 13,
+      editorFontSize: 13,
       runtime: {},
       conversations: {},
       cursors: {},
@@ -305,6 +313,14 @@ export const useStore = create<AppState>()(
 
       setSidebarWidth: (width) =>
         set({ sidebarWidth: Math.min(560, Math.max(180, Math.round(width))) }),
+
+      zoomFont: (target, delta) =>
+        set((s) => {
+          const clamp = (n: number) => Math.min(28, Math.max(8, n));
+          return target === "terminal"
+            ? { terminalFontSize: clamp((s.terminalFontSize ?? 13) + delta) }
+            : { editorFontSize: clamp((s.editorFontSize ?? 13) + delta) };
+        }),
 
       applyServerMsg: (serviceId, msg) =>
         set((s) => applyMsg(s, serviceId, msg)),
@@ -510,6 +526,8 @@ export const useStore = create<AppState>()(
         recentTools: s.recentTools,
         sidebarCollapsed: s.sidebarCollapsed,
         sidebarWidth: s.sidebarWidth,
+        terminalFontSize: s.terminalFontSize,
+        editorFontSize: s.editorFontSize,
         selectedWorkspaceId: s.selectedWorkspaceId,
         editorState: s.editorState,
       }),
