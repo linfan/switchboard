@@ -36,6 +36,13 @@ interface Entry {
 const entries = new Map<string, Entry>();
 const encoder = new TextEncoder();
 
+/**
+ * Font size (px) applied to every terminal, adjustable via the zoom shortcuts.
+ * Held here (not per-Entry) so new terminals inherit the current size and a
+ * change fans out to all live ones. Mirrors the persisted `terminalFontSize`.
+ */
+let fontSize = 13;
+
 let inputSink: InputSink | null = null;
 let resizeSink: ResizeSink | null = null;
 
@@ -55,7 +62,7 @@ function ensure(serviceId: string, taskId: string): Entry {
     cursorBlink: true,
     fontFamily:
       'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
-    fontSize: 13,
+    fontSize,
     scrollback: 10000,
     theme: { background: "#0b0f14" },
   });
@@ -156,6 +163,26 @@ export function refit(serviceId: string, taskId: string): void {
   // fit() reflows the buffer, which can leave the viewport above the last line;
   // re-pin so a resize never scrolls live output out of view.
   if (e.follow) e.term.scrollToBottom();
+}
+
+/**
+ * Set the shared terminal font size (px). Updates every live terminal and
+ * refits it so the grid geometry (and the server PTY, via onResize) tracks the
+ * new cell size. New terminals created later pick up the stored value.
+ */
+export function setFontSize(size: number): void {
+  fontSize = size;
+  for (const e of entries.values()) {
+    e.term.options.fontSize = size;
+    if (!e.opened) continue;
+    try {
+      e.fit.fit();
+    } catch {
+      // ignore transient zero-size measurements
+    }
+    e.term.refresh(0, e.term.rows - 1);
+    if (e.follow) e.term.scrollToBottom();
+  }
 }
 
 /**

@@ -3,7 +3,9 @@ import { useEffect } from "react";
 import { ConversationPanel } from "./components/ConversationPanel";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceEditor } from "./components/WorkspaceEditor";
+import * as editors from "./net/editors";
 import { pool } from "./net/pool";
+import * as terminals from "./net/terminals";
 import { useStore } from "./store/store";
 
 export default function App() {
@@ -11,6 +13,9 @@ export default function App() {
   const setCollapsed = useStore((s) => s.setSidebarCollapsed);
   const sidebarWidth = useStore((s) => s.sidebarWidth);
   const setSidebarWidth = useStore((s) => s.setSidebarWidth);
+  const terminalFontSize = useStore((s) => s.terminalFontSize);
+  const editorFontSize = useStore((s) => s.editorFontSize);
+  const zoomFont = useStore((s) => s.zoomFont);
   // A selected workspace routes the right pane to its file editor; otherwise the
   // selected task's terminal shows (the original behavior).
   const workspace = useStore((s) =>
@@ -24,6 +29,45 @@ export default function App() {
     pool.start();
     return () => pool.stop();
   }, []);
+
+  // Push the persisted terminal font size into the (React-external) registry.
+  // Runs on mount and whenever the size changes — including once the persisted
+  // store rehydrates asynchronously (Tauri store), so terminals settle correctly.
+  useEffect(() => {
+    terminals.setFontSize(terminalFontSize);
+  }, [terminalFontSize]);
+
+  // Editor font size is applied via a CSS variable the CodeMirror rule reads;
+  // remeasure so CM recomputes cached line heights for the new cell size.
+  useEffect(() => {
+    document.documentElement.style.setProperty(
+      "--editor-font-size",
+      `${editorFontSize}px`,
+    );
+    editors.remeasureAll();
+  }, [editorFontSize]);
+
+  // Global zoom shortcuts: ⇧⌘= grows, ⇧⌘- shrinks. Whichever pane is on screen
+  // (editor when a workspace is selected, else the terminal) is the target. A
+  // capture-phase listener runs before xterm/CodeMirror so the chord never leaks
+  // into terminal input or an editor binding.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.metaKey || !e.shiftKey || e.altKey || e.ctrlKey) return;
+      let delta: number | null = null;
+      if (e.code === "Equal") delta = 1;
+      else if (e.code === "Minus") delta = -1;
+      if (delta === null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const target = useStore.getState().selectedWorkspaceId
+        ? "editor"
+        : "terminal";
+      zoomFont(target, delta);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [zoomFont]);
 
   // Drag the sidebar's right border to resize it (mirrors WorkspaceEditor's
   // divider). Width is clamped and persisted by the store.

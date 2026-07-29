@@ -495,6 +495,35 @@ body {
   padding: 12px 16px;
   border-top: 1px solid var(--border);
 }
+/* --- shortcuts help popup --- */
+.shortcuts {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.shortcuts td {
+  padding: 6px 4px;
+  vertical-align: middle;
+}
+.shortcuts__keys {
+  width: 1%;
+  white-space: nowrap;
+  padding-right: 16px;
+}
+.shortcuts__action {
+  color: var(--fg-dim);
+}
+.shortcuts kbd {
+  display: inline-block;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -962,9 +991,11 @@ body {
   min-height: 0;
   overflow: hidden;
 }
-/* CodeMirror fills its host and scrolls internally. */
+/* CodeMirror fills its host and scrolls internally. The font size is driven by
+   a CSS variable so the zoom shortcuts can restyle every editor at once. */
 .weditor__cm .cm-editor {
   height: 100%;
+  font-size: var(--editor-font-size, 13px);
 }
 .weditor__cm .cm-scroller {
   overflow: auto;
