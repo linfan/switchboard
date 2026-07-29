@@ -43,7 +43,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env();
-    tracing::info!(role = ?config.role, db = %config.db_path, name = %config.service_name, "starting hosting service");
+    // The repeater is a stateless relay — it never opens the store, so don't log a
+    // `db` path that would falsely imply it does.
+    if config.role == Role::Repeater {
+        tracing::info!(role = ?config.role, name = %config.service_name, "starting hosting service");
+    } else {
+        tracing::info!(role = ?config.role, db = %config.db_path, name = %config.service_name, "starting hosting service");
+    }
 
     match config.role {
         Role::WorkerDirect => run_worker_direct(config).await,
