@@ -51,6 +51,15 @@ export interface HeartbeatOptions {
   timeoutMs: number;
 }
 
+export interface HandshakeOptions {
+  /**
+   * How long a socket may stay open-but-unauthenticated before we abandon it
+   * and reconnect. Guards against a handshake that stalls (e.g. the server
+   * never sends `auth_challenge`, or a socket that died silently after sleep).
+   */
+  timeoutMs: number;
+}
+
 export interface WakeOptions {
   /** Watchdog tick cadence. */
   checkMs: number;
@@ -91,6 +100,7 @@ export interface ConnectionDeps {
   now?: () => number;
   reconnect?: Partial<ReconnectOptions>;
   heartbeat?: Partial<HeartbeatOptions>;
+  handshake?: Partial<HandshakeOptions>;
   wake?: Partial<WakeOptions>;
 }
 
@@ -104,6 +114,7 @@ const DEFAULT_HEARTBEAT: HeartbeatOptions = {
   intervalMs: 15000,
   timeoutMs: 10000,
 };
+const DEFAULT_HANDSHAKE: HandshakeOptions = { timeoutMs: 10000 };
 const DEFAULT_WAKE: WakeOptions = { checkMs: 2000, driftMs: 5000 };
 
 const WS_OPEN = 1;
@@ -125,6 +136,7 @@ export class ConnectionManager {
   private readonly now: () => number;
   private readonly reconnectOpts: ReconnectOptions;
   private readonly heartbeatOpts: HeartbeatOptions;
+  private readonly handshakeOpts: HandshakeOptions;
   private readonly wakeOpts: WakeOptions;
 
   private ws: WebSocketLike | null = null;
@@ -139,6 +151,7 @@ export class ConnectionManager {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
   private wakeTimer: ReturnType<typeof setInterval> | null = null;
   private lastWakeTick = 0;
   private lastPingTs = 0;
@@ -150,6 +163,7 @@ export class ConnectionManager {
     this.now = deps.now ?? (() => Date.now());
     this.reconnectOpts = { ...DEFAULT_RECONNECT, ...deps.reconnect };
     this.heartbeatOpts = { ...DEFAULT_HEARTBEAT, ...deps.heartbeat };
+    this.handshakeOpts = { ...DEFAULT_HANDSHAKE, ...deps.handshake };
     this.wakeOpts = { ...DEFAULT_WAKE, ...deps.wake };
   }
 
@@ -245,6 +259,10 @@ export class ConnectionManager {
     ws.onclose = () => this.onClose("socket closed");
     ws.onerror = () => this.onClose("socket error");
     ws.onmessage = (ev) => this.onData(ev.data);
+    // Guard the connect+handshake window: if we're not authenticated by the
+    // deadline, abandon this socket and reconnect. Owns recovery of a stuck
+    // handshake so the wake watchdog never has to tear an in-flight one down.
+    this.armHandshakeWatchdog();
   }
 
   private onOpen(): void {
@@ -326,6 +344,7 @@ export class ConnectionManager {
 
   /** Handshake accepted: go live — reset backoff, send Hello, start heartbeat. */
   private onAuthed(): void {
+    this.clearHandshakeWatchdog();
     this.authed = true;
     this.attempt = 0;
     this.setStatus("online");
@@ -344,6 +363,7 @@ export class ConnectionManager {
 
   private onClose(reason: string): void {
     this.stopHeartbeat();
+    this.clearHandshakeWatchdog();
     this.ws = null;
     if (this.stopped || this.networkDown) return;
     this.scheduleReconnect(reason);
@@ -422,6 +442,40 @@ export class ConnectionManager {
     }
   }
 
+  // --- handshake watchdog -------------------------------------------------
+
+  private armHandshakeWatchdog(): void {
+    this.clearHandshakeWatchdog();
+    const deadline = this.now() + this.handshakeOpts.timeoutMs;
+    this.handshakeTimer = setTimeout(() => {
+      this.handshakeTimer = null;
+      if (this.authed) return;
+      // A timer that fired far past its deadline means the main thread was
+      // blocked (e.g. a large replay burst on another service starved this
+      // handshake) — not that the socket is dead. Re-arm rather than tearing
+      // down an in-flight handshake: reconnecting would re-drive Welcome +
+      // replay and re-saturate the thread, the very feedback loop we avoid on
+      // the heartbeat and wake paths.
+      if (this.now() - deadline > this.wakeOpts.driftMs) {
+        this.armHandshakeWatchdog();
+        return;
+      }
+      // Genuinely stuck (or a socket that died silently after sleep before it
+      // authed): drop it and back off, mirroring the auth_error path.
+      this.closeSocket();
+      if (!this.stopped && !this.networkDown) {
+        this.scheduleReconnect("handshake timeout");
+      }
+    }, this.handshakeOpts.timeoutMs);
+  }
+
+  private clearHandshakeWatchdog(): void {
+    if (this.handshakeTimer !== null) {
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = null;
+    }
+  }
+
   // --- wake / sleep detection --------------------------------------------
 
   private startWakeWatchdog(): void {
@@ -444,11 +498,21 @@ export class ConnectionManager {
     // cause, which re-saturates the thread — a feedback loop).
     if (elapsed <= this.wakeOpts.checkMs + this.wakeOpts.driftMs) return;
     if (this.stopped || this.networkDown) return;
-    if (this.authed && this.ws && this.ws.readyState === WS_OPEN) {
-      this.sendPing();
-    } else {
-      this.reconnectNow();
+    if (this.authed) {
+      // A live authed socket: probe rather than tear down (a healthy link is
+      // left untouched, a dead one fails the pong and reconnects). If it died
+      // silently (closed without an onclose), recover it.
+      if (this.ws && this.ws.readyState === WS_OPEN) this.sendPing();
+      else this.reconnectNow();
+      return;
     }
+    // Not yet authenticated: a connect or handshake is in flight. The gap is
+    // ambiguous — a real sleep leaves a dead socket, but a busy main thread
+    // (another service's replay burst) leaves a perfectly good one still
+    // waiting on the thread. While the socket object exists, the drift-aware
+    // handshake watchdog owns recovery (it reconnects only if it stays stuck
+    // once the thread frees). Only nudge a reconnect when there's no socket.
+    if (!this.ws) this.reconnectNow();
   }
 
   private stopWakeWatchdog(): void {
@@ -462,6 +526,7 @@ export class ConnectionManager {
 
   private closeSocket(): void {
     this.authed = false;
+    this.clearHandshakeWatchdog();
     if (this.ws) {
       this.ws.onopen = null;
       this.ws.onclose = null;

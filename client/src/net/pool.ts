@@ -44,6 +44,19 @@ export class ConnectionPool {
   /** Last-synced connection config per service, to detect edits (url/token). */
   private configs = new Map<string, string>();
   private unsub: (() => void) | null = null;
+  /**
+   * Highest seq seen per `serviceId::taskId` since the last flush, buffered so
+   * the initial replay burst (thousands of data-plane frames back-to-back)
+   * collapses into one store write per task per tick instead of one per frame —
+   * each store write notifies every subscriber, so per-frame writes would pin
+   * the main thread under re-renders and re-sync passes. Flushed on a timer and,
+   * for correctness, synchronously whenever cursors are read for a Hello.
+   */
+  private pendingCursors = new Map<
+    string,
+    { serviceId: string; taskId: string; seq: number }
+  >();
+  private cursorFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Start managing all current services and follow future add/remove. */
   start(): void {
@@ -91,7 +104,12 @@ export class ConnectionPool {
           // In the desktop app, route the socket through Rust so it can pin the
           // server's leaf cert (which the webview would reject if self-signed).
           wsFactory: isTauri ? makeTauriWsFactory(svc.certFingerprint) : undefined,
-          getCursors: () => useStore.getState().cursorsFor(svc.id),
+          getCursors: () => {
+            // Land any buffered advances before the Hello reads cursors, so a
+            // reconnect never asks the server to replay chunks we already have.
+            this.flushCursors();
+            return useStore.getState().cursorsFor(svc.id);
+          },
           onMessage: (msg) => this.onControl(svc.id, msg),
           onBinary: (bytes) => this.onBinary(svc.id, bytes),
           // On every (re)connect, replay the live terminal geometry so a resize
@@ -112,7 +130,13 @@ export class ConnectionPool {
     };
 
     sync(useStore.getState().services);
-    this.unsub = useStore.subscribe((s) => sync(s.services));
+    // Zustand fires this on *every* store mutation. Re-syncing managers only
+    // matters when the service list itself changes, so gate on its identity —
+    // otherwise the replay burst's thousands of cursor writes would each re-run
+    // the full sync (Set allocation + manager/service scan) for nothing.
+    this.unsub = useStore.subscribe((s, prev) => {
+      if (s.services !== prev.services) sync(s.services);
+    });
 
     if (typeof window !== "undefined") {
       window.addEventListener("online", this.onOnline);
@@ -123,6 +147,7 @@ export class ConnectionPool {
   stop(): void {
     this.unsub?.();
     this.unsub = null;
+    this.flushCursors();
     for (const mgr of this.managers.values()) mgr.stop();
     this.managers.clear();
     if (typeof window !== "undefined") {
@@ -155,9 +180,38 @@ export class ConnectionPool {
     } catch {
       return;
     }
+    // The terminal write is applied immediately (xterm queues its own parse);
+    // the cursor advance is buffered and coalesced — see `pendingCursors`.
     terminals.write(serviceId, frame.taskId, frame);
     if (frame.kind === "output" || frame.kind === "snapshot") {
-      useStore.getState().setCursor(serviceId, frame.taskId, frame.seq);
+      this.queueCursor(serviceId, frame.taskId, frame.seq);
+    }
+  }
+
+  /** Buffer a cursor advance, coalescing to the highest seq per task. */
+  private queueCursor(serviceId: string, taskId: string, seq: number): void {
+    const key = `${serviceId}::${taskId}`;
+    const cur = this.pendingCursors.get(key);
+    if (!cur || seq > cur.seq) {
+      this.pendingCursors.set(key, { serviceId, taskId, seq });
+    }
+    if (this.cursorFlushTimer === null) {
+      this.cursorFlushTimer = setTimeout(() => this.flushCursors(), 32);
+    }
+  }
+
+  /** Write every buffered cursor advance to the store in one pass. */
+  private flushCursors(): void {
+    if (this.cursorFlushTimer !== null) {
+      clearTimeout(this.cursorFlushTimer);
+      this.cursorFlushTimer = null;
+    }
+    if (this.pendingCursors.size === 0) return;
+    const pending = this.pendingCursors;
+    this.pendingCursors = new Map();
+    const setCursor = useStore.getState().setCursor;
+    for (const { serviceId, taskId, seq } of pending.values()) {
+      setCursor(serviceId, taskId, seq);
     }
   }
 

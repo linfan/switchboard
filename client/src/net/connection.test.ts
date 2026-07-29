@@ -301,27 +301,35 @@ describe("network + wake", () => {
     mgr.stop();
   });
 
-  it("force-reconnects after a detected sleep gap", () => {
+  it("leaves an in-flight handshake alone on a wake gap", async () => {
+    // A busy main thread (another service's replay burst) produces the same
+    // clock gap as a sleep. A socket that is open but not yet authenticated is
+    // presumed to be waiting on the thread, not dead: don't abort its handshake
+    // here — the handshake watchdog owns that decision.
     let now = 1000;
     const { mgr } = mkManager({ now: () => now });
     mgr.start();
-    const s1 = FakeSocket.last();
-    s1.emitOpen();
+    const s = FakeSocket.last();
+    s.emitOpen(); // open, mid-handshake
     const count = FakeSocket.instances.length;
-    // Simulate suspend: wall clock jumps far beyond the tick cadence.
     now = 1000 + 2000 + 6000; // elapsed 8000 > check(2000)+drift(5000)
     vi.advanceTimersByTime(2000); // fire one wake tick
-    expect(FakeSocket.instances.length).toBe(count + 1);
-    expect(FakeSocket.last()).not.toBe(s1);
+    expect(FakeSocket.instances.length).toBe(count); // handshake not aborted
+    expect(FakeSocket.last()).toBe(s);
+    // The delayed handshake still completes on the very same socket.
+    s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
+    await settleCrypto();
+    s.emitMessage({ type: "auth_ok" });
+    expect(mgr.getStatus()).toBe("online");
     mgr.stop();
   });
 
-  it("does not false-trigger sleep on normal ticks", () => {
+  it("does not false-trigger sleep on normal ticks", async () => {
     const { mgr } = mkManager(); // now is constant 1000
     mgr.start();
-    FakeSocket.last().emitOpen();
+    await driveHandshake(FakeSocket.last());
     const count = FakeSocket.instances.length;
-    vi.advanceTimersByTime(20000); // many wake ticks, no clock drift
+    vi.advanceTimersByTime(14000); // many wake ticks, no clock drift, no ping
     expect(FakeSocket.instances.length).toBe(count);
     mgr.stop();
   });
@@ -342,6 +350,49 @@ describe("network + wake", () => {
     expect(FakeSocket.last()).toBe(s); // same socket, untouched
     expect(s.find("ping")).toBeTruthy(); // probed instead
     s.emitMessage({ type: "pong", ts: now }); // probe answered
+    expect(mgr.getStatus()).toBe("online");
+    mgr.stop();
+  });
+});
+
+describe("handshake watchdog", () => {
+  it("reconnects a handshake that never completes", () => {
+    let now = 1000;
+    const { mgr } = mkManager({ now: () => now });
+    mgr.start();
+    const s1 = FakeSocket.last();
+    s1.emitOpen(); // open, but auth_challenge never arrives
+    const count = FakeSocket.instances.length;
+    // Deadline passes with the clock advancing normally (thread not blocked):
+    // the socket is genuinely stuck/dead, so drop it and back off.
+    now = 1000 + 10000 + 1;
+    vi.advanceTimersByTime(10000); // fire the handshake watchdog
+    expect(mgr.getStatus()).toBe("reconnecting");
+    vi.advanceTimersByTime(1000); // backoff reconnect fires
+    expect(FakeSocket.instances.length).toBe(count + 1);
+    expect(FakeSocket.last()).not.toBe(s1);
+    mgr.stop();
+  });
+
+  it("re-arms instead of tearing down when the timer fired late", async () => {
+    // The watchdog timer running far past its deadline means the main thread was
+    // blocked, not that the socket is dead — re-arm and let the queued handshake
+    // finish rather than reconnecting (which would re-replay and re-block).
+    let now = 1000;
+    const { mgr } = mkManager({ now: () => now });
+    mgr.start();
+    const s = FakeSocket.last();
+    s.emitOpen();
+    const count = FakeSocket.instances.length;
+    now = 1000 + 10000 + 6000; // 6s past deadline > drift(5000)
+    vi.advanceTimersByTime(10000); // fire the watchdog
+    expect(FakeSocket.instances.length).toBe(count); // not torn down
+    expect(FakeSocket.last()).toBe(s); // same socket
+    expect(mgr.getStatus()).not.toBe("reconnecting");
+    // The delayed handshake completes on the same socket.
+    s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
+    await settleCrypto();
+    s.emitMessage({ type: "auth_ok" });
     expect(mgr.getStatus()).toBe("online");
     mgr.stop();
   });
