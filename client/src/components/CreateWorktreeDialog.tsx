@@ -107,6 +107,7 @@ export function CreateWorktreeDialog({
       serviceId: service.id,
       name: `${workspace.name}/${name}`,
       cwd: result.path,
+      worktree: true,
     });
     selectWorkspace(id);
     onClose();

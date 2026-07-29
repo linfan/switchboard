@@ -47,7 +47,7 @@ pub fn router(state: SharedState, require_auth: bool) -> Router {
         .route("/git/changes", get(git_changes))
         .route("/git/diff", get(git_diff))
         .route("/git/filediff", get(git_file_diff))
-        .route("/git/worktree", post(git_worktree))
+        .route("/git/worktree", post(git_worktree).delete(git_worktree_remove))
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", axum::routing::delete(terminate_task));
     if require_auth {
@@ -272,6 +272,20 @@ async fn git_worktree(Json(body): Json<WorktreeBody>) -> AppResult<Json<GitWorkt
         )
         .await?,
     ))
+}
+
+#[derive(Deserialize)]
+struct WorktreeRemoveQuery {
+    /// Worktree folder to remove (the workspace's cwd on the host).
+    cwd: String,
+}
+
+/// Remove a git worktree (and its directory) created under `.switchboard/worktree`.
+async fn git_worktree_remove(
+    Query(q): Query<WorktreeRemoveQuery>,
+) -> AppResult<Json<Value>> {
+    editor::git_worktree_remove(&q.cwd).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn list_tasks(State(state): State<SharedState>) -> AppResult<Json<Vec<TaskInfo>>> {

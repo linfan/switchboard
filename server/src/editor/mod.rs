@@ -11,6 +11,7 @@ mod git;
 
 pub use git::{
     git_branches, git_changes, git_diff, git_file_diff, git_info, git_log, git_worktree_add,
+    git_worktree_remove,
 };
 
 use std::path::PathBuf;

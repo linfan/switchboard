@@ -384,6 +384,66 @@ pub async fn git_worktree_add(
     })
 }
 
+/// Remove a git worktree previously created under `.switchboard/worktree`.
+///
+/// Runs `git worktree remove --force` from the repo's *main* work tree — git
+/// refuses to remove a worktree while it is the current directory, so the
+/// command can't run from inside the worktree being deleted. `--force` is used
+/// so a worktree with uncommitted or untracked changes can still be discarded;
+/// the client guards this behind an explicit confirm. This deletes the worktree
+/// directory and prunes its administrative files, but leaves any branch intact.
+pub async fn git_worktree_remove(cwd: &str) -> AppResult<()> {
+    require_dir(cwd)?;
+    if !git_available().await {
+        return Err(AppError::BadRequest(
+            "git is not installed on the host".into(),
+        ));
+    }
+    let Some(target) = toplevel(cwd).await else {
+        return Err(AppError::BadRequest(format!(
+            "not a git repository: {cwd}"
+        )));
+    };
+    let main = worktree_main(cwd).await?;
+    if main == target {
+        return Err(AppError::BadRequest(
+            "refusing to remove the repository's main work tree".into(),
+        ));
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&main)
+        .args(["worktree", "remove", "--force", target.as_str()])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to run git: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::BadRequest(format!(
+            "git worktree remove failed: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Absolute path of the repo's main work tree, resolved from `cwd` (which may be
+/// any linked worktree of the same repo). `git worktree list --porcelain` lists
+/// the main work tree first, as a `worktree <path>` line.
+async fn worktree_main(cwd: &str) -> AppResult<String> {
+    let out = git(cwd, &["worktree", "list", "--porcelain"])
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to run git: {e}")))?
+        .ok_or_else(|| AppError::BadRequest(format!("not a git repository: {cwd}")))?;
+    out.lines()
+        .next()
+        .and_then(|l| l.strip_prefix("worktree "))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::BadRequest("could not resolve main work tree".into()))
+}
+
 /// Ensure `cwd` exists and is a directory before shelling out to git.
 fn require_dir(cwd: &str) -> AppResult<()> {
     if cwd.trim().is_empty() {
@@ -536,5 +596,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_str().unwrap();
         assert!(git_diff(cwd, "../etc; rm", "a.txt").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn worktree_remove_deletes_linked_and_refuses_main() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("a.txt"), "hi\n").unwrap();
+        run(dir.path(), &["add", "a.txt"]);
+        run(dir.path(), &["commit", "-q", "-m", "first"]);
+
+        // Add a linked worktree (with an uncommitted change, to exercise --force).
+        let wt = dir.path().join("wt");
+        run(
+            dir.path(),
+            &["worktree", "add", "-b", "feat", wt.to_str().unwrap()],
+        );
+        std::fs::write(wt.join("a.txt"), "hi\ndirty\n").unwrap();
+        assert!(wt.is_dir());
+
+        // Removing it from inside the worktree resolves the main tree and runs
+        // the removal from there; the directory is gone afterward.
+        git_worktree_remove(wt.to_str().unwrap()).await.unwrap();
+        assert!(!wt.exists());
+        let list = git(dir.path().to_str().unwrap(), &["worktree", "list"])
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!list.contains("wt"));
+
+        // The main work tree can't be removed.
+        assert!(git_worktree_remove(dir.path().to_str().unwrap())
+            .await
+            .is_err());
     }
 }

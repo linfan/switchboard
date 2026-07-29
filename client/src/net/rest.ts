@@ -416,3 +416,19 @@ export function gitCreateWorktree(
     new_branch: newBranch,
   });
 }
+
+/**
+ * Remove a git worktree (created via {@link gitCreateWorktree}) from the host:
+ * runs `git worktree remove --force`, deleting its directory. Leaves the branch
+ * intact. `cwd` is the worktree folder (the workspace's `cwd`).
+ */
+export function gitRemoveWorktree(
+  service: ServiceRef,
+  cwd: string,
+): Promise<void> {
+  return apiRequest<void>(
+    service,
+    "DELETE",
+    `/api/git/worktree?cwd=${encodeURIComponent(cwd)}`,
+  );
+}

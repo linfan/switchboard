@@ -40,6 +40,13 @@ export interface Workspace {
   name: string;
   /** Working directory on the hosting machine tasks inherit. */
   cwd: string;
+  /**
+   * True when this workspace is a git worktree created from another workspace
+   * (its `cwd` lives under `~/.switchboard/worktree/…`). Drives the "Remove
+   * worktree" menu item, which deletes the worktree from git as well as the
+   * workspace. Absent on ordinary workspaces.
+   */
+  worktree?: boolean;
 }
 
 /** Live connection state for a service (not persisted). */

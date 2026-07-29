@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import * as editors from "../net/editors";
 import { pool } from "../net/pool";
-import { gitInfo } from "../net/rest";
+import { gitInfo, gitRemoveWorktree } from "../net/rest";
 import { useStore } from "../store/store";
 import {
   convKey,
@@ -228,9 +228,16 @@ function WorkspaceGroup({
   // Whether this workspace folder is a git repo (drives the "Create worktree"
   // menu item). Probed once the service is online; null while unknown.
   const [isRepo, setIsRepo] = useState<boolean | null>(null);
+  // A worktree workspace (created via "Create worktree") gets a single "Remove
+  // worktree" action instead of "Create worktree"/"Remove workspace". The cwd
+  // fallback covers worktrees created before the flag existed.
+  const isWorktree =
+    workspace.worktree === true ||
+    workspace.cwd.includes("/.switchboard/worktree/");
 
   useEffect(() => {
-    if (!service || !online) {
+    // Worktrees never offer "Create worktree", so skip the repo probe for them.
+    if (!service || !online || isWorktree) {
       setIsRepo(null);
       return;
     }
@@ -245,7 +252,7 @@ function WorkspaceGroup({
     return () => {
       cancelled = true;
     };
-  }, [service, online, workspace.cwd, workspace.id]);
+  }, [service, online, isWorktree, workspace.cwd, workspace.id]);
 
   const remove = () => {
     // "Delete its tasks" model: drop every task on the server first, then
@@ -256,6 +263,19 @@ function WorkspaceGroup({
     }
     editors.dispose(workspace.id);
     removeWorkspace(workspace.id);
+  };
+
+  const removeWorktree = async () => {
+    if (!service) return;
+    // Remove the worktree from git first; only forget the workspace if that
+    // succeeds, so a failure (e.g. offline mid-click) leaves it visible to retry.
+    try {
+      await gitRemoveWorktree(service, workspace.cwd);
+    } catch (e) {
+      console.error("Failed to remove worktree", e);
+      return;
+    }
+    remove();
   };
 
   return (
@@ -295,21 +315,34 @@ function WorkspaceGroup({
               disabled: !online,
               onClick: () => setAddingTask(true),
             },
-            ...(isRepo
+            ...(isWorktree
               ? [
                   {
-                    label: "Create worktree",
+                    label: "Remove worktree",
+                    confirm:
+                      "Click again to remove (deletes the worktree and its tasks)",
+                    danger: true,
                     disabled: !online,
-                    onClick: () => setCreatingWorktree(true),
+                    onClick: removeWorktree,
                   },
                 ]
-              : []),
-            {
-              label: "Remove workspace",
-              confirm: "Click again to remove (deletes its tasks)",
-              danger: true,
-              onClick: remove,
-            },
+              : [
+                  ...(isRepo
+                    ? [
+                        {
+                          label: "Create worktree",
+                          disabled: !online,
+                          onClick: () => setCreatingWorktree(true),
+                        },
+                      ]
+                    : []),
+                  {
+                    label: "Remove workspace",
+                    confirm: "Click again to remove (deletes its tasks)",
+                    danger: true,
+                    onClick: remove,
+                  },
+                ]),
           ]}
         />
       </div>
