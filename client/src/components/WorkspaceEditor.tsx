@@ -283,6 +283,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
           onCloseToRight={(k) => closeTabsToRight(workspace.id, k)}
           onCloseAll={() => closeAllTabs(workspace.id)}
           onDiffLayout={(layout) => patch(workspace.id, { diffLayout: layout })}
+          onOpenInEditor={(path) => openTab(workspace.id, { path, mode: "edit" })}
         />
       </div>
 

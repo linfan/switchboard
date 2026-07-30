@@ -947,6 +947,12 @@ body {
   align-self: center;
   margin: 0 8px;
 }
+.weditor__openeditor {
+  flex: none;
+  align-self: center;
+  margin: 0 8px 0 0;
+  white-space: nowrap;
+}
 /* "File changed on disk" notice: sits between the tab bar and the editor. */
 .weditor__notice {
   display: flex;
