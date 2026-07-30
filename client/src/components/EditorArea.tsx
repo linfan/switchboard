@@ -87,6 +87,7 @@ export function EditorArea({
   onCloseToRight,
   onCloseAll,
   onDiffLayout,
+  onOpenInEditor,
 }: {
   workspaceId: string;
   service: { url: string; token: string };
@@ -101,6 +102,8 @@ export function EditorArea({
   onCloseToRight: (key: string) => void;
   onCloseAll: () => void;
   onDiffLayout: (layout: DiffLayout) => void;
+  /** Open the given absolute path as an editable tab (from the diff view). */
+  onOpenInEditor: (absPath: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<Status>("loading");
@@ -593,6 +596,17 @@ export function EditorArea({
               Side-by-side
             </button>
           </div>
+        )}
+        {mode === "diff" && path && (
+          <button
+            className="btn weditor__openeditor"
+            title="Open this file for editing in a new tab"
+            onClick={() =>
+              onOpenInEditor(`${cwd.replace(/\/+$/, "")}/${path}`)
+            }
+          >
+            Open in editor
+          </button>
         )}
         {mode === "edit" && key && (
           <button
