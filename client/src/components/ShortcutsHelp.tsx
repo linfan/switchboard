@@ -25,7 +25,7 @@ export function ShortcutsHelp() {
   return (
     <>
       <button
-        className="icon-btn"
+        className="icon-btn icon-btn--kbd"
         title="Keyboard shortcuts"
         aria-label="Keyboard shortcuts"
         onClick={() => setOpen(true)}
