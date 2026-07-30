@@ -133,6 +133,15 @@ export function NewTaskDialog({
           placeholder="claude, bash, python3 -m http.server, …"
           disabled={!online}
           onChange={(e) => setTool(e.target.value)}
+          // A datalist-associated input swallows ENTER to dismiss its suggestion
+          // dropdown, so the form's implicit submit never fires here. Submit
+          // explicitly to match the title field's behavior.
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              submit();
+            }
+          }}
           autoFocus
         />
         <datalist id="nt-tool-suggestions">
