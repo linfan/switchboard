@@ -1,0 +1,3 @@
+#!/bin/sh
+# Archiver wrapper for cross-builds via zig (used by cc-rs via AR_<target>).
+exec zig ar "$@"

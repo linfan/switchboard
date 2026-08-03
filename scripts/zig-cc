@@ -1,0 +1,25 @@
+#!/bin/sh
+# Linker/CC wrapper for cross-building to Linux via zig (used as cargo linker and cc-rs CC).
+# Translates rust-style target triples (x86_64-unknown-linux-musl) into zig form.
+new_args=""
+next_is_target=0
+has_target=0
+for a in "$@"; do
+  if [ "$next_is_target" = 1 ]; then
+    new_args="$new_args $(printf '%s' "$a" | sed 's/-unknown-/-/')"
+    next_is_target=0
+    has_target=1
+    continue
+  fi
+  case "$a" in
+    --target=*) t="${a#--target=}"; new_args="$new_args --target=$(printf '%s' "$t" | sed 's/-unknown-/-/')"; has_target=1 ;;
+    -target=*)  t="${a#-target=}";  new_args="$new_args --target=$(printf '%s' "$t" | sed 's/-unknown-/-/')"; has_target=1 ;;
+    --target|-target) new_args="$new_args --target"; next_is_target=1 ;;
+    *) new_args="$new_args $a" ;;
+  esac
+done
+if [ "$has_target" = 0 ] && [ -n "$ZIG_TARGET" ]; then
+  new_args="--target=$ZIG_TARGET$new_args"
+fi
+# shellcheck disable=SC2086
+exec zig cc $new_args

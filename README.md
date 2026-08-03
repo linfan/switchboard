@@ -295,8 +295,9 @@ PTYs locally.
 | `SWITCHBOARD_LOG` | — | Rolling log file, `<path>\|<max-size>*<max-archives>` (see [Log file rotation](#log-file-rotation-switchboard_log)) |
 
 To run a worker **behind a repeater** (worker-repeater-client), leave
-`SWITCHBOARD_ADDR` / `SWITCHBOARD_TOKEN` unset and set the `SWITCHBOARD_REPEATER_*`
-vars from the repeater table below; it dials out and needs no client-facing bind.
+`SWITCHBOARD_ADDR` / `SWITCHBOARD_TOKEN` unset and set the vars in
+[Worker behind a repeater (dial-out)](#worker-behind-a-repeater-dial-out);
+it dials out and needs no client-facing bind.
 
 ### Repeater environment variables
 
@@ -309,12 +310,24 @@ and runs no tasks itself.
 | `SWITCHBOARD_MODE` | `worker` | Must be `repeater` to select this role |
 | `SWITCHBOARD_ADDR` | `127.0.0.1:8787` | Client-facing HTTPS listen address |
 | `SWITCHBOARD_TOKEN` | `dev-token` | Client token validated at ingress (never transmitted) |
-| `SWITCHBOARD_REPEATER_ADDR` | — | Worker-facing HTTPS bind (on the worker-repeater-client, the repeater address to dial) |
+| `SWITCHBOARD_REPEATER_ADDR` | — | Worker-facing HTTPS bind that the dialing worker connects to |
 | `SWITCHBOARD_REPEATER_TOKEN` | — | Shared secret for the worker↔repeater tunnel |
-| `SWITCHBOARD_REPEATER_CA` | — | Worker-repeater-client only: PEM whose leaf cert the worker pins on the tunnel |
 | `SWITCHBOARD_TLS` / `_CERT` / `_KEY` / `_SAN` | as above | TLS for both listeners (same semantics as the server table) |
 | `SWITCHBOARD_NAME` | host name | Service display name |
 | `SWITCHBOARD_LOG` | — | Rolling log file, `<path>\|<max-size>*<max-archives>` (see [Log file rotation](#log-file-rotation-switchboard_log)) |
+
+### Worker behind a repeater (dial-out)
+
+A worker-repeater-client sets no `SWITCHBOARD_ADDR` / `SWITCHBOARD_TOKEN`; it only
+dials out to the repeater. Note that `SWITCHBOARD_REPEATER_CA` is read **only**
+by this role — the repeater itself never uses it.
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `SWITCHBOARD_REPEATER_ADDR` | — | Repeater address to dial |
+| `SWITCHBOARD_REPEATER_TOKEN` | — | Shared secret for the worker↔repeater tunnel |
+| `SWITCHBOARD_REPEATER_CA` | — | PEM whose leaf cert the worker pins on the tunnel |
+| `SWITCHBOARD_DB` / `SWITCHBOARD_NAME` / `SWITCHBOARD_LOG` | as above | Same semantics as the server table |
 
 ### Log file rotation (`SWITCHBOARD_LOG`)
 

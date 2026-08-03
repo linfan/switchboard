@@ -7,6 +7,12 @@ SHELL := /bin/bash
 CARGO ?= cargo
 NPM ?= npm
 SERVER_BIN ?= switchboard-server
+LINUX_TARGET ?= x86_64-unknown-linux-musl
+LINUX_LINKER ?= $(CURDIR)/scripts/zig-cc
+LINUX_LINKER_ENV = CARGO_TARGET_$(shell echo $(LINUX_TARGET) | tr 'a-z-' 'A-Z_')_LINKER
+LINUX_CC_ENV = CC_$(shell echo $(LINUX_TARGET) | tr '-' '_')
+LINUX_AR_ENV = AR_$(shell echo $(LINUX_TARGET) | tr '-' '_')
+ZIG_TARGET = $(subst -unknown-,-,$(LINUX_TARGET))
 SERVER_ADDR ?= 127.0.0.1:8787
 SERVER_TOKEN ?= dev-token
 SERVER_DATA ?= server/data/switchboard.db
@@ -25,22 +31,32 @@ help: ## Show this help
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
 # ---------------------------------------------------------------- setup
-.PHONY: setup setup-server setup-client setup-e2e
+.PHONY: setup setup-server setup-server-linux setup-client setup-e2e
 setup: setup-server setup-client setup-e2e ## Install all toolchains/deps
 setup-server: ## Fetch Rust deps
 	$(CARGO) fetch
+setup-server-linux: ## Install Rust target + check linker for Linux cross-builds
+	rustup target add $(LINUX_TARGET)
+	@command -v zig >/dev/null || { echo "zig not found. Install: brew install zig"; exit 1; }
 setup-client: ## Install client node deps
 	cd client && $(NPM) install
 setup-e2e: ## Install e2e harness deps
 	cd e2e && $(NPM) install
 
 # ---------------------------------------------------------------- build
-.PHONY: build build-server build-client build-shared
+.PHONY: build build-server build-server-linux build-client build-shared
 build: build-server build-client ## Build everything
 build-shared: ## Build shared protocol crate + emit TS bindings into client/src/protocol
 	TS_RS_EXPORT_DIR="$(CURDIR)" $(CARGO) test -p switchboard-shared
 build-server: ## Build the hosting service (release)
 	$(CARGO) build -p switchboard-server --release
+build-server-linux: ## Cross-compile a static server for Linux (needs zig: brew install zig)
+	ZIG_TARGET=$(ZIG_TARGET) \
+	$(LINUX_LINKER_ENV)=$(LINUX_LINKER) \
+	$(LINUX_CC_ENV)=$(LINUX_LINKER) \
+	$(LINUX_AR_ENV)=$(CURDIR)/scripts/zig-ar \
+	RUSTFLAGS="$${RUSTFLAGS:-} -C link-self-contained=no" \
+	$(CARGO) build -p switchboard-server --release --target $(LINUX_TARGET)
 build-client: build-shared ## Build the Tauri client
 	cd client && $(NPM) install --silent && $(NPM) run build
 
@@ -98,11 +114,15 @@ lint: ## Lint Rust (clippy) + client
 	cd client && $(NPM) run lint --if-present
 
 # ---------------------------------------------------------------- deploy
-.PHONY: package-server package-client clean distclean
+.PHONY: package-server package-server-linux package-client clean distclean
 package-server: build-server ## Produce a self-contained server release artifact
 	@mkdir -p dist
 	cp target/release/$(SERVER_BIN) dist/ 2>/dev/null || true
 	@echo "Server binary staged in ./dist"
+package-server-linux: build-server-linux ## Produce a Linux server release artifact
+	@mkdir -p dist
+	cp target/$(LINUX_TARGET)/release/$(SERVER_BIN) dist/$(SERVER_BIN)-linux
+	@echo "Linux server binary staged in ./dist/$(SERVER_BIN)-linux"
 package-client: build-client ## Package the desktop client (Tauri bundles)
 	cd client && $(NPM) run tauri build
 clean: ## Remove build artifacts (keeps fetched deps)
