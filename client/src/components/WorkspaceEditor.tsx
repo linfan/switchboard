@@ -303,6 +303,13 @@ interface TreeActions {
   refreshKey: number;
   /** Lower-cased name filter; empty string means no filtering. */
   filter: string;
+  /**
+   * While filtering, the set of directory paths that are ancestors of a match
+   * somewhere in their subtree. Such folders are revealed (and force-opened)
+   * even when their own name doesn't match, so matching files nested in
+   * subfolders become reachable.
+   */
+  visibleDirs: Set<string>;
   renamingPath: string | null;
   setRenamingPath: (path: string | null) => void;
   /** An in-progress "new file/folder" inline input inside directory `dir`. */
@@ -313,6 +320,81 @@ interface TreeActions {
   onContextMenu: (entry: FsEntry, e: React.MouseEvent) => void;
   onRename: (entry: FsEntry, newName: string) => void;
   onCreate: (dir: string, name: string, isDir: boolean) => void;
+}
+
+// Bounds that keep the recursive filter scan from choking on a huge project.
+// Hitting any of these just stops descending (partial results are fine — the
+// user can narrow the filter); the scan never blocks or fans out unbounded.
+const SCAN_MAX_CONCURRENCY = 8; // simultaneous directory listings
+const SCAN_MAX_DIRS = 4000; // total directories read before giving up
+const SCAN_MAX_DEPTH = 32; // nesting levels to descend
+const SCAN_TIME_BUDGET_MS = 5000; // wall-clock ceiling for the whole scan
+
+/** Run `fn`s with at most `max` in flight at once. */
+function makeLimiter(max: number) {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  return async function run<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= max) await new Promise<void>((r) => waiting.push(r));
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      waiting.shift()?.();
+    }
+  };
+}
+
+/**
+ * Walk the tree under `root` and collect the paths of every directory that
+ * contains a match (by name) anywhere below it. A match is a file or folder
+ * whose name includes `filter`. The returned set holds each matching entry's
+ * ancestor directories so the render can reveal the path down to it. Matching
+ * folders aren't descended into — the render reveals their whole subtree via
+ * `forceShow`.
+ *
+ * The walk is bounded by the SCAN_* limits so a very deep tree or a folder with
+ * a huge number of entries can't hang the UI or flood the server with requests.
+ */
+async function scanMatches(
+  service: ServiceRef,
+  root: string,
+  filter: string,
+  cancelled: () => boolean,
+): Promise<Set<string>> {
+  const dirs = new Set<string>();
+  const listLimited = makeLimiter(SCAN_MAX_CONCURRENCY);
+  const deadline = Date.now() + SCAN_TIME_BUDGET_MS;
+  let visited = 0;
+  const overBudget = () =>
+    cancelled() || visited >= SCAN_MAX_DIRS || Date.now() > deadline;
+
+  async function walk(dir: string, chain: string[], depth: number): Promise<void> {
+    if (overBudget()) return;
+    visited++;
+    let listing: FsListing;
+    try {
+      listing = await listLimited(() => listDir(service, dir));
+    } catch {
+      return; // unreadable dir: skip, don't abort the whole scan
+    }
+    if (cancelled()) return;
+    const here = [...chain, dir];
+    const childWalks: Promise<void>[] = [];
+    for (const e of listing.entries) {
+      const matches = e.name.toLowerCase().includes(filter);
+      if (matches) for (const p of here) dirs.add(p);
+      // Descend into non-matching folders to find deeper matches, but stop
+      // queueing work once we hit a bound so we don't build up a huge backlog.
+      if (e.is_dir && !matches && depth < SCAN_MAX_DEPTH && !overBudget()) {
+        childWalks.push(walk(e.path, here, depth + 1));
+      }
+    }
+    await Promise.all(childWalks);
+  }
+  await walk(root, [], 0);
+  return dirs;
 }
 
 function FileTree({
@@ -351,17 +433,40 @@ function FileTree({
   } | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [visibleDirs, setVisibleDirs] = useState<Set<string>>(new Set());
   const [creating, setCreating] = useState<{
     dir: string;
     isDir: boolean;
   } | null>(null);
+
+  const normFilter = filter.trim().toLowerCase();
+
+  // Recursively scan for matches whenever the filter (or the tree) changes.
+  // Debounced so typing doesn't fire a full-tree walk on every keystroke.
+  useEffect(() => {
+    if (normFilter === "") {
+      setVisibleDirs(new Set());
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      scanMatches(service, root, normFilter, () => cancelled).then((dirs) => {
+        if (!cancelled) setVisibleDirs(dirs);
+      });
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [service, root, normFilter, refreshKey]);
 
   const actions: TreeActions = {
     service,
     expanded,
     activePath,
     refreshKey,
-    filter: filter.trim().toLowerCase(),
+    filter: normFilter,
+    visibleDirs,
     renamingPath,
     setRenamingPath,
     creating,
@@ -490,7 +595,7 @@ function DirNode({
   const open =
     isRoot ||
     actions.expanded.includes(path) ||
-    (filtering && !!forceShow);
+    (filtering && (!!forceShow || actions.visibleDirs.has(path)));
   const [listing, setListing] = useState<FsListing | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -579,10 +684,13 @@ function DirNode({
       )}
       {open &&
         listing?.entries.map((e) => {
-          // Filter rule: keep a matching name; a matched folder keeps all of its
-          // content (forceShow cascades down); everything else is hidden.
+          // Filter rule: keep a matching name; a matched folder keeps all of
+          // its content (forceShow cascades down); a non-matching folder is
+          // kept when it holds a match deeper in its subtree (visibleDirs);
+          // everything else is hidden.
           const matches = e.name.toLowerCase().includes(actions.filter);
-          if (filtering && !forceShow && !matches) return null;
+          const revealDir = e.is_dir && actions.visibleDirs.has(e.path);
+          if (filtering && !forceShow && !matches && !revealDir) return null;
           const childForceShow = forceShow || (filtering && matches);
           return e.is_dir ? (
             <DirNode
