@@ -59,6 +59,23 @@ fn process_alive(_pid: i64) -> bool {
     false
 }
 
+/// Hard-kill a process by pid (SIGKILL), matching the SIGKILL that the normal
+/// PTY-handle terminate path sends. Used to reap a `Detached` orphan on delete,
+/// which has no live handle to terminate. Best-effort: an already-dead pid
+/// yields `ESRCH` and is a no-op.
+#[cfg(unix)]
+fn kill_pid(pid: i64) {
+    if pid > 0 {
+        // SAFETY: sending a signal to a pid has no effect on our address space.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_pid(_pid: i64) {}
+
 #[derive(Clone)]
 pub struct TaskManager {
     store: Store,
@@ -251,12 +268,27 @@ impl TaskManager {
         // swallow, and an un-consumed marker would leak for every unknown-id
         // delete. Insert before terminate() so the marker is set before the
         // pump can observe the Exit.
-        if let Some(handle) = self.running.lock().unwrap().remove(id) {
+        let had_handle = if let Some(handle) = self.running.lock().unwrap().remove(id) {
             self.deleting.lock().unwrap().insert(id.to_string());
             handle.terminate();
-        }
+            true
+        } else {
+            false
+        };
         self.terminating.lock().unwrap().remove(id);
         self.terminals.lock().unwrap().remove(id);
+        // A `Detached` task has no live handle but its orphaned child is still
+        // alive in the OS (that's what `Detached` means). Signal its recorded pid
+        // before we drop the row, or the delete would leak the process with no
+        // way to ever reach it again. Gate on the `Detached` status: an `Exited`
+        // task's stale pid may have been recycled to an unrelated process.
+        if !had_handle {
+            if let Some(TaskStatus::Detached) = self.store.get_task(id).await?.map(|t| t.status) {
+                if let Some(pid) = self.store.get_pid(id).await? {
+                    kill_pid(pid);
+                }
+            }
+        }
         // A no-op when the row is already gone — the delete stays idempotent.
         self.store.delete_task(id).await?;
         let _ = self.events.send(Outbound::Control(ServerMsg::TaskDeleted {
@@ -405,5 +437,29 @@ mod tests {
             store.get_task("nopid").await.unwrap().unwrap().status,
             TaskStatus::Exited { code: None }
         );
+    }
+
+    #[tokio::test]
+    async fn delete_kills_detached_orphan() {
+        let store = Store::memory().await.unwrap();
+        let mgr = TaskManager::new(store.clone());
+
+        // A real, long-lived child standing in for the orphaned agent process.
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i64;
+
+        let mut task = running_task("orphan");
+        task.status = TaskStatus::Detached;
+        store.create_task(&task).await.unwrap();
+        store.set_pid("orphan", pid).await.unwrap();
+        assert!(process_alive(pid));
+
+        mgr.delete("orphan").await.unwrap();
+
+        // The row is gone and the orphaned process was signalled. Reap it so the
+        // test doesn't leave a zombie, and confirm it was actually killed.
+        let status = child.wait().unwrap();
+        assert!(store.get_task("orphan").await.unwrap().is_none());
+        assert!(!status.success(), "expected the child to be killed by signal");
     }
 }

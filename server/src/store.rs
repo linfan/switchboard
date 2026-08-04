@@ -127,6 +127,15 @@ impl Store {
         Ok(())
     }
 
+    /// The OS pid recorded for a task's child, if any.
+    pub async fn get_pid(&self, id: &str) -> AppResult<Option<i64>> {
+        let row: Option<(Option<i64>,)> = sqlx::query_as("SELECT pid FROM tasks WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|(pid,)| pid))
+    }
+
     /// Record the OS pid of a task's live child, so a later server restart can
     /// check whether that process is still alive.
     pub async fn set_pid(&self, id: &str, pid: i64) -> AppResult<()> {
