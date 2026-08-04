@@ -24,11 +24,14 @@ export function FolderPicker({
   const [listing, setListing] = useState<FsListing | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    // Entering a new directory resets the filter (its entries are unrelated).
+    setFilter("");
     listDir(service, path)
       .then((l) => {
         if (cancelled) return;
@@ -48,6 +51,8 @@ export function FolderPicker({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
+
+  const q = filter.trim().toLowerCase();
 
   return (
     <Modal
@@ -75,6 +80,15 @@ export function FolderPicker({
 
         {error && <p className="hint hint--error">{error}</p>}
 
+        <input
+          className="fs-picker__filter"
+          type="text"
+          value={filter}
+          placeholder="Filter…"
+          aria-label="Filter entries"
+          onChange={(e) => setFilter(e.target.value)}
+        />
+
         <div className="fs-picker__list">
           <button
             className="fs-row fs-row--up"
@@ -87,25 +101,31 @@ export function FolderPicker({
           {loading && <p className="hint">Loading…</p>}
 
           {!loading &&
-            listing?.entries.map((e) =>
-              e.is_dir ? (
-                <button
-                  key={e.path}
-                  className="fs-row fs-row--dir"
-                  onClick={() => setPath(e.path)}
-                >
-                  📁 {e.name}
-                </button>
-              ) : (
-                <div key={e.path} className="fs-row fs-row--file">
-                  📄 {e.name}
-                </div>
-              ),
-            )}
+            listing?.entries
+              .filter((e) => e.name.toLowerCase().includes(q))
+              .map((e) =>
+                e.is_dir ? (
+                  <button
+                    key={e.path}
+                    className="fs-row fs-row--dir"
+                    onClick={() => setPath(e.path)}
+                  >
+                    📁 {e.name}
+                  </button>
+                ) : (
+                  <div key={e.path} className="fs-row fs-row--file">
+                    📄 {e.name}
+                  </div>
+                ),
+              )}
 
           {!loading && listing?.entries.length === 0 && (
             <p className="hint">Empty directory.</p>
           )}
+          {!loading &&
+            !!listing?.entries.length &&
+            listing.entries.filter((e) => e.name.toLowerCase().includes(q))
+              .length === 0 && <p className="hint">No matching entries.</p>}
         </div>
       </div>
     </Modal>
