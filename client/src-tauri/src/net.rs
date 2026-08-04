@@ -157,6 +157,16 @@ fn captured_fp(verifier: &PinnedVerifier) -> Option<String> {
     verifier.captured.lock().unwrap().as_deref().map(hex)
 }
 
+/// Log any error a Tauri command is about to return to the frontend, then pass
+/// it through unchanged. Gives us one guaranteed record of every command failure
+/// in the log file regardless of which step produced it.
+fn log_err<T>(command: &str, result: Result<T, String>) -> Result<T, String> {
+    if let Err(e) = &result {
+        tracing::error!(command = %command, error = %e, "client command failed");
+    }
+    result
+}
+
 /// Apply frontend-supplied headers (already includes the SWB signing headers).
 fn apply_headers(mut req: reqwest::RequestBuilder, headers: &[(String, String)]) -> reqwest::RequestBuilder {
     for (k, v) in headers {
@@ -184,30 +194,36 @@ pub async fn http_request(
     body: Option<String>,
     pin: Option<String>,
 ) -> Result<HttpResponse, String> {
-    let (client, verifier) = reqwest_client(pin)?;
-    let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
-    let mut req = apply_headers(client.request(method, &url), &headers);
-    if let Some(b) = body {
-        req = req
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(b);
+    log_err("http_request", async {
+        let (client, verifier) = reqwest_client(pin)?;
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
+        let mut req = apply_headers(client.request(method, &url), &headers);
+        if let Some(b) = body {
+            req = req
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(b);
+        }
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.map_err(|e| e.to_string())?;
+        Ok(HttpResponse {
+            status,
+            body,
+            cert_fp: captured_fp(&verifier),
+        })
     }
-    let resp = req.send().await.map_err(|e| e.to_string())?;
-    let status = resp.status().as_u16();
-    let body = resp.text().await.map_err(|e| e.to_string())?;
-    Ok(HttpResponse {
-        status,
-        body,
-        cert_fp: captured_fp(&verifier),
-    })
+    .await)
 }
 
 /// SHA-256 (hex) of a local file's contents. Lets the frontend sign an upload
 /// whose bytes live only on the Rust side (the body hash is part of the MAC).
 #[tauri::command]
 pub async fn hash_file(path: String) -> Result<String, String> {
-    let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-    Ok(hex(&sha256(&bytes)))
+    log_err("hash_file", async {
+        let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+        Ok(hex(&sha256(&bytes)))
+    }
+    .await)
 }
 
 /// Extract a server error message from a JSON body, or fall back to the status.
@@ -227,21 +243,24 @@ pub async fn download_file(
     pin: Option<String>,
     dest: String,
 ) -> Result<(), String> {
-    let (client, _) = reqwest_client(pin)?;
-    let resp = apply_headers(client.get(&url), &headers)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(error_message(status, &body));
+    log_err("download_file", async {
+        let (client, _) = reqwest_client(pin)?;
+        let resp = apply_headers(client.get(&url), &headers)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(error_message(status, &body));
+        }
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        tokio::fs::write(&dest, &bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    tokio::fs::write(&dest, &bytes)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    .await)
 }
 
 /// Upload a local file at `src` to the hosting service by POSTing its raw bytes
@@ -253,20 +272,23 @@ pub async fn upload_file(
     pin: Option<String>,
     src: String,
 ) -> Result<(), String> {
-    let bytes = tokio::fs::read(&src).await.map_err(|e| e.to_string())?;
-    let (client, _) = reqwest_client(pin)?;
-    let resp = apply_headers(client.post(&url), &headers)
-        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-        .body(bytes)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(error_message(status, &body));
+    log_err("upload_file", async {
+        let bytes = tokio::fs::read(&src).await.map_err(|e| e.to_string())?;
+        let (client, _) = reqwest_client(pin)?;
+        let resp = apply_headers(client.post(&url), &headers)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(error_message(status, &body));
+        }
+        Ok(())
     }
-    Ok(())
+    .await)
 }
 
 /// Outer framing tags for the raw bytes streamed to the frontend over the
@@ -303,7 +325,10 @@ pub async fn ws_connect(
     pin: Option<String>,
     on_frame: Channel<InvokeResponseBody>,
 ) -> Result<u64, String> {
-    let (config, _) = pinned_config(pin)?;
+    let (config, _) = pinned_config(pin).map_err(|e| {
+        tracing::error!(%url, error = %e, "websocket tls config failed");
+        e
+    })?;
     let connector = Connector::Rustls(config);
     let (stream, _resp) = connect_async_tls_with_config(&url, None, false, Some(connector))
         .await
@@ -323,7 +348,8 @@ pub async fn ws_connect(
     // Writer: drain outbound frames until the channel closes (ws_close / drop).
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if write.send(msg).await.is_err() {
+            if let Err(e) = write.send(msg).await {
+                tracing::warn!(%id, error = %e, "websocket write failed");
                 break;
             }
         }
@@ -338,7 +364,11 @@ pub async fn ws_connect(
             let body = match msg {
                 Ok(Message::Text(t)) => tagged(TAG_TEXT, t.as_bytes()),
                 Ok(Message::Binary(b)) => tagged(TAG_BINARY, b.as_ref()),
-                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Close(_)) => break,
+                Err(e) => {
+                    tracing::warn!(%id, error = %e, "websocket read error");
+                    break;
+                }
                 _ => continue,
             };
             if on_frame.send(InvokeResponseBody::Raw(body)).is_err() {
@@ -361,17 +391,20 @@ pub async fn ws_send(
     text: Option<String>,
     binary_b64: Option<String>,
 ) -> Result<(), String> {
-    let msg = if let Some(t) = text {
-        Message::Text(t.into())
-    } else if let Some(b) = binary_b64 {
-        Message::Binary(b64().decode(b).map_err(|e| e.to_string())?.into())
-    } else {
-        return Ok(());
-    };
-    if let Some(tx) = state.conns.lock().await.get(&id) {
-        tx.send(msg).map_err(|_| "connection closed".to_string())?;
+    log_err("ws_send", async {
+        let msg = if let Some(t) = text {
+            Message::Text(t.into())
+        } else if let Some(b) = binary_b64 {
+            Message::Binary(b64().decode(b).map_err(|e| e.to_string())?.into())
+        } else {
+            return Ok(());
+        };
+        if let Some(tx) = state.conns.lock().await.get(&id) {
+            tx.send(msg).map_err(|_| "connection closed".to_string())?;
+        }
+        Ok(())
     }
-    Ok(())
+    .await)
 }
 
 /// Close connection `id` (sends a Close frame; the reader task then cleans up).

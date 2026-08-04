@@ -51,6 +51,38 @@ fn init_logging() {
             tracing_subscriber::fmt().with_env_filter(env_filter()).init();
         }
     }
+    install_panic_hook();
+}
+
+/// Route Rust panics through `tracing` so they land in the log file too, then
+/// defer to the previous hook (which prints to stderr / aborts as before).
+fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panic".to_string());
+        tracing::error!(location = %location, message = %msg, "client panicked");
+        prev(info);
+    }));
+}
+
+/// Record a message emitted by the frontend (uncaught errors, rejected promises,
+/// `console.error`) into the same rolling log file as native events.
+#[tauri::command]
+fn frontend_log(level: String, message: String) {
+    match level.as_str() {
+        "warn" => tracing::warn!(target: "frontend", "{message}"),
+        "info" => tracing::info!(target: "frontend", "{message}"),
+        _ => tracing::error!(target: "frontend", "{message}"),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -67,7 +99,8 @@ pub fn run() {
             net::ws_send,
             net::ws_close,
             net::download_file,
-            net::upload_file
+            net::upload_file,
+            frontend_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
