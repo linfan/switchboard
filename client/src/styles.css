@@ -666,6 +666,19 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.fs-picker__filter {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.fs-picker__filter:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 .fs-picker__list {
   display: flex;
   flex-direction: column;
@@ -777,6 +790,42 @@ body {
    at the workspace root) works anywhere below the last row. */
 .weditor__tree {
   min-height: 100%;
+}
+
+/* Name filter above the tree rows. */
+.weditor__filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 6px;
+}
+.weditor__filter input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.weditor__filter input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.weditor__filter-clear {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.weditor__filter-clear:hover {
+  color: var(--fg);
 }
 
 /* A row in any of the left panels (tree entry, commit, changed file). */

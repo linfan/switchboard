@@ -301,6 +301,8 @@ interface TreeActions {
   expanded: string[];
   activePath?: string;
   refreshKey: number;
+  /** Lower-cased name filter; empty string means no filtering. */
+  filter: string;
   renamingPath: string | null;
   setRenamingPath: (path: string | null) => void;
   /** An in-progress "new file/folder" inline input inside directory `dir`. */
@@ -348,6 +350,7 @@ function FileTree({
     isRoot?: boolean;
   } | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
   const [creating, setCreating] = useState<{
     dir: string;
     isDir: boolean;
@@ -358,6 +361,7 @@ function FileTree({
     expanded,
     activePath,
     refreshKey,
+    filter: filter.trim().toLowerCase(),
     renamingPath,
     setRenamingPath,
     creating,
@@ -428,6 +432,27 @@ function FileTree({
         });
       }}
     >
+      <div className="weditor__filter">
+        <input
+          type="text"
+          value={filter}
+          placeholder="Filter files…"
+          aria-label="Filter files"
+          onChange={(e) => setFilter(e.target.value)}
+          onContextMenu={(e) => e.stopPropagation()}
+        />
+        {filter !== "" && (
+          <button
+            type="button"
+            className="weditor__filter-clear"
+            aria-label="Clear filter"
+            title="Clear filter"
+            onClick={() => setFilter("")}
+          >
+            ×
+          </button>
+        )}
+      </div>
       <DirNode service={service} path={root} depth={0} isRoot actions={actions} />
       {ctxMenu && (
         <ContextMenu
@@ -447,6 +472,7 @@ function DirNode({
   name,
   depth,
   isRoot,
+  forceShow,
   actions,
 }: {
   service: ServiceRef;
@@ -454,9 +480,17 @@ function DirNode({
   name?: string;
   depth: number;
   isRoot?: boolean;
+  /** True when an ancestor folder matched the filter: show this whole subtree. */
+  forceShow?: boolean;
   actions: TreeActions;
 }) {
-  const open = isRoot || actions.expanded.includes(path);
+  const filtering = actions.filter !== "";
+  // While filtering, force matched subtrees open so their contents are visible
+  // even if the user never expanded them (they revert on clearing the filter).
+  const open =
+    isRoot ||
+    actions.expanded.includes(path) ||
+    (filtering && !!forceShow);
   const [listing, setListing] = useState<FsListing | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -544,14 +578,20 @@ function DirNode({
         </div>
       )}
       {open &&
-        listing?.entries.map((e) =>
-          e.is_dir ? (
+        listing?.entries.map((e) => {
+          // Filter rule: keep a matching name; a matched folder keeps all of its
+          // content (forceShow cascades down); everything else is hidden.
+          const matches = e.name.toLowerCase().includes(actions.filter);
+          if (filtering && !forceShow && !matches) return null;
+          const childForceShow = forceShow || (filtering && matches);
+          return e.is_dir ? (
             <DirNode
               key={e.path}
               service={service}
               path={e.path}
               name={e.name}
               depth={depth + 1}
+              forceShow={childForceShow}
               actions={actions}
             />
           ) : (
@@ -580,8 +620,8 @@ function DirNode({
                 onCommit={(newName) => actions.onRename(e, newName)}
               />
             </div>
-          ),
-        )}
+          );
+        })}
     </>
   );
 }
