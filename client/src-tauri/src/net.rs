@@ -305,14 +305,18 @@ pub async fn ws_connect(
 ) -> Result<u64, String> {
     let (config, _) = pinned_config(pin)?;
     let connector = Connector::Rustls(config);
-    let (stream, _resp) =
-        connect_async_tls_with_config(&url, None, false, Some(connector))
-            .await
-            .map_err(|e| e.to_string())?;
+    let (stream, _resp) = connect_async_tls_with_config(&url, None, false, Some(connector))
+        .await
+        .map_err(|e| {
+            let e = e.to_string();
+            tracing::warn!(%url, error = %e, "websocket connect failed");
+            e
+        })?;
     let (mut write, mut read) = stream.split();
 
     let inner = state.inner().clone();
     let id = inner.next.fetch_add(1, Ordering::Relaxed);
+    tracing::info!(%id, %url, "websocket connected");
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     inner.conns.lock().await.insert(id, tx);
 
@@ -342,6 +346,7 @@ pub async fn ws_connect(
             }
         }
         cleanup.conns.lock().await.remove(&id);
+        tracing::info!(%id, "websocket closed");
         let _ = on_frame.send(InvokeResponseBody::Raw(vec![TAG_CLOSE]));
     });
 
