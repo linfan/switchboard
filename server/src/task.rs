@@ -39,6 +39,26 @@ pub enum Outbound {
     },
 }
 
+/// Is a process with this pid currently alive? Uses signal 0, which performs
+/// the existence/permission checks without delivering a signal: `Ok` or an
+/// `EPERM` error both mean the process exists; only `ESRCH` means it's gone.
+#[cfg(unix)]
+fn process_alive(pid: i64) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: `kill` with signal 0 has no side effects beyond the liveness check.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Non-unix platforms don't run PTY workers; treat any recorded pid as gone so
+/// orphans reconcile to a terminal `Exited` state.
+#[cfg(not(unix))]
+fn process_alive(_pid: i64) -> bool {
+    false
+}
+
 #[derive(Clone)]
 pub struct TaskManager {
     store: Store,
@@ -94,20 +114,22 @@ impl TaskManager {
             .map(TerminalEmulator::snapshot)
     }
 
-    /// On startup, any task still marked Starting/Running belongs to a process
-    /// that died with the previous server; mark them Failed so clients don't
-    /// wait forever.
+    /// On startup, any task still marked Starting/Running was owned by a process
+    /// this server can no longer drive (its PTY master died with the previous
+    /// server). The child itself may be orphaned-but-alive or truly gone, so
+    /// check the recorded pid: alive → `Detached` (honest — the process lives
+    /// but we can't stream it), dead/unknown → `Exited { code: None }`. Both are
+    /// terminal, so clients stop waiting instead of seeing a stuck Running row.
     pub async fn reconcile_orphans(&self) -> AppResult<()> {
-        for task in self.store.list_tasks().await? {
-            if matches!(task.status, TaskStatus::Starting | TaskStatus::Running) {
-                self.store
-                    .update_status(
-                        &task.id,
-                        &TaskStatus::Failed {
-                            error: "host restarted; process lost".into(),
-                        },
-                    )
-                    .await?;
+        for (id, status, pid) in self.store.list_task_pids().await? {
+            if matches!(status, TaskStatus::Starting | TaskStatus::Running) {
+                let alive = pid.map(process_alive).unwrap_or(false);
+                let next = if alive {
+                    TaskStatus::Detached
+                } else {
+                    TaskStatus::Exited { code: None }
+                };
+                self.store.update_status(&id, &next).await?;
             }
         }
         Ok(())
@@ -137,6 +159,7 @@ impl TaskManager {
 
         let (handle, out_rx) =
             pty_proc::spawn_cmd(&cmd.bin, &cmd.argv, params.cwd.as_deref(), cols, rows)?;
+        let pid = handle.pid();
         self.running.lock().unwrap().insert(id.clone(), handle);
         self.terminals
             .lock()
@@ -145,6 +168,9 @@ impl TaskManager {
 
         info.status = TaskStatus::Running;
         self.store.update_status(&id, &TaskStatus::Running).await?;
+        if let Some(pid) = pid {
+            self.store.set_pid(&id, pid as i64).await?;
+        }
         let _ = self.events.send(Outbound::Control(ServerMsg::TaskCreated {
             task: info.clone(),
         }));
@@ -324,5 +350,60 @@ impl TaskManager {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn running_task(id: &str) -> TaskInfo {
+        TaskInfo {
+            id: id.into(),
+            tool: "claude".into(),
+            title: "t".into(),
+            status: TaskStatus::Running,
+            created_at: now_millis(),
+            last_seq: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_detaches_live_orphans_and_exits_dead_ones() {
+        let store = Store::memory().await.unwrap();
+        let mgr = TaskManager::new(store.clone());
+
+        // Live orphan: our own pid is guaranteed alive.
+        store.create_task(&running_task("live")).await.unwrap();
+        store
+            .set_pid("live", std::process::id() as i64)
+            .await
+            .unwrap();
+
+        // Dead orphan: spawn a process, wait for it to exit, reuse its (now
+        // freed) pid — reliably not alive.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id() as i64;
+        child.wait().unwrap();
+        store.create_task(&running_task("dead")).await.unwrap();
+        store.set_pid("dead", dead_pid).await.unwrap();
+
+        // No pid ever recorded (e.g. spawn crashed before Running).
+        store.create_task(&running_task("nopid")).await.unwrap();
+
+        mgr.reconcile_orphans().await.unwrap();
+
+        assert_eq!(
+            store.get_task("live").await.unwrap().unwrap().status,
+            TaskStatus::Detached
+        );
+        assert_eq!(
+            store.get_task("dead").await.unwrap().unwrap().status,
+            TaskStatus::Exited { code: None }
+        );
+        assert_eq!(
+            store.get_task("nopid").await.unwrap().unwrap().status,
+            TaskStatus::Exited { code: None }
+        );
     }
 }

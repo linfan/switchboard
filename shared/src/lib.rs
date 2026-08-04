@@ -185,6 +185,9 @@ pub enum TaskStatus {
     Exited { code: Option<i32> },
     /// Terminated by an explicit client request.
     Terminated,
+    /// Process outlived the server that spawned it: still alive in the OS, but
+    /// this server no longer owns its PTY, so it can't be driven or streamed.
+    Detached,
     /// Failed to start or crashed.
     Failed { error: String },
 }

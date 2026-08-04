@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     title       TEXT NOT NULL,
     status      TEXT NOT NULL,
     created_at  INTEGER NOT NULL,
-    last_seq    INTEGER NOT NULL DEFAULT 0
+    last_seq    INTEGER NOT NULL DEFAULT 0,
+    pid         INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS pty_chunks (
@@ -59,6 +60,12 @@ impl Store {
             .connect_with(opts)
             .await?;
         sqlx::query(SCHEMA).execute(&pool).await?;
+        // Migration for databases created before the `pid` column existed. The
+        // ALTER errors ("duplicate column") on already-migrated DBs, which is
+        // expected and harmless — ignore it.
+        let _ = sqlx::query("ALTER TABLE tasks ADD COLUMN pid INTEGER")
+            .execute(&pool)
+            .await;
         Ok(Self { pool })
     }
 
@@ -118,6 +125,29 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Record the OS pid of a task's live child, so a later server restart can
+    /// check whether that process is still alive.
+    pub async fn set_pid(&self, id: &str, pid: i64) -> AppResult<()> {
+        sqlx::query("UPDATE tasks SET pid = ? WHERE id = ?")
+            .bind(pid)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Every task's `(id, status, pid)` — used by startup orphan reconciliation
+    /// to decide, per task, whether its recorded pid is still alive.
+    pub async fn list_task_pids(&self) -> AppResult<Vec<(String, TaskStatus, Option<i64>)>> {
+        let rows: Vec<(String, String, Option<i64>)> =
+            sqlx::query_as("SELECT id, status, pid FROM tasks")
+                .fetch_all(&self.pool)
+                .await?;
+        rows.into_iter()
+            .map(|(id, status, pid)| Ok((id, serde_json::from_str(&status)?, pid)))
+            .collect()
     }
 
     /// Permanently remove a task and all its durable state (chunks + delivery

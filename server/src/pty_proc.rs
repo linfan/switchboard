@@ -35,9 +35,18 @@ pub struct PtyHandle {
     input_tx: mpsc::UnboundedSender<Vec<u8>>,
     resize_tx: mpsc::UnboundedSender<(u16, u16)>,
     kill_tx: mpsc::UnboundedSender<()>,
+    /// OS process id of the spawned child, when the platform reports one. Used
+    /// to check liveness after a server restart (the child may be orphaned but
+    /// still running).
+    pid: Option<u32>,
 }
 
 impl PtyHandle {
+    /// OS process id of the child, if known.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     /// Write raw keystroke bytes into the PTY.
     pub fn send_input(&self, bytes: &[u8]) -> AppResult<()> {
         self.input_tx
@@ -166,6 +175,9 @@ fn spawn_pty(
         }
     });
 
+    // Capture the pid before the child is moved into the waiter thread.
+    let pid = child.process_id();
+
     // waiter: reap the exit code.
     std::thread::spawn(move || {
         let code = child.wait().ok().map(|s| s.exit_code() as i32);
@@ -177,6 +189,7 @@ fn spawn_pty(
             input_tx,
             resize_tx,
             kill_tx,
+            pid,
         },
         out_rx,
     ))

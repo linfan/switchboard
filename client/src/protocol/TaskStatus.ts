@@ -3,4 +3,4 @@
 /**
  * Lifecycle state of a task (one agent conversation).
  */
-export type TaskStatus = { "state": "starting" } | { "state": "running" } | { "state": "exited", code: number | null, } | { "state": "terminated" } | { "state": "failed", error: string, };
+export type TaskStatus = { "state": "starting" } | { "state": "running" } | { "state": "exited", code: number | null, } | { "state": "terminated" } | { "state": "detached" } | { "state": "failed", error: string, };

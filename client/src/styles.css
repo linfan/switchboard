@@ -196,6 +196,9 @@ body {
 .badge--exited {
   color: var(--fg-dim);
 }
+.badge--detached {
+  color: #d29922;
+}
 
 /* --- panel --- */
 .panel {
