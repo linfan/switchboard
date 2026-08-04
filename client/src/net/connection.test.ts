@@ -273,6 +273,27 @@ describe("heartbeat", () => {
     mgr.stop();
   });
 
+  it("fully tears down the socket on heartbeat timeout so it can't double-deliver", async () => {
+    // Regression: a pong timeout must detach the dead socket's handlers and
+    // close it, not just drop the reference. A live-but-orphaned socket keeps
+    // its onmessage bound to the manager and would deliver a second copy of
+    // every server frame into the same terminal after reconnect (doubled output
+    // / keystroke echo).
+    const { mgr, binaries } = mkManager();
+    mgr.start();
+    const s = FakeSocket.last();
+    await driveHandshake(s);
+    vi.advanceTimersByTime(15000); // ping
+    vi.advanceTimersByTime(10000); // pong deadline elapses -> declared dead
+    expect(mgr.getStatus()).toBe("reconnecting");
+    expect(s.readyState).toBe(3); // closed
+    expect(s.onmessage).toBeNull(); // handler detached
+    // A frame arriving on the orphaned socket must not reach onBinary.
+    s.onmessage?.({ data: new Uint8Array([1, 2, 3]).buffer });
+    expect(binaries).toHaveLength(0);
+    mgr.stop();
+  });
+
   it("stays online when a Pong arrives in time", async () => {
     const { mgr } = mkManager();
     mgr.start();

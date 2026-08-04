@@ -363,8 +363,13 @@ export class ConnectionManager {
 
   private onClose(reason: string): void {
     this.stopHeartbeat();
-    this.clearHandshakeWatchdog();
-    this.ws = null;
+    // Fully tear the socket down (detach handlers + close) rather than just
+    // dropping the reference. A live-but-orphaned socket keeps its onmessage
+    // bound to this manager, so after we reconnect it would deliver a second
+    // copy of every server frame into the same xterm — doubled output, keystroke
+    // echo included. closeSocket also clears the handshake watchdog, and is
+    // idempotent, so running it on an already-closed socket is harmless.
+    this.closeSocket();
     if (this.stopped || this.networkDown) return;
     this.scheduleReconnect(reason);
   }
@@ -418,7 +423,6 @@ export class ConnectionManager {
         return;
       }
       this.onClose("heartbeat timeout");
-      this.closeSocket();
     }, this.heartbeatOpts.timeoutMs);
   }
 
