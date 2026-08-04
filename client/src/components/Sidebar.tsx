@@ -267,15 +267,24 @@ function WorkspaceGroup({
 
   const removeWorktree = async () => {
     if (!service) return;
-    // Remove the worktree from git first; only forget the workspace if that
-    // succeeds, so a failure (e.g. offline mid-click) leaves it visible to retry.
+    // Delete the tasks over the live plane *before* touching git. `deleteTask`
+    // is a silent no-op when the socket is closed (returns false), and the
+    // connection can drop during the git round-trip below — so if we removed
+    // the folder first, a dropped send would leave the task alive on the host
+    // with its worktree gone, stranding it under "Ungrouped" with no worktree
+    // left to clean it up. Bail on the first failed send so the "Remove
+    // worktree" action stays visible to retry.
+    for (const c of conversations) {
+      if (!pool.deleteTask(workspace.serviceId, c.task.id)) return;
+    }
     try {
       await gitRemoveWorktree(service, workspace.cwd);
     } catch (e) {
       console.error("Failed to remove worktree", e);
       return;
     }
-    remove();
+    editors.dispose(workspace.id);
+    removeWorkspace(workspace.id);
   };
 
   return (
