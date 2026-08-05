@@ -16,6 +16,7 @@ import { CreateWorktreeDialog } from "./CreateWorktreeDialog";
 import { InlineEdit } from "./InlineEdit";
 import { Menu } from "./Menu";
 import { NewTaskDialog } from "./NewTaskDialog";
+import { UpgradeHostDialog } from "./UpgradeHostDialog";
 
 function Caret({ collapsed }: { collapsed: boolean }) {
   return (
@@ -111,6 +112,7 @@ function ServiceGroup({ service }: { service: Service }) {
   const status = rt?.status ?? "offline";
   const [editing, setEditing] = useState(false);
   const [addingWorkspace, setAddingWorkspace] = useState(false);
+  const [upgrading, setUpgrading] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
   const serviceWorkspaces = workspaces.filter(
@@ -151,6 +153,11 @@ function ServiceGroup({ service }: { service: Service }) {
             },
             { label: "Edit service", onClick: () => setEditing(true) },
             { label: "Reconnect now", onClick: () => pool.reconnect(service.id) },
+            {
+              label: "Upgrade host…",
+              disabled: status !== "online",
+              onClick: () => setUpgrading(true),
+            },
             {
               label: "Remove service",
               confirm: "Click again to remove",
@@ -200,6 +207,12 @@ function ServiceGroup({ service }: { service: Service }) {
         <AddWorkspaceDialog
           service={service}
           onClose={() => setAddingWorkspace(false)}
+        />
+      )}
+      {upgrading && (
+        <UpgradeHostDialog
+          service={service}
+          onClose={() => setUpgrading(false)}
         />
       )}
     </section>

@@ -244,6 +244,23 @@ export async function probeService(service: ServiceRef): Promise<ProbeResult> {
   return { info: (await res.json()) as ServiceInfo };
 }
 
+/**
+ * Ask the host to download a new server binary from `url` and upgrade in place.
+ * The server validates it, replaces its own executable, and re-execs —
+ * inheriting live tasks — so the connection blips and the client's auto-reconnect
+ * recovers on the new version. Optional `sha256Hex` is verified during download.
+ */
+export function upgradeFromUrl(
+  service: ServiceRef,
+  url: string,
+  sha256Hex?: string,
+): Promise<{ ok: boolean }> {
+  return apiRequest<{ ok: boolean }>(service, "POST", `/api/admin/upgrade/url`, {
+    url,
+    ...(sha256Hex ? { sha256: sha256Hex } : {}),
+  });
+}
+
 /** List a directory on the hosting machine (defaults to the server's home). */
 export function listDir(
   service: ServiceRef,

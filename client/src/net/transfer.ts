@@ -131,6 +131,45 @@ export async function uploadFile(
   return true;
 }
 
+/**
+ * Upload a user-chosen local binary as a host self-upgrade (POSTs the raw bytes
+ * to the admin upgrade endpoint). Mirrors {@link uploadFile}: the MAC already
+ * binds the body hash, so no separate checksum is sent. Returns `true` when a
+ * binary was uploaded (the host then re-execs), `false` if the user cancelled.
+ */
+export async function uploadBinaryUpgrade(
+  service: ServiceRef,
+): Promise<boolean> {
+  const reqPath = `/api/admin/upgrade/upload`;
+  if (isTauri) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const src = await open({ multiple: false, directory: false });
+    if (!src || typeof src !== "string") return false;
+    // The bytes live only on the Rust side, so hash them there for the MAC.
+    const bodyHash = fromHex(await invoke<string>("hash_file", { path: src }));
+    const headers = await signHeaders(service, "POST", reqPath, bodyHash);
+    await invoke<void>("upload_file", {
+      url: `${baseUrl(service)}${reqPath}`,
+      headers: Object.entries(headers),
+      pin: service.certFingerprint ?? null,
+      src,
+    });
+    return true;
+  }
+
+  const file = await pickBrowserFile();
+  if (!file) return false;
+  const bodyHash = await sha256(new Uint8Array(await file.arrayBuffer()));
+  const headers = await signHeaders(service, "POST", reqPath, bodyHash);
+  const res = await fetch(`${baseUrl(service)}${reqPath}`, {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/octet-stream" },
+    body: file,
+  });
+  if (!res.ok) throw new Error(await errorText(res));
+  return true;
+}
+
 /** Prompt the browser for a single file, resolving `null` if none was chosen. */
 function pickBrowserFile(): Promise<File | null> {
   return new Promise((resolve) => {
