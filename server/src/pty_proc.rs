@@ -55,7 +55,6 @@ impl PtyHandle {
 
     /// Raw master-PTY fd (unix), for inheriting this live PTY across an
     /// `execve`-based self-upgrade. `None` on non-unix / when unavailable.
-    #[allow(dead_code)] // consumed by the upgrade REST handlers in a later part
     pub fn master_fd(&self) -> Option<i32> {
         self.master_fd
     }
@@ -234,7 +233,6 @@ pub fn set_winsize(fd: RawFd, cols: u16, rows: u16) {
 /// Read a PTY's current window size via `ioctl(TIOCGWINSZ)`; `None` if the fd
 /// isn't a tty or the call fails.
 #[cfg(unix)]
-#[allow(dead_code)] // consumed by the upgrade re-exec path in a later part
 pub fn get_winsize(fd: RawFd) -> Option<(u16, u16)> {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     // SAFETY: `fd` is a live master PTY; the ioctl fills `ws`.

@@ -170,7 +170,6 @@ impl TaskManager {
     /// Snapshot the live PTYs as an inherit-map for a self-upgrade re-exec: each
     /// running task with a usable master fd + pid becomes an [`InheritEntry`] so
     /// the replacement process can adopt the same live terminals.
-    #[allow(dead_code)] // called by the upgrade REST handlers in a later part
     pub fn prepare_inherit(&self) -> Vec<crate::restart::InheritEntry> {
         let running = self.running.lock().unwrap();
         running

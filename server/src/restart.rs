@@ -10,7 +10,6 @@ use crate::error::{AppError, AppResult};
 pub const INHERIT_ENV: &str = "SWITCHBOARD_INHERIT_PTYS";
 
 /// One live PTY to pass to the replacement process across the re-exec.
-#[allow(dead_code)] // constructed by the upgrade REST handlers in a later part
 pub struct InheritEntry {
     pub task_id: String,
     pub fd: i32,
@@ -22,7 +21,6 @@ pub struct InheritEntry {
 /// returns; it only returns `Err` if the exec itself failed. Any fd we can't
 /// prepare is skipped (that task falls back to `Detached` reconciliation).
 #[cfg(unix)]
-#[allow(dead_code)] // called by the upgrade REST handlers in a later part
 pub fn exec_replacement(inherit: Vec<InheritEntry>) -> AppResult<()> {
     use std::os::unix::process::CommandExt;
 
@@ -58,7 +56,6 @@ pub fn exec_replacement(inherit: Vec<InheritEntry>) -> AppResult<()> {
 
 /// Non-unix has no `execve`; spawn a fresh process and exit (no PTY inheritance).
 #[cfg(not(unix))]
-#[allow(dead_code)] // called by the upgrade REST handlers in a later part
 pub fn exec_replacement(_inherit: Vec<InheritEntry>) -> AppResult<()> {
     let exe = std::env::current_exe()
         .map_err(|e| AppError::Other(anyhow::anyhow!("cannot resolve current exe: {e}")))?;

@@ -49,7 +49,13 @@ pub fn router(state: SharedState, require_auth: bool) -> Router {
         .route("/git/filediff", get(git_file_diff))
         .route("/git/worktree", post(git_worktree).delete(git_worktree_remove))
         .route("/tasks", get(list_tasks).post(create_task))
-        .route("/tasks/{id}", axum::routing::delete(terminate_task));
+        .route("/tasks/{id}", axum::routing::delete(terminate_task))
+        .route(
+            "/admin/upgrade/upload",
+            // Raw binary bytes in the body; lift the ~2 MiB default to 100 MiB.
+            post(upgrade_upload).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
+        )
+        .route("/admin/upgrade/url", post(upgrade_from_url));
     if require_auth {
         api = api.route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -325,4 +331,69 @@ async fn terminate_task(
 ) -> AppResult<StatusCode> {
     state.tasks.terminate(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct UpgradeUploadQuery {
+    /// Optional expected SHA-256 (hex) of the uploaded binary.
+    sha256: Option<String>,
+}
+
+/// Replace the running server binary with the uploaded raw bytes, then restart
+/// in place — inheriting live PTYs so running tasks keep streaming across the
+/// re-exec. The client's auto-reconnect covers the brief WS blip.
+async fn upgrade_upload(
+    State(state): State<SharedState>,
+    Query(q): Query<UpgradeUploadQuery>,
+    body: Bytes,
+) -> AppResult<Json<Value>> {
+    // Upload carries no server-side integrity source, so verify the caller's
+    // optional checksum before we validate the format.
+    if let Some(want) = q.sha256.as_deref() {
+        crate::upgrade::verify_sha256(&body, want)?;
+    }
+    apply_upgrade(&state, &body)
+}
+
+#[derive(Deserialize)]
+struct UpgradeUrlBody {
+    url: String,
+    /// Optional expected SHA-256 (hex); verified during the download.
+    sha256: Option<String>,
+}
+
+/// Download a new server binary from `url` on the host, replace the running
+/// binary, then restart in place (inheriting live PTYs).
+async fn upgrade_from_url(
+    State(state): State<SharedState>,
+    Json(body): Json<UpgradeUrlBody>,
+) -> AppResult<Json<Value>> {
+    // fetch_binary verifies the checksum itself, so it's already checked here.
+    let bytes = crate::upgrade::fetch_binary(&body.url, body.sha256.as_deref()).await?;
+    apply_upgrade(&state, &bytes)
+}
+
+/// Validate `bytes`, atomically swap it in over the running executable, then
+/// schedule the in-place re-exec. Returns as soon as the file is swapped; the
+/// re-exec fires shortly after so the HTTP response reaches the client first.
+fn apply_upgrade(state: &SharedState, bytes: &[u8]) -> AppResult<Json<Value>> {
+    crate::upgrade::validate_binary(bytes)?;
+    crate::upgrade::replace_current_exe(bytes)?;
+    schedule_restart(state.clone());
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Spawn the delayed in-place restart: wait briefly so the HTTP response flushes,
+/// snapshot the live PTYs as an inherit map, then `execve` the new binary. On
+/// success the process image is replaced and this never returns; a failure is
+/// logged and the (old) server keeps running.
+fn schedule_restart(state: SharedState) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let inherit = state.tasks.prepare_inherit();
+        tracing::info!(inherited = inherit.len(), "self-upgrade: re-exec now");
+        if let Err(e) = crate::restart::exec_replacement(inherit) {
+            tracing::error!(error = %e, "self-upgrade re-exec failed; still on old binary");
+        }
+    });
 }

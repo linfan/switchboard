@@ -15,7 +15,6 @@ const MIN_BINARY_SIZE: usize = 1024;
 /// Validate that `bytes` is an executable for *this* host's OS and architecture.
 /// The client machine's OS/arch may differ from the host's, so pushing the wrong
 /// build is the primary footgun — reject it loudly before we replace anything.
-#[allow(dead_code)] // wired into the REST handlers in a later part
 pub fn validate_binary(bytes: &[u8]) -> AppResult<()> {
     if bytes.len() < MIN_BINARY_SIZE {
         return Err(AppError::BadRequest(format!(
@@ -118,7 +117,6 @@ pub const MAX_BINARY_SIZE: u64 = 200 * 1024 * 1024;
 /// Download a candidate binary over HTTP(S) into memory, optionally verifying it
 /// against an expected SHA-256 (hex). Bounded by [`MAX_BINARY_SIZE`]. The caller
 /// still runs [`validate_binary`] before applying it.
-#[allow(dead_code)] // wired into the REST handlers in a later part
 pub async fn fetch_binary(url: &str, sha256_hex: Option<&str>) -> AppResult<Vec<u8>> {
     // rustls needs a process-wide crypto provider; worker roles that never serve
     // TLS haven't installed one. This is idempotent — ignore "already set".
@@ -165,7 +163,6 @@ pub async fn fetch_binary(url: &str, sha256_hex: Option<&str>) -> AppResult<Vec<
 }
 
 /// Verify `bytes` hashes to the expected SHA-256 (hex). Constant-time compare.
-#[allow(dead_code)] // used by fetch_binary + the upload handler
 pub fn verify_sha256(bytes: &[u8], want_hex: &str) -> AppResult<()> {
     use switchboard_shared::auth::{ct_eq, from_hex, sha256};
     let want = from_hex(want_hex.trim())
@@ -183,7 +180,6 @@ pub fn verify_sha256(bytes: &[u8], want_hex: &str) -> AppResult<()> {
 /// then renames over the current exe. Renaming over a running binary is legal on
 /// Unix: the live process keeps the old inode, and the next exec picks up the new
 /// file.
-#[allow(dead_code)] // wired into the REST handlers in a later part
 pub fn replace_current_exe(bytes: &[u8]) -> AppResult<PathBuf> {
     let exe = std::env::current_exe()
         .map_err(|e| AppError::Other(anyhow::anyhow!("cannot resolve current exe: {e}")))?;
