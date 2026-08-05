@@ -20,6 +20,10 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+# Outbound HTTPS client for the URL-based self-upgrade. rustls with no bundled
+# provider (we install ring's, matching the rest of the stack) + static webpki
+# roots so the musl cross-build stays self-contained.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"] }
 axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

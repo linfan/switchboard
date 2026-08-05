@@ -111,6 +111,72 @@ fn check_format(_bytes: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
+/// Upper bound on a downloaded/uploaded binary, guarding memory. A static musl
+/// build is tens of MiB; 200 MiB is comfortably above that.
+pub const MAX_BINARY_SIZE: u64 = 200 * 1024 * 1024;
+
+/// Download a candidate binary over HTTP(S) into memory, optionally verifying it
+/// against an expected SHA-256 (hex). Bounded by [`MAX_BINARY_SIZE`]. The caller
+/// still runs [`validate_binary`] before applying it.
+#[allow(dead_code)] // wired into the REST handlers in a later part
+pub async fn fetch_binary(url: &str, sha256_hex: Option<&str>) -> AppResult<Vec<u8>> {
+    // rustls needs a process-wide crypto provider; worker roles that never serve
+    // TLS haven't installed one. This is idempotent — ignore "already set".
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| AppError::Other(anyhow::anyhow!("http client init failed: {e}")))?;
+
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("download failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(AppError::BadRequest(format!(
+            "download failed: HTTP {}",
+            resp.status()
+        )));
+    }
+    if let Some(len) = resp.content_length() {
+        if len > MAX_BINARY_SIZE {
+            return Err(AppError::BadRequest(format!(
+                "binary too large: {len} bytes (max {MAX_BINARY_SIZE})"
+            )));
+        }
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("download read failed: {e}")))?;
+    if bytes.len() as u64 > MAX_BINARY_SIZE {
+        return Err(AppError::BadRequest(format!(
+            "binary too large: {} bytes (max {MAX_BINARY_SIZE})",
+            bytes.len()
+        )));
+    }
+    let bytes = bytes.to_vec();
+    if let Some(want) = sha256_hex {
+        verify_sha256(&bytes, want)?;
+    }
+    Ok(bytes)
+}
+
+/// Verify `bytes` hashes to the expected SHA-256 (hex). Constant-time compare.
+#[allow(dead_code)] // used by fetch_binary + the upload handler
+pub fn verify_sha256(bytes: &[u8], want_hex: &str) -> AppResult<()> {
+    use switchboard_shared::auth::{ct_eq, from_hex, sha256};
+    let want = from_hex(want_hex.trim())
+        .ok_or_else(|| AppError::BadRequest("invalid sha256 hex".into()))?;
+    let got = sha256(bytes);
+    if want.len() != got.len() || !ct_eq(&got, &want) {
+        return Err(AppError::BadRequest("sha256 checksum mismatch".into()));
+    }
+    Ok(())
+}
+
 /// Atomically replace the currently-running executable's file with `bytes`,
 /// returning the executable path. Writes a temp file in the *same directory*
 /// (so the rename is atomic on one filesystem), fsyncs, marks it executable,
@@ -180,6 +246,25 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         let bytes = std::fs::read(exe).unwrap();
         validate_binary(&bytes).expect("host's own binary must validate");
+    }
+
+    #[test]
+    fn verify_sha256_matches_and_rejects() {
+        let data = b"hello switchboard";
+        let good = switchboard_shared::auth::hex(&switchboard_shared::auth::sha256(data));
+        verify_sha256(data, &good).expect("correct digest must verify");
+        // Case-insensitive hex is accepted.
+        verify_sha256(data, &good.to_uppercase()).expect("uppercase hex must verify");
+        // A mismatching digest (correct length) is rejected.
+        let wrong: String = good
+            .chars()
+            .map(|c| if c == '0' { '1' } else { '0' })
+            .collect();
+        assert!(verify_sha256(data, &wrong).is_err());
+        // The right digest against the wrong bytes is rejected.
+        assert!(verify_sha256(b"different", &good).is_err());
+        // Malformed hex is rejected.
+        assert!(verify_sha256(data, "not-hex").is_err());
     }
 
     #[test]
