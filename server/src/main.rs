@@ -17,6 +17,7 @@ mod store;
 mod task;
 mod terminal;
 mod tls;
+mod upgrade;
 mod worker_link;
 mod ws;
 #[cfg(test)]
