@@ -138,19 +138,18 @@ impl TaskManager {
     /// but we can't stream it), dead/unknown → `Exited { code: None }`. Both are
     /// terminal, so clients stop waiting instead of seeing a stuck Running row.
     pub async fn reconcile_orphans(&self) -> AppResult<()> {
+        let rows = self.store.list_task_pids().await?;
         // Tasks we just re-adopted across a self-upgrade re-exec are live in
-        // `running`; they must not be reconciled to a terminal state.
-        let adopted = {
+        // `running`; they must not be reconciled to a terminal state. Snapshot
+        // the live-id set with a short lock, never held across an await.
+        let adopted: HashSet<String> = {
             let running = self.running.lock().unwrap();
-            self.store
-                .list_task_pids()
-                .await?
-                .into_iter()
+            rows.iter()
                 .filter(|(id, _, _)| running.contains_key(id))
-                .map(|(id, _, _)| id)
-                .collect::<HashSet<_>>()
+                .map(|(id, _, _)| id.clone())
+                .collect()
         };
-        for (id, status, pid) in self.store.list_task_pids().await? {
+        for (id, status, pid) in rows {
             if adopted.contains(&id) {
                 continue;
             }

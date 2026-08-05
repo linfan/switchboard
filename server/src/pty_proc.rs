@@ -449,6 +449,40 @@ mod tests {
         assert_eq!(code, Some(Some(3)), "expected exit code 3");
     }
 
+    /// Simulate post-`execve` adoption without a real re-exec: open a PTY and
+    /// spawn a child directly, then hand the *bare* master fd + pid to
+    /// `adopt_pty` (leaking the original master/child so their Drop doesn't close
+    /// the fd or reap the pid — exactly the state after an execve, where only the
+    /// inherited fd survives). Input and output must still flow through the
+    /// adopted handle.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adopt_pty_reattaches_live_terminal() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "while IFS= read -r l; do printf 'GOT:%s\\n' \"$l\"; done"]);
+        let child = pair.slave.spawn_command(cmd).expect("spawn sh");
+        drop(pair.slave);
+        let fd = pair.master.as_raw_fd().expect("master fd");
+        let pid = child.process_id().expect("child pid");
+        // Keep the fd open and leave the child un-reaped, as across an execve.
+        std::mem::forget(pair.master);
+        std::mem::forget(child);
+
+        let (handle, mut rx) = adopt_pty(fd, pid, 80, 24).expect("adopt");
+        handle.send_input(b"ping\n").unwrap();
+        let acc = wait_for(&mut rx, "GOT:ping").await;
+        assert!(acc.contains("GOT:ping"), "adopted pty must echo; got {acc:?}");
+        handle.terminate();
+    }
+
     #[tokio::test]
     async fn terminate_kills_process() {
         let (handle, mut rx) = sh("printf 'up\\n'; sleep 30");

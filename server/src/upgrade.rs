@@ -263,6 +263,46 @@ mod tests {
         assert!(verify_sha256(data, "not-hex").is_err());
     }
 
+    #[tokio::test]
+    async fn fetch_binary_downloads_verifies_and_rejects() {
+        use axum::{routing::get, Router};
+
+        let payload = vec![0xABu8; 4096];
+        let served = payload.clone();
+        let app = Router::new().route(
+            "/bin",
+            get(move || {
+                let p = served.clone();
+                async move { p }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{addr}/bin");
+
+        // No checksum: returns the exact bytes.
+        assert_eq!(fetch_binary(&url, None).await.unwrap(), payload);
+
+        // Correct checksum verifies.
+        let good = switchboard_shared::auth::hex(&switchboard_shared::auth::sha256(&payload));
+        assert_eq!(fetch_binary(&url, Some(&good)).await.unwrap(), payload);
+
+        // A mismatching checksum is rejected.
+        let bad: String = good
+            .chars()
+            .map(|c| if c == '0' { '1' } else { '0' })
+            .collect();
+        assert!(fetch_binary(&url, Some(&bad)).await.is_err());
+
+        // A non-2xx response is rejected.
+        assert!(fetch_binary(&format!("http://{addr}/missing"), None)
+            .await
+            .is_err());
+    }
+
     #[test]
     fn replace_swaps_file_contents() {
         // Point `current_exe` semantics at a throwaway file by exercising the
