@@ -100,6 +100,7 @@ async fn run_worker_repeater_client(config: Config) -> anyhow::Result<()> {
         // repeater cert itself inside `worker_link`.
         cert_fp: Vec::new(),
         nonce_cache: Default::default(),
+        tunnel_shutdown: Default::default(),
     });
 
     worker_link::run(state).await
@@ -137,6 +138,7 @@ async fn run_worker_direct(config: Config) -> anyhow::Result<()> {
         tasks,
         cert_fp,
         nonce_cache: Default::default(),
+        tunnel_shutdown: Default::default(),
     });
 
     let app = http::router(state.clone(), true);

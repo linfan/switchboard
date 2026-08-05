@@ -50,6 +50,7 @@ async fn build_state() -> Arc<AppState> {
         tasks,
         cert_fp: Vec::new(),
         nonce_cache: Default::default(),
+        tunnel_shutdown: Default::default(),
     })
 }
 

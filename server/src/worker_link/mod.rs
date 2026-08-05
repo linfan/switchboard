@@ -77,9 +77,18 @@ pub async fn run(state: SharedState) -> Result<()> {
     let max_backoff = Duration::from_secs(30);
     loop {
         match serve_once(&state, &repeater_addr, token.as_bytes(), &pin, tls.clone()).await {
-            Ok(()) => {
+            Ok(Outcome::Dropped) => {
                 tracing::info!("repeater tunnel closed; reconnecting");
                 backoff = Duration::from_millis(500);
+            }
+            Ok(Outcome::Shutdown) => {
+                // A self-upgrade asked us to unpair: we've already sent a Close so
+                // the repeater freed its slot. Do NOT reconnect, and do NOT return
+                // — returning would exit `main` and kill the process before the
+                // pending re-exec replaces it (leaving the host down with no
+                // supervisor). Park until the imminent `execve` takes over.
+                tracing::info!("repeater tunnel closed for self-upgrade; awaiting re-exec");
+                std::future::pending::<()>().await;
             }
             Err(e) => {
                 tracing::warn!(error = %e, backoff_ms = backoff.as_millis(), "repeater tunnel failed; retrying");
@@ -90,14 +99,25 @@ pub async fn run(state: SharedState) -> Result<()> {
     }
 }
 
-/// One tunnel lifetime: dial, authenticate, then demux until the socket closes.
+/// Why a single tunnel lifetime ([`serve_once`]) ended.
+enum Outcome {
+    /// The socket dropped (repeater closed, network error, tunnel died) — the
+    /// caller should reconnect with backoff.
+    Dropped,
+    /// A graceful shutdown was requested via [`AppState::tunnel_shutdown`] (a
+    /// self-upgrade re-exec is imminent) — the caller must not reconnect.
+    Shutdown,
+}
+
+/// One tunnel lifetime: dial, authenticate, then demux until the socket closes
+/// or a graceful shutdown is requested.
 async fn serve_once(
     state: &SharedState,
     repeater_addr: &str,
     token: &[u8],
     cb: &[u8],
     tls: Arc<ClientConfig>,
-) -> Result<()> {
+) -> Result<Outcome> {
     let url = format!("wss://{repeater_addr}/repeater");
     let connector = Connector::Rustls(tls);
     let (ws, _resp) = connect_async_tls_with_config(&url, None, false, Some(connector))
@@ -110,29 +130,53 @@ async fn serve_once(
     tracing::info!(%repeater_addr, "repeater tunnel authenticated");
 
     // Single writer task owns the socket sink; every stream funnels encoded
-    // frames through this one bounded channel.
+    // frames through this one bounded channel. When the channel drains (the
+    // session tore down on purpose — e.g. a self-upgrade unpair), it sends a
+    // courteous WS Close so the repeater frees its worker slot at once instead
+    // of waiting to notice a dropped socket.
     let (mux_tx, mut mux_rx) = mpsc::channel::<Vec<u8>>(MUX_BUF);
     let writer = tokio::spawn(async move {
         while let Some(bytes) = mux_rx.recv().await {
             if sink.send(WsMessage::Binary(bytes)).await.is_err() {
-                break;
+                return; // socket already dead; nothing to close gracefully
             }
         }
+        let _ = sink.send(WsMessage::Close(None)).await;
+        let _ = sink.close().await;
     });
 
     // App router (no client-facing auth: the repeater already validated it).
     let app = crate::http::router(state.clone(), false);
 
     let mut streams: HashMap<u64, Stream> = HashMap::new();
-    let result = demux(&mut stream, &mux_tx, &app, state, &mut streams).await;
+    // Race the demux against a graceful-shutdown request: whichever fires first
+    // decides the outcome. `notified()` only wakes a live waiter, so a signal
+    // raised while we're between connections is simply missed (the re-exec still
+    // proceeds; the repeater's last-writer-wins eviction covers that case).
+    let outcome = tokio::select! {
+        r = demux(&mut stream, &mux_tx, &app, state, &mut streams) => Demux::Ended(r),
+        _ = state.tunnel_shutdown.notified() => Demux::Shutdown,
+    };
 
-    // Tear down: abort in-flight work and drop session channels.
+    // Tear down: abort in-flight work, drop the writer channel (which triggers
+    // the graceful Close above), then let that Close flush before we return —
+    // bounded, so a wedged socket can't stall us.
     for (_, s) in streams.drain() {
         s.abort();
     }
     drop(mux_tx);
-    writer.abort();
-    result
+    let _ = tokio::time::timeout(Duration::from_secs(1), writer).await;
+
+    match outcome {
+        Demux::Ended(r) => r.map(|()| Outcome::Dropped),
+        Demux::Shutdown => Ok(Outcome::Shutdown),
+    }
+}
+
+/// Internal result of the demux/shutdown race in [`serve_once`].
+enum Demux {
+    Ended(Result<()>),
+    Shutdown,
 }
 
 /// Per-stream state on the worker side: either an in-flight REST request being

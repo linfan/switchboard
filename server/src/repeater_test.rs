@@ -50,18 +50,27 @@ const BODY_CHUNK: usize = 512 * 1024;
 /// state, so a test can seed tasks / inject PTY chunks it will serve.
 struct Harness {
     client_addr: String,
-    worker_addr: String,
     cb: Vec<u8>,
     worker: SharedState,
 }
 
-async fn boot() -> Harness {
+/// A running repeater with no worker attached yet. `cb` is the leaf-cert
+/// fingerprint (channel binding for both client and worker-leg auth); `cert_path`
+/// is the PEM a worker pins as its `repeater_ca`.
+struct Repeater {
+    client_addr: String,
+    worker_addr: String,
+    cb: Vec<u8>,
+    cert_path: String,
+}
+
+async fn boot_repeater() -> Repeater {
     let _ = ring::default_provider().install_default();
 
     let dir = tempfile::tempdir().unwrap();
     let p = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
     let (cert_path, key_path) = (p("cert.pem"), p("key.pem"));
-    let (rdb, wdb) = (p("repeater.db"), p("worker.db"));
+    let rdb = p("repeater.db");
     std::mem::forget(dir); // keep the tempdir for the whole process
 
     let tls = TlsConfig {
@@ -78,7 +87,6 @@ async fn boot() -> Harness {
     let worker_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let client_addr = client_listener.local_addr().unwrap().to_string();
     let worker_addr = worker_listener.local_addr().unwrap().to_string();
-    let worker_facing = worker_addr.clone();
 
     // Repeater (runs no tasks; db_path is unused by this role).
     let rcfg = Config {
@@ -98,6 +106,16 @@ async fn boot() -> Harness {
         let _ = crate::repeater::serve(rcfg, client_listener, worker_listener).await;
     });
 
+    Repeater { client_addr, worker_addr, cb, cert_path }
+}
+
+async fn boot() -> Harness {
+    let r = boot_repeater().await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let wdb = dir.path().join("worker.db").to_string_lossy().into_owned();
+    std::mem::forget(dir);
+
     // Worker-repeater-client: dials the repeater, runs PTYs locally.
     let wcfg = Config {
         role: Role::WorkerRepeaterClient,
@@ -107,9 +125,9 @@ async fn boot() -> Harness {
         service_name: "worker-test".into(),
         agent_permission_mode: "default".into(),
         tls: None,
-        repeater_addr: Some(worker_addr),
+        repeater_addr: Some(r.worker_addr.clone()),
         repeater_token: Some(REPEATER_TOKEN.into()),
-        repeater_ca: Some(cert_path),
+        repeater_ca: Some(r.cert_path.clone()),
         log_file: None,
     };
     let store = Store::connect(&wdb).await.unwrap();
@@ -120,6 +138,7 @@ async fn boot() -> Harness {
         tasks,
         cert_fp: Vec::new(),
         nonce_cache: Default::default(),
+        tunnel_shutdown: Default::default(),
     });
     {
         let w = worker.clone();
@@ -128,11 +147,10 @@ async fn boot() -> Harness {
         });
     }
 
-    wait_paired(&client_addr, &cb).await;
+    wait_paired(&r.client_addr, &r.cb).await;
     Harness {
-        client_addr,
-        worker_addr: worker_facing,
-        cb,
+        client_addr: r.client_addr,
+        cb: r.cb,
         worker,
     }
 }
@@ -288,6 +306,47 @@ async fn connect_ws(addr: &str, cb: &[u8]) -> WsStream {
             match serde_json::from_str::<AuthMsg>(t.as_str()) {
                 Ok(AuthMsg::AuthOk) => break,
                 Ok(AuthMsg::AuthError { message }) => panic!("ws auth failed: {message}"),
+                _ => {}
+            }
+        }
+    }
+    ws
+}
+
+/// Dial the repeater's worker-facing `/repeater` leg and complete the SWB-WS-v1
+/// handshake as a *worker* would (proving `REPEATER_TOKEN`, bound to the repeater
+/// cert `cb`). Returns the authenticated socket without running the worker app —
+/// enough to occupy the single slot and exercise pairing/eviction.
+async fn dial_worker_leg(worker_addr: &str, cb: &[u8]) -> WsStream {
+    let url = format!("wss://{worker_addr}/repeater");
+    let connector = Connector::Rustls(client_tls());
+    let (mut ws, _) = connect_async_tls_with_config(&url, None, false, Some(connector))
+        .await
+        .unwrap();
+
+    let server_nonce = loop {
+        if let WsMessage::Text(t) = ws.next().await.unwrap().unwrap() {
+            if let Ok(AuthMsg::AuthChallenge { server_nonce }) =
+                serde_json::from_str::<AuthMsg>(t.as_str())
+            {
+                break from_hex(&server_nonce).unwrap();
+            }
+        }
+    };
+    let client_nonce = random_nonce::<NONCE_LEN>();
+    let mac = ws_mac(REPEATER_TOKEN.as_bytes(), &server_nonce, &client_nonce, cb);
+    let resp = AuthMsg::AuthResponse {
+        client_nonce: hex(&client_nonce),
+        mac: hex(&mac),
+    };
+    ws.send(WsMessage::Text(serde_json::to_string(&resp).unwrap()))
+        .await
+        .unwrap();
+    loop {
+        if let WsMessage::Text(t) = ws.next().await.unwrap().unwrap() {
+            match serde_json::from_str::<AuthMsg>(t.as_str()) {
+                Ok(AuthMsg::AuthOk) => break,
+                Ok(AuthMsg::AuthError { message }) => panic!("worker-leg auth failed: {message}"),
                 _ => {}
             }
         }
@@ -570,48 +629,35 @@ async fn large_upload_chunked_through_repeater() {
 }
 
 #[tokio::test]
-async fn second_worker_rejected_while_paired() {
-    let h = boot().await;
-    // A worker is already paired (boot waits for it). A second dial-in that
-    // authenticates the tunnel token must still be refused — the repeater closes
-    // it, and the slot only frees when the first tunnel dies.
-    let url = format!("wss://{}/repeater", h.worker_addr);
-    let connector = Connector::Rustls(client_tls());
-    let (mut ws, _) = connect_async_tls_with_config(&url, None, false, Some(connector))
-        .await
-        .unwrap();
+async fn newer_worker_evicts_incumbent() {
+    // Two raw worker legs against a lone repeater (no auto-reconnecting real
+    // worker that would fight the newcomer for the slot). This models a
+    // self-upgrade re-exec: the new process dials in while the repeater still
+    // holds the old, now-dead tunnel.
+    let r = boot_repeater().await;
 
-    // SWB-WS-v1 as a worker (secret = REPEATER_TOKEN, bound to the repeater cert).
-    let server_nonce = loop {
-        if let WsMessage::Text(t) = ws.next().await.unwrap().unwrap() {
-            if let Ok(AuthMsg::AuthChallenge { server_nonce }) =
-                serde_json::from_str::<AuthMsg>(t.as_str())
-            {
-                break from_hex(&server_nonce).unwrap();
+    // First worker pairs and holds the single slot.
+    let mut first = dial_worker_leg(&r.worker_addr, &r.cb).await;
+    wait_paired(&r.client_addr, &r.cb).await;
+
+    // A second authenticated worker dials in. Last-writer-wins: it takes the slot
+    // and the incumbent is torn down — the newcomer is NOT rejected. This is what
+    // lets a re-exec'd host re-pair immediately instead of waiting out the old
+    // socket's teardown or the 45s idle timeout.
+    let _second = dial_worker_leg(&r.worker_addr, &r.cb).await;
+
+    // The incumbent's socket is closed by the repeater upon eviction.
+    let evicted = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match first.next().await {
+                Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => continue, // heartbeat PING may arrive before the close
             }
         }
-    };
-    let client_nonce = random_nonce::<NONCE_LEN>();
-    let mac = ws_mac(REPEATER_TOKEN.as_bytes(), &server_nonce, &client_nonce, &h.cb);
-    ws.send(WsMessage::Text(
-        serde_json::to_string(&AuthMsg::AuthResponse {
-            client_nonce: hex(&client_nonce),
-            mac: hex(&mac),
-        })
-        .unwrap(),
-    ))
-    .await
-    .unwrap();
+    })
+    .await;
+    assert!(evicted.is_ok(), "the incumbent worker must be disconnected when evicted");
 
-    // Even with valid auth, the repeater rejects the newcomer: the socket closes
-    // without any usable tunnel exchange.
-    let closed = loop {
-        match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
-            Ok(Some(Ok(WsMessage::Close(_))) | None) => break true,
-            Ok(Some(Ok(_))) => continue, // AuthOk may arrive just before the close
-            Ok(Some(Err(_))) => break true,
-            Err(_) => break false,
-        }
-    };
-    assert!(closed, "a second worker must be rejected while one is paired");
+    // The repeater stays paired throughout — now served by the second worker.
+    wait_paired(&r.client_addr, &r.cb).await;
 }

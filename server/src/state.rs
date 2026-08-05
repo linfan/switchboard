@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use switchboard_shared::ServiceInfo;
+use tokio::sync::Notify;
 
 use crate::{agent, auth::ReplayCache, config::Config, store::Store, task::TaskManager};
 
@@ -16,6 +17,12 @@ pub struct AppState {
     pub cert_fp: Vec<u8>,
     /// Single-use REST nonce cache for replay protection.
     pub nonce_cache: ReplayCache,
+    /// Fired to ask the outbound repeater tunnel (worker-repeater-client role) to
+    /// close gracefully — used just before a self-upgrade re-exec so the repeater
+    /// frees its single worker slot immediately, instead of the re-exec'd process
+    /// racing the half-open socket left behind. A no-op for the direct worker and
+    /// repeater roles, which have no such tunnel waiting on it.
+    pub tunnel_shutdown: Arc<Notify>,
 }
 
 pub type SharedState = Arc<AppState>;

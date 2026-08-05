@@ -78,6 +78,11 @@ pub struct Tunnel {
     tx: mpsc::Sender<Vec<u8>>,
     next_stream: AtomicU64,
     routes: StdMutex<HashMap<u64, mpsc::Sender<TunnelFrame>>>,
+    /// Fired when a newer worker evicts this tunnel from the single slot, so its
+    /// session task tears down at once rather than lingering until the idle
+    /// timeout. `notify_one` (not `notify_waiters`) so the signal is not lost if
+    /// it races the session reaching its `.notified()` await.
+    evicted: tokio::sync::Notify,
 }
 
 impl Tunnel {
@@ -434,22 +439,22 @@ async fn install_worker(socket: WebSocket, st: Shared) {
         tx,
         next_stream: AtomicU64::new(1),
         routes: StdMutex::new(HashMap::new()),
+        evicted: tokio::sync::Notify::new(),
     });
 
-    // Atomically claim the slot; a second worker is rejected while one is paired.
-    let occupied = {
+    // Claim the slot with last-writer-wins. A freshly *authenticated* worker is by
+    // definition the current one; any incumbent is stale — e.g. the half-open
+    // socket a self-upgrade re-exec left behind, which the demux/idle path has not
+    // reaped yet. Evict it (signal it to tear down) rather than rejecting the
+    // newcomer, so re-pairing is immediate instead of blocked until the old socket
+    // is noticed or the 45s idle timeout elapses.
+    let previous = {
         let mut slot = st.slot.lock().unwrap();
-        if slot.is_some() {
-            true
-        } else {
-            *slot = Some(tunnel.clone());
-            false
-        }
+        slot.replace(tunnel.clone())
     };
-    if occupied {
-        tracing::warn!("rejecting worker: a tunnel is already paired");
-        let _ = sink.send(Message::Close(None)).await;
-        return;
+    if let Some(old) = previous {
+        tracing::warn!("evicting a previously paired worker in favor of a newer one");
+        old.evicted.notify_one();
     }
     tracing::info!("worker paired");
 
@@ -508,9 +513,15 @@ async fn install_worker(socket: WebSocket, st: Shared) {
     tokio::select! {
         _ = demux => {}
         _ = heartbeat => {}
+        // A newer worker took the slot: stop serving this stale tunnel at once.
+        _ = tunnel.evicted.notified() => {
+            tracing::info!("worker tunnel evicted by a newer worker; tearing down");
+        }
     }
 
-    // Free the slot if it still holds this tunnel, then stop the writer.
+    // Free the slot only if it still holds *this* tunnel. After an eviction the
+    // slot already points at the newer worker, so this `Arc::ptr_eq` guard leaves
+    // it untouched — the incumbent must never clear its successor's slot.
     {
         let mut slot = st.slot.lock().unwrap();
         if slot.as_ref().is_some_and(|t| Arc::ptr_eq(t, &tunnel)) {

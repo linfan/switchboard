@@ -389,7 +389,17 @@ fn apply_upgrade(state: &SharedState, bytes: &[u8]) -> AppResult<Json<Value>> {
 /// logged and the (old) server keeps running.
 fn schedule_restart(state: SharedState) {
     tokio::spawn(async move {
+        // Let the upgrade response flush to the client first. On a repeater-client
+        // that response travels back *through* the tunnel, so this must happen
+        // before we close it.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Gracefully unpair from the repeater (if we're a repeater-client) so its
+        // single worker slot is freed before the re-exec'd process re-dials —
+        // otherwise the newcomer races the half-open socket we'd leave behind. A
+        // no-op for the direct role (nothing waits on this).
+        state.tunnel_shutdown.notify_waiters();
+        // Give the WS Close a moment to flush before we replace the process image.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let inherit = state.tasks.prepare_inherit();
         tracing::info!(inherited = inherit.len(), "self-upgrade: re-exec now");
         if let Err(e) = crate::restart::exec_replacement(inherit) {
