@@ -138,7 +138,22 @@ impl TaskManager {
     /// but we can't stream it), dead/unknown → `Exited { code: None }`. Both are
     /// terminal, so clients stop waiting instead of seeing a stuck Running row.
     pub async fn reconcile_orphans(&self) -> AppResult<()> {
+        // Tasks we just re-adopted across a self-upgrade re-exec are live in
+        // `running`; they must not be reconciled to a terminal state.
+        let adopted = {
+            let running = self.running.lock().unwrap();
+            self.store
+                .list_task_pids()
+                .await?
+                .into_iter()
+                .filter(|(id, _, _)| running.contains_key(id))
+                .map(|(id, _, _)| id)
+                .collect::<HashSet<_>>()
+        };
         for (id, status, pid) in self.store.list_task_pids().await? {
+            if adopted.contains(&id) {
+                continue;
+            }
             if matches!(status, TaskStatus::Starting | TaskStatus::Running) {
                 let alive = pid.map(process_alive).unwrap_or(false);
                 let next = if alive {
@@ -151,6 +166,97 @@ impl TaskManager {
         }
         Ok(())
     }
+
+    /// Snapshot the live PTYs as an inherit-map for a self-upgrade re-exec: each
+    /// running task with a usable master fd + pid becomes an [`InheritEntry`] so
+    /// the replacement process can adopt the same live terminals.
+    #[allow(dead_code)] // called by the upgrade REST handlers in a later part
+    pub fn prepare_inherit(&self) -> Vec<crate::restart::InheritEntry> {
+        let running = self.running.lock().unwrap();
+        running
+            .iter()
+            .filter_map(|(id, handle)| {
+                Some(crate::restart::InheritEntry {
+                    task_id: id.clone(),
+                    fd: handle.master_fd()?,
+                    pid: handle.pid()?,
+                })
+            })
+            .collect()
+    }
+
+    /// Adopt PTYs inherited across a self-upgrade re-exec. Parses
+    /// [`crate::restart::INHERIT_ENV`] (`task_id:fd:pid:cols:rows` entries joined
+    /// by commas), reattaches to each live master fd, rebuilds its authoritative
+    /// screen by replaying the persisted chunk log, keeps the task `Running`, and
+    /// starts pumping. Must run *before* [`reconcile_orphans`] so these ids stay
+    /// live instead of reconciling to `Detached`/`Exited`.
+    #[cfg(unix)]
+    pub async fn adopt_inherited(&self) {
+        let raw = match std::env::var(crate::restart::INHERIT_ENV) {
+            Ok(v) if !v.is_empty() => v,
+            _ => return,
+        };
+        // Don't let the map leak into child processes we spawn later.
+        std::env::remove_var(crate::restart::INHERIT_ENV);
+
+        for entry in raw.split(',').filter(|s| !s.is_empty()) {
+            let parts: Vec<&str> = entry.split(':').collect();
+            if parts.len() != 5 {
+                tracing::warn!(%entry, "malformed inherit entry; skipping");
+                continue;
+            }
+            let task_id = parts[0].to_string();
+            let (fd, pid, cols, rows) = match (
+                parts[1].parse::<i32>(),
+                parts[2].parse::<u32>(),
+                parts[3].parse::<u16>(),
+                parts[4].parse::<u16>(),
+            ) {
+                (Ok(fd), Ok(pid), Ok(cols), Ok(rows)) => (fd, pid, cols, rows),
+                _ => {
+                    tracing::warn!(%entry, "unparseable inherit entry; skipping");
+                    continue;
+                }
+            };
+
+            // The task row must still exist; otherwise the adopted fd has no home.
+            match self.store.get_task(&task_id).await {
+                Ok(Some(_)) => {}
+                _ => {
+                    tracing::warn!(%task_id, "inherited task not in store; skipping");
+                    continue;
+                }
+            }
+
+            let (handle, out_rx) = match pty_proc::adopt_pty(fd, pid, cols, rows) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::warn!(%task_id, error = %e, "failed to adopt inherited pty");
+                    continue;
+                }
+            };
+
+            // Rebuild the authoritative screen from the durable chunk log so
+            // reconnect snapshots match what the terminal showed pre-upgrade.
+            let mut emu = TerminalEmulator::new(cols, rows);
+            if let Ok(chunks) = self.store.chunks_after(&task_id, 0).await {
+                for (_, bytes) in chunks {
+                    emu.process(&bytes);
+                }
+            }
+
+            self.running.lock().unwrap().insert(task_id.clone(), handle);
+            self.terminals.lock().unwrap().insert(task_id.clone(), emu);
+            let _ = self.store.update_status(&task_id, &TaskStatus::Running).await;
+            tracing::info!(%task_id, "adopted inherited pty across self-upgrade");
+            self.spawn_pump(task_id, out_rx);
+        }
+    }
+
+    /// Non-unix has no `execve`-based inheritance; nothing to adopt.
+    #[cfg(not(unix))]
+    pub async fn adopt_inherited(&self) {}
 
     /// Validate the tool, persist the task, open its PTY, and begin pumping raw
     /// output into the store + broadcast.

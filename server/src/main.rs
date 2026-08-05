@@ -12,6 +12,7 @@ mod pty_proc;
 mod repeater;
 #[cfg(test)]
 mod repeater_test;
+mod restart;
 mod state;
 mod store;
 mod task;
@@ -88,6 +89,7 @@ async fn run_worker_repeater_client(config: Config) -> anyhow::Result<()> {
 
     let store = Store::connect(&config.db_path).await?;
     let tasks = TaskManager::new(store.clone());
+    tasks.adopt_inherited().await;
     tasks.reconcile_orphans().await?;
     let state: state::SharedState = Arc::new(AppState {
         config,
@@ -127,6 +129,7 @@ async fn run_worker_direct(config: Config) -> anyhow::Result<()> {
 
     let store = Store::connect(&config.db_path).await?;
     let tasks = TaskManager::new(store.clone());
+    tasks.adopt_inherited().await;
     tasks.reconcile_orphans().await?;
     let state: state::SharedState = Arc::new(AppState {
         config: config.clone(),
