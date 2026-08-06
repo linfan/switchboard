@@ -160,6 +160,14 @@ impl TaskManager {
                 } else {
                     TaskStatus::Exited { code: None }
                 };
+                tracing::info!(
+                    task = %id,
+                    was = ?status,
+                    ?pid,
+                    alive,
+                    now = ?next,
+                    "reconciling orphaned task after a cold restart (not a self-upgrade)"
+                );
                 self.store.update_status(&id, &next).await?;
             }
         }
@@ -171,16 +179,28 @@ impl TaskManager {
     /// the replacement process can adopt the same live terminals.
     pub fn prepare_inherit(&self) -> Vec<crate::restart::InheritEntry> {
         let running = self.running.lock().unwrap();
-        running
-            .iter()
-            .filter_map(|(id, handle)| {
-                Some(crate::restart::InheritEntry {
+        let mut out = Vec::new();
+        for (id, handle) in running.iter() {
+            match (handle.master_fd(), handle.pid()) {
+                (Some(fd), Some(pid)) => out.push(crate::restart::InheritEntry {
                     task_id: id.clone(),
-                    fd: handle.master_fd()?,
-                    pid: handle.pid()?,
-                })
-            })
-            .collect()
+                    fd,
+                    pid,
+                }),
+                (fd, pid) => tracing::warn!(
+                    task = %id,
+                    has_fd = fd.is_some(),
+                    has_pid = pid.is_some(),
+                    "running task not inheritable across self-upgrade; skipping"
+                ),
+            }
+        }
+        tracing::info!(
+            running = running.len(),
+            inheritable = out.len(),
+            "prepared inherit map for self-upgrade"
+        );
+        out
     }
 
     /// Adopt PTYs inherited across a self-upgrade re-exec. Parses
@@ -295,6 +315,7 @@ impl TaskManager {
         let _ = self.events.send(Outbound::Control(ServerMsg::TaskCreated {
             task: info.clone(),
         }));
+        tracing::info!(task = %id, tool = %cmd.tool_id, ?pid, "task created");
 
         self.spawn_pump(id.clone(), out_rx);
         Ok(info)
@@ -344,6 +365,7 @@ impl TaskManager {
             return Err(AppError::NotFound(format!("task {id}")));
         }
         let handle = self.running.lock().unwrap().remove(id);
+        let live = handle.is_some();
         if let Some(handle) = handle {
             self.terminating.lock().unwrap().insert(id.to_string());
             handle.terminate();
@@ -351,6 +373,7 @@ impl TaskManager {
         self.store
             .update_status(id, &TaskStatus::Terminated)
             .await?;
+        tracing::info!(task = %id, live, "task terminated by request");
         let _ = self.events.send(Outbound::Control(ServerMsg::TaskState {
             task_id: id.to_string(),
             status: TaskStatus::Terminated,
@@ -389,6 +412,7 @@ impl TaskManager {
         if !had_handle {
             if let Some(TaskStatus::Detached) = self.store.get_task(id).await?.map(|t| t.status) {
                 if let Some(pid) = self.store.get_pid(id).await? {
+                    tracing::info!(task = %id, %pid, "killing detached orphan on delete");
                     kill_pid(pid);
                 }
             }
@@ -398,6 +422,7 @@ impl TaskManager {
         let _ = self.events.send(Outbound::Control(ServerMsg::TaskDeleted {
             task_id: id.to_string(),
         }));
+        tracing::info!(task = %id, had_handle, "task deleted");
         Ok(())
     }
 
@@ -476,6 +501,7 @@ impl TaskManager {
                         } else {
                             TaskStatus::Exited { code }
                         };
+                        tracing::info!(%task_id, ?code, terminated = was_terminated, "task process exited");
                         let _ = store.update_status(&task_id, &status).await;
                         let _ = events.send(Outbound::Control(ServerMsg::TaskState {
                             task_id: task_id.clone(),

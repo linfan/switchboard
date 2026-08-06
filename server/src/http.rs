@@ -377,8 +377,14 @@ async fn upgrade_from_url(
 /// schedule the in-place re-exec. Returns as soon as the file is swapped; the
 /// re-exec fires shortly after so the HTTP response reaches the client first.
 fn apply_upgrade(state: &SharedState, bytes: &[u8]) -> AppResult<Json<Value>> {
+    tracing::info!(size = bytes.len(), "self-upgrade requested; validating new binary");
     crate::upgrade::validate_binary(bytes)?;
-    crate::upgrade::replace_current_exe(bytes)?;
+    let exe = crate::upgrade::replace_current_exe(bytes)?;
+    tracing::info!(
+        exe = %exe.display(),
+        size = bytes.len(),
+        "self-upgrade: replaced server binary on disk; scheduling re-exec"
+    );
     schedule_restart(state.clone());
     Ok(Json(json!({ "ok": true })))
 }
