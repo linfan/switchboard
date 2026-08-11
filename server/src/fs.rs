@@ -89,11 +89,13 @@ pub fn stat(path: &str) -> AppResult<FsStat> {
             exists: true,
             is_dir: m.is_dir(),
             mtime: mtime_millis(&m),
+            size: if m.is_dir() { 0 } else { m.len() as i64 },
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FsStat {
             exists: false,
             is_dir: false,
             mtime: 0,
+            size: 0,
         }),
         Err(e) => Err(AppError::BadRequest(format!("cannot stat '{path}': {e}"))),
     }
@@ -355,16 +357,19 @@ mod tests {
         let sub = dir.path().join("sub");
         fs::create_dir(&sub).unwrap();
         let file = dir.path().join("f.txt");
-        fs::write(&file, b"x").unwrap();
+        fs::write(&file, b"hello").unwrap();
 
         let d = stat(sub.to_str().unwrap()).unwrap();
         assert!(d.exists && d.is_dir);
+        assert_eq!(d.size, 0);
 
         let f = stat(file.to_str().unwrap()).unwrap();
         assert!(f.exists && !f.is_dir);
+        assert_eq!(f.size, 5);
 
         let missing = stat(dir.path().join("nope").to_str().unwrap()).unwrap();
         assert!(!missing.exists && !missing.is_dir);
+        assert_eq!(missing.size, 0);
 
         assert!(stat("   ").is_err());
     }

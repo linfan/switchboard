@@ -20,4 +20,10 @@ is_dir: boolean,
  * platform can't report one. The editor polls this to detect out-of-app
  * changes to an open file.
  */
-mtime: number, };
+mtime: number, 
+/**
+ * Size in bytes; `0` for directories and missing paths. The editor checks
+ * this before fetching a media file, so an oversize one is never
+ * transferred at all.
+ */
+size: number, };

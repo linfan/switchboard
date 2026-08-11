@@ -1074,3 +1074,22 @@ body {
 .weditor__cm .cm-mergeViewEditor {
   min-width: 0;
 }
+/* Media preview: centre the element in the pane and scroll if it overflows. */
+.weditor__mediawrap {
+  height: 100%;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  box-sizing: border-box;
+}
+.weditor__media {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+/* Audio has no intrinsic size, so give the transport bar a usable width. */
+audio.weditor__media {
+  width: min(480px, 100%);
+}

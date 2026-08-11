@@ -100,8 +100,21 @@ pub fn run() {
             net::ws_close,
             net::download_file,
             net::upload_file,
+            net::cache_media,
+            net::drop_cached_media,
             frontend_log
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        // Media previews are cached on disk and released when their tab closes;
+        // sweeping at both ends bounds the cache if a crash skipped the release.
+        .setup(|app| {
+            net::sweep_preview_dir(app.handle());
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                net::sweep_preview_dir(app);
+            }
+        });
 }

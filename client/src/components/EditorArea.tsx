@@ -14,7 +14,14 @@ import { html } from "@codemirror/lang-html";
 import { css } from "@codemirror/lang-css";
 
 import * as editors from "../net/editors";
+import {
+  formatBytes,
+  MAX_PREVIEW_BYTES,
+  mediaForPath,
+  type MediaKind,
+} from "../net/media";
 import { gitFileDiff, readFile, statPath, writeFile } from "../net/rest";
+import { openPreview } from "../net/transfer";
 import { tabKey, type DiffLayout, type OpenFile } from "../store/types";
 import { ContextMenu } from "./Menu";
 
@@ -56,13 +63,28 @@ function basename(path: string): string {
   return path.split("/").pop() || path;
 }
 
-type Status = "loading" | "ready" | "binary" | "error";
+type Status = "loading" | "ready" | "binary" | "oversize" | "error";
 
 /** A built diff view (inline `EditorView` or split `MergeView`), normalized. */
 interface BuiltDiff {
   dom: HTMLElement;
   destroy: () => void;
   measure: () => void;
+}
+
+/** The element that previews each media kind, with controls where they apply. */
+function mediaElement(kind: MediaKind, src: string): HTMLElement {
+  if (kind === "image") {
+    const img = document.createElement("img");
+    img.className = "weditor__media";
+    img.src = src;
+    return img;
+  }
+  const el = document.createElement(kind === "audio" ? "audio" : "video");
+  el.className = "weditor__media";
+  el.controls = true;
+  el.src = src;
+  return el;
 }
 
 /**
@@ -108,6 +130,8 @@ export function EditorArea({
   const hostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<Status>("loading");
   const [error, setError] = useState<string | null>(null);
+  // Why a media file wasn't previewed (status `oversize`).
+  const [oversizeNote, setOversizeNote] = useState<string | null>(null);
   // Per-tab dirty flags, mirrored from the registry so the tab bar re-renders.
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
   // Per-tab "changed on disk" flags, mirrored from the registry so the notice
@@ -134,6 +158,8 @@ export function EditorArea({
   const mode = active?.mode;
   const commit = active?.commit;
   const key = active ? tabKey(active) : undefined;
+  // Image/audio/video tree files preview instead of loading into CodeMirror.
+  const media = mode === "edit" && path ? mediaForPath(path) : null;
 
   const markDirty = (k: string, d: boolean) => {
     editors.setDirty(workspaceId, k, d);
@@ -201,6 +227,7 @@ export function EditorArea({
     let cancelled = false;
     let attachedDom: HTMLElement | null = null;
     setError(null);
+    setOversizeNote(null);
 
     const attach = (dom: HTMLElement, measure?: () => void, focus?: EditorView) => {
       host.appendChild(dom);
@@ -336,6 +363,54 @@ export function EditorArea({
           setStatus("error");
         });
       }
+    } else if (media) {
+      if (existing) {
+        // Already fetched — re-parent the live element, so playback continues
+        // from where it was and the cached bytes aren't downloaded twice.
+        setStatus("ready");
+        attach(existing.dom);
+      } else {
+        setStatus("loading");
+        const load = async () => {
+          // Stat first: an oversize file is never transferred at all.
+          const st = await statPath(service, path);
+          if (cancelled) return;
+          const cap = MAX_PREVIEW_BYTES[media.kind];
+          if (st.size > cap) {
+            setOversizeNote(
+              `This ${media.kind} is ${formatBytes(st.size)} — too large to preview (limit ${formatBytes(cap)}).`,
+            );
+            setStatus("oversize");
+            return;
+          }
+          const preview = await openPreview(service, path, media.ext, st.mtime);
+          if (cancelled) {
+            preview.release(); // tab closed mid-fetch: don't leak the cache file
+            return;
+          }
+          const wrap = document.createElement("div");
+          wrap.className = "weditor__mediawrap";
+          const el = mediaElement(media.kind, preview.url);
+          wrap.appendChild(el);
+          editors.setMediaView(workspaceId, key, {
+            dom: wrap,
+            destroy: () => {
+              // Drop the source before releasing it, so nothing is still
+              // streaming from the file we're about to delete.
+              el.removeAttribute("src");
+              if (el instanceof HTMLMediaElement) el.load();
+              preview.release();
+            },
+          });
+          attach(wrap);
+          setStatus("ready");
+        };
+        load().catch((e: unknown) => {
+          if (cancelled) return;
+          setError(e instanceof Error ? e.message : String(e));
+          setStatus("error");
+        });
+      }
     } else if (existing?.editor) {
       // Editable tab already built — re-parent, preserving edits/scroll.
       const view = existing.editor;
@@ -378,8 +453,9 @@ export function EditorArea({
   // on window focus (when outside edits most likely happened). The interval is
   // cleared on tab switch/close/unmount, so no polling ever outlives an open
   // file; a stat resolving after close finds no registry entry and is dropped.
+  // Media previews are snapshots of the bytes at open time, so they aren't polled.
   useEffect(() => {
-    if (!key || !path || mode !== "edit" || status !== "ready") return;
+    if (!key || !path || mode !== "edit" || media || status !== "ready") return;
 
     let cancelled = false;
     let inFlight = false;
@@ -608,7 +684,7 @@ export function EditorArea({
             Open in editor
           </button>
         )}
-        {mode === "edit" && key && (
+        {mode === "edit" && key && !media && (
           <button
             className="btn weditor__save"
             disabled={!isDirty(key)}
@@ -647,6 +723,9 @@ export function EditorArea({
       {error && <p className="hint hint--error">{error}</p>}
       {status === "binary" && (
         <p className="hint">This file is binary or too large to display.</p>
+      )}
+      {status === "oversize" && oversizeNote && (
+        <p className="hint">{oversizeNote}</p>
       )}
       {/* Editor mounts here; hidden (not unmounted) on binary/error states. */}
       <div

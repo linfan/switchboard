@@ -18,6 +18,7 @@
 //! frames, and reports captured fingerprints back for TOFU.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -30,7 +31,8 @@ use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use serde::Serialize;
 use switchboard_shared::auth::{ct_eq, from_hex, hex, sha256};
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::protocol::Message, Connector};
 
@@ -259,6 +261,112 @@ pub async fn download_file(
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+    .await)
+}
+
+/// Where downloaded media previews live: `<app cache dir>/preview`. One file per
+/// open preview tab, named by the frontend's cache key.
+fn preview_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("preview"))
+}
+
+/// Delete every cached media preview. Run at startup and exit so a crash (or a
+/// kill that skips the per-tab release) can't leak files indefinitely.
+pub fn sweep_preview_dir(app: &AppHandle) {
+    let dir = match preview_dir(app) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot locate media preview cache");
+            return;
+        }
+    };
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => tracing::info!(dir = %dir.display(), "swept media preview cache"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(dir = %dir.display(), error = %e, "cannot sweep media preview cache"),
+    }
+}
+
+/// Restrict a frontend-supplied cache file name component to ASCII alphanumerics,
+/// so neither half can carry a separator or `..` out of the preview directory.
+fn is_name_safe(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Download the media file at `url` into the preview cache as `<key>.<ext>` and
+/// return its local path, which the frontend hands to `convertFileSrc` to stream
+/// over `asset:`. The bytes go straight to disk (never buffered whole in memory),
+/// and the file is allowed on the asset-protocol scope so the webview may read it.
+#[tauri::command]
+pub async fn cache_media(
+    app: AppHandle,
+    url: String,
+    headers: Vec<(String, String)>,
+    pin: Option<String>,
+    key: String,
+    ext: String,
+) -> Result<String, String> {
+    log_err("cache_media", async {
+        if !is_name_safe(&key) || !is_name_safe(&ext) {
+            return Err(format!("invalid preview cache name: {key}.{ext}"));
+        }
+        let dir = preview_dir(&app)?;
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| e.to_string())?;
+        let dest = dir.join(format!("{key}.{ext}"));
+
+        let (client, _) = reqwest_client(pin)?;
+        let resp = apply_headers(client.get(&url), &headers)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(error_message(status, &body));
+        }
+
+        let mut file = tokio::fs::File::create(&dest)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| e.to_string())?;
+            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        }
+        file.flush().await.map_err(|e| e.to_string())?;
+
+        app.asset_protocol_scope()
+            .allow_file(&dest)
+            .map_err(|e| e.to_string())?;
+        Ok(dest.to_string_lossy().into_owned())
+    }
+    .await)
+}
+
+/// Delete one cached preview once its tab closed. Anything outside the preview
+/// directory is refused, so a stray call can't remove arbitrary files. The asset
+/// scope keeps its (now dangling) entry deliberately: `forbid_file` would also
+/// block re-allowing the same path if the very same file is previewed again.
+#[tauri::command]
+pub async fn drop_cached_media(app: AppHandle, path: String) -> Result<(), String> {
+    log_err("drop_cached_media", async {
+        let dir = preview_dir(&app)?;
+        let file = PathBuf::from(&path);
+        if file.parent() != Some(dir.as_path()) {
+            return Err(format!("not a cached preview: {path}"));
+        }
+        match tokio::fs::remove_file(&file).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
     }
     .await)
 }

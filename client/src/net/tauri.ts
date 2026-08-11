@@ -15,3 +15,13 @@ export async function invoke<T>(
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(cmd, args);
 }
+
+/**
+ * Turn a local file path into an `asset:` URL the webview can load — used for
+ * media previews, which stream from a cache file on disk. The path must have been
+ * allowed on the asset-protocol scope first (see the `cache_media` command).
+ */
+export async function assetUrl(path: string): Promise<string> {
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  return convertFileSrc(path);
+}

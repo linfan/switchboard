@@ -5,7 +5,9 @@
 //!
 //! One view is kept per open tab, keyed by `workspaceId` + the tab's `tabKey`.
 //! An editable file (or an inline diff) is a single `EditorView`; a side-by-side
-//! diff is a `@codemirror/merge` `MergeView`. `EditorArea` re-parents the active
+//! diff is a `@codemirror/merge` `MergeView`; a media file is a plain media
+//! element, so switching tabs doesn't refetch it or restart playback.
+//! `EditorArea` re-parents the active
 //! tab's DOM into the visible pane; inactive tabs' views stay alive (detached) so
 //! returning to them is instant and lossless. Closing a tab (or removing the
 //! workspace) destroys the corresponding view(s).
@@ -107,6 +109,25 @@ export function setDiffView(
     measure: v.measure,
     layout: v.layout,
     diff: v.diff,
+    dirty: false,
+  });
+}
+
+/**
+ * Register a media preview for a tab: `dom` is the wrapper around the
+ * `<img>`/`<audio>`/`<video>` element, and `destroy` releases the preview's
+ * backing cache file (or object URL). Because teardown runs through the same
+ * `destroy` path as an editor view, closing the tab — or removing the workspace —
+ * already frees the cached bytes.
+ */
+export function setMediaView(
+  workspaceId: string,
+  tabKey: string,
+  v: { dom: HTMLElement; destroy: () => void },
+): void {
+  entries.set(mapKey(workspaceId, tabKey), {
+    dom: v.dom,
+    destroy: v.destroy,
     dirty: false,
   });
 }

@@ -66,6 +66,11 @@ pub struct FsStat {
     /// changes to an open file.
     #[ts(type = "number")]
     pub mtime: i64,
+    /// Size in bytes; `0` for directories and missing paths. The editor checks
+    /// this before fetching a media file, so an oversize one is never
+    /// transferred at all.
+    #[ts(type = "number")]
+    pub size: i64,
 }
 
 /// Contents of a file on the hosting machine (REST `GET /api/file`), for the
