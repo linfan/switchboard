@@ -10,7 +10,6 @@ import {
   type Service,
   type Workspace,
 } from "../store/types";
-import { AboutDialog } from "./AboutDialog";
 import { AddServiceDialog } from "./AddServiceDialog";
 import { AddWorkspaceDialog } from "./AddWorkspaceDialog";
 import { CreateWorktreeDialog } from "./CreateWorktreeDialog";
@@ -66,7 +65,6 @@ export function Sidebar() {
   const services = useStore((s) => s.services);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   const [addServiceOpen, setAddServiceOpen] = useState(false);
-  const [aboutOpen, setAboutOpen] = useState(false);
 
   return (
     <aside className="sidebar">
@@ -80,14 +78,6 @@ export function Sidebar() {
         </button>
         <span className="sidebar__title">Switchboard</span>
         <div className="sidebar__actions">
-          <button
-            className="icon-btn"
-            title="About Switchboard"
-            aria-label="About Switchboard"
-            onClick={() => setAboutOpen(true)}
-          >
-            ⓘ
-          </button>
           <button
             className="icon-btn"
             title="Add service"
@@ -109,7 +99,6 @@ export function Sidebar() {
       {addServiceOpen && (
         <AddServiceDialog onClose={() => setAddServiceOpen(false)} />
       )}
-      {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
     </aside>
   );
 }
