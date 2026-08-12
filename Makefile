@@ -113,6 +113,23 @@ lint: ## Lint Rust (clippy) + client
 	$(CARGO) clippy --all-targets -- -D warnings
 	cd client && $(NPM) run lint --if-present
 
+# ---------------------------------------------------------------- release
+.PHONY: set-version
+set-version: ## Align every component to one version: make set-version VERSION=x.y.z
+	@test -n "$(VERSION)" || { echo "usage: make set-version VERSION=x.y.z"; exit 1; }
+	@echo "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+.-][0-9A-Za-z.+.-]*)?$$' \
+	  || { echo "error: '$(VERSION)' is not valid semver"; exit 1; }
+	@# Rust workspace (server + shared crates) + root Cargo.lock
+	sed -i '' '/^\[workspace\.package\]/,/^edition/s/^version = ".*"/version = "$(VERSION)"/' Cargo.toml
+	$(CARGO) metadata --format-version=1 >/dev/null
+	@# Desktop client: package.json + package-lock.json
+	cd client && $(NPM) version $(VERSION) --no-git-tag-version --allow-same-version --silent >/dev/null
+	@# Tauri bundle version + shell crate + its Cargo.lock
+	sed -i '' 's/"version": "[^"]*"/"version": "$(VERSION)"/' client/src-tauri/tauri.conf.json
+	sed -i '' 's/^version = ".*"/version = "$(VERSION)"/' client/src-tauri/Cargo.toml
+	cd client/src-tauri && $(CARGO) metadata --format-version=1 >/dev/null
+	@echo "All components set to $(VERSION) — review with: git diff"
+
 # ---------------------------------------------------------------- deploy
 .PHONY: package-server package-server-linux package-client clean distclean
 package-server: build-server ## Produce a self-contained server release artifact
