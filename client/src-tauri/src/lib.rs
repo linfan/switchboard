@@ -85,22 +85,31 @@ fn install_panic_hook() {
     }));
 }
 
-/// Hand the system's standard About panel our build provenance, so
-/// **Switchboard ▸ About Switchboard** answers *which* build this window is
-/// running — useful when a dev build and an installed one are both around.
+/// Tauri's stock menu, minus the two submenus that earn nothing here, plus our
+/// build provenance in the About panel.
 ///
-/// macOS renders `version` as "Version x.y.z", `short_version` in parentheses
-/// after it, and `credits` as the block underneath; the panel ignores the
-/// `comments`/`authors`/`license`/`website` fields, so the stamps go in
-/// `credits`. `Menu::default` puts the app submenu first with About as its first
-/// item, so only that slot is swapped — the Edit/View/Window submenus (and their
-/// accelerators, which the webview needs for copy/paste) stay exactly as Tauri
-/// builds them.
+/// Dropped from the menu bar: **File**, whose only item (Close Window) the
+/// Window submenu already carries, and **Edit**, which holds no app command —
+/// every editing action in the UI is either a webview default or a CodeMirror
+/// keymap. Edit's items are not deleted, though: on macOS a key equivalent only
+/// fires if some menu item declares it, so ⌘C/⌘V/⌘X/⌘Z/⌘A would go dead in the
+/// editor and terminal panes. They live on as a submenu of the app menu, where
+/// `performKeyEquivalent` still walks them but the menu bar stays clean.
+///
+/// The About panel answers *which* build this window is running — useful when a
+/// dev build and an installed one are both around. macOS renders `version` as
+/// "Version x.y.z", `short_version` in parentheses after it, and `credits` as
+/// the block underneath; it ignores the `comments`/`authors`/`license`/`website`
+/// fields, so the build time goes in `credits`.
+///
+/// Window and Help keep Tauri's well-known submenu ids — `init_app_menu` looks
+/// them up by id to hand them to `NSApp` as the windows and help menus.
 #[cfg(target_os = "macos")]
 fn app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{AboutMetadata, Menu, MenuItemKind, PredefinedMenuItem};
+    use tauri::menu::{
+        AboutMetadata, Menu, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
+    };
 
-    let menu = Menu::default(app)?;
     let pkg = app.package_info();
     let metadata = AboutMetadata {
         name: Some(pkg.name.clone()),
@@ -109,16 +118,61 @@ fn app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wr
         credits: Some(format!("Built {BUILD_TIME}")),
         ..Default::default()
     };
-    match menu.items()?.first() {
-        Some(MenuItemKind::Submenu(app_submenu)) => {
-            app_submenu.remove_at(0)?;
-            app_submenu.insert(&PredefinedMenuItem::about(app, None, Some(metadata))?, 0)?;
-        }
-        // Defaults changed shape under us: keep the stock menu rather than
-        // mangling it, and leave a breadcrumb for whoever bumps tauri.
-        _ => tracing::warn!("unexpected default menu layout; About panel not stamped"),
-    }
-    Ok(menu)
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    Menu::with_items(
+        app,
+        &[
+            &Submenu::with_items(
+                app,
+                pkg.name.clone(),
+                true,
+                &[
+                    &PredefinedMenuItem::about(app, None, Some(metadata))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::hide(app, None)?,
+                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &edit_menu,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::quit(app, None)?,
+                ],
+            )?,
+            &Submenu::with_items(
+                app,
+                "View",
+                true,
+                &[&PredefinedMenuItem::fullscreen(app, None)?],
+            )?,
+            &Submenu::with_id_and_items(
+                app,
+                WINDOW_SUBMENU_ID,
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(app, None)?,
+                    &PredefinedMenuItem::maximize(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::close_window(app, None)?,
+                ],
+            )?,
+            &Submenu::with_id_and_items(app, HELP_SUBMENU_ID, "Help", true, &[])?,
+        ],
+    )
 }
 
 /// Record a message emitted by the frontend (uncaught errors, rejected promises,
@@ -136,8 +190,12 @@ fn frontend_log(level: String, message: String) {
 pub fn run() {
     init_logging();
     let builder = tauri::Builder::default();
-    // Other platforms keep Tauri's stock menu (their About panels don't render
-    // the build stamp anyway — see `app_menu`).
+    // macOS only, and deliberately: a menu bar is part of the platform there, so
+    // the app needs one. Windows and Linux draw the menu inside the window, where
+    // this app wants none — and leaving the menu unset is all it takes to get
+    // that, since Tauri's stock-menu fallback for an unset menu is itself
+    // macOS-only. Their windows come up bare; the webview handles the clipboard
+    // shortcuts on both.
     #[cfg(target_os = "macos")]
     let builder = builder.menu(app_menu);
     builder
