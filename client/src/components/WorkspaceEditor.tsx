@@ -300,6 +300,8 @@ interface TreeActions {
   service: ServiceRef;
   expanded: string[];
   activePath?: string;
+  /** Path the open context menu acts on, highlighted so the target is obvious. */
+  contextPath: string | null;
   refreshKey: number;
   /** Lower-cased name filter; empty string means no filtering. */
   filter: string;
@@ -464,6 +466,7 @@ function FileTree({
     service,
     expanded,
     activePath,
+    contextPath: ctxMenu && !ctxMenu.isRoot ? ctxMenu.entry.path : null,
     refreshKey,
     filter: normFilter,
     visibleDirs,
@@ -525,7 +528,7 @@ function FileTree({
 
   return (
     <div
-      className="weditor__tree"
+      className={`weditor__tree ${ctxMenu?.isRoot ? "is-context" : ""}`}
       onContextMenu={(e) => {
         // Right-click on the tree background targets the workspace root.
         e.preventDefault();
@@ -625,7 +628,9 @@ function DirNode({
         <div
           role="button"
           tabIndex={0}
-          className="weditor__row weditor__row--dir"
+          className={`weditor__row weditor__row--dir ${
+            actions.contextPath === path ? "is-context" : ""
+          }`}
           style={indent}
           title={name}
           onClick={() => {
@@ -709,7 +714,7 @@ function DirNode({
               tabIndex={0}
               className={`weditor__row weditor__row--file ${
                 actions.activePath === e.path ? "is-active" : ""
-              }`}
+              } ${actions.contextPath === e.path ? "is-context" : ""}`}
               style={{ paddingLeft: `${(depth + 1) * 12 + 8}px` }}
               title={e.name}
               onClick={() => {

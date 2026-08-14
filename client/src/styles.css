@@ -791,6 +791,10 @@ body {
 .weditor__tree {
   min-height: 100%;
 }
+/* Background right-click targets the workspace root: outline the whole tree. */
+.weditor__tree.is-context {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
 
 /* Name filter above the tree rows. */
 .weditor__filter {
@@ -851,6 +855,11 @@ body {
 }
 .weditor__row.is-active {
   background: rgba(76, 139, 245, 0.16);
+}
+/* The row an open context menu will act on. */
+.weditor__row.is-context {
+  background: rgba(76, 139, 245, 0.24);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 .weditor__row--hint {
   color: var(--fg-dim);
