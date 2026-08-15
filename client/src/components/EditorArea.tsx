@@ -70,6 +70,7 @@ interface BuiltDiff {
   dom: HTMLElement;
   destroy: () => void;
   measure: () => void;
+  views: EditorView[];
 }
 
 /** The element that previews each media kind, with controls where they apply. */
@@ -236,6 +237,9 @@ export function EditorArea({
         if (cancelled) return;
         measure?.();
         if (mode === "edit") focus?.focus();
+        // After focus(), which scrolls the caret into view and would otherwise
+        // override the position the tab was left at.
+        editors.restoreScroll(workspaceId, key);
       });
     };
 
@@ -289,6 +293,7 @@ export function EditorArea({
             mv.a.requestMeasure();
             mv.b.requestMeasure();
           },
+          views: [mv.a, mv.b],
         };
       }
 
@@ -313,6 +318,7 @@ export function EditorArea({
         dom: view.dom,
         destroy: () => view.destroy(),
         measure: () => view.requestMeasure(),
+        views: [view],
       };
     };
 
@@ -321,6 +327,7 @@ export function EditorArea({
         dom: built.dom,
         destroy: built.destroy,
         measure: built.measure,
+        views: built.views,
         layout: diffLayout,
         diff,
       });
@@ -441,6 +448,7 @@ export function EditorArea({
       cancelled = true;
       // Detach (but don't destroy) so the view survives a tab/workspace switch.
       if (attachedDom && attachedDom.parentElement === host) {
+        editors.saveScroll(workspaceId, key);
         host.removeChild(attachedDom);
       }
     };

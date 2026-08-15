@@ -23,6 +23,15 @@ interface Entry {
   destroy: () => void;
   /** The editable CodeMirror view — present for edit tabs (save/dirty use it). */
   editor?: EditorView;
+  /** Every CodeMirror view this entry owns: one, or two for a split diff. */
+  views: EditorView[];
+  /**
+   * Scroll positions captured on detach, one per entry in `views`. Detaching a
+   * node resets its scroll offsets, and CodeMirror keeps the scroll position in
+   * the DOM rather than in editor state, so it has to be carried across a
+   * re-parent by hand.
+   */
+  scroll?: ReturnType<EditorView["scrollSnapshot"]>[];
   /** Re-measure the view(s) after re-parenting (CM needs this post-detach). */
   measure?: () => void;
   /** For diff tabs: which layout the live view was built in. */
@@ -82,6 +91,7 @@ export function setView(
     dom: view.dom,
     destroy: () => view.destroy(),
     editor: view,
+    views: [view],
     dirty: false,
     mtime,
   });
@@ -99,6 +109,7 @@ export function setDiffView(
     dom: HTMLElement;
     destroy: () => void;
     measure: () => void;
+    views: EditorView[];
     layout: DiffLayout;
     diff: { oldText: string; newText: string };
   },
@@ -106,6 +117,7 @@ export function setDiffView(
   entries.set(mapKey(workspaceId, tabKey), {
     dom: v.dom,
     destroy: v.destroy,
+    views: v.views,
     measure: v.measure,
     layout: v.layout,
     diff: v.diff,
@@ -128,8 +140,30 @@ export function setMediaView(
   entries.set(mapKey(workspaceId, tabKey), {
     dom: v.dom,
     destroy: v.destroy,
+    views: [],
     dirty: false,
   });
+}
+
+/**
+ * Remember where each of a tab's views is scrolled, just before its DOM leaves
+ * the pane, so `restoreScroll` can put it back when the tab is next activated.
+ */
+export function saveScroll(workspaceId: string, tabKey: string): void {
+  const e = entries.get(mapKey(workspaceId, tabKey));
+  if (!e) return;
+  e.scroll = e.views.map((v) => v.scrollSnapshot());
+}
+
+/** Re-apply the offsets from `saveScroll`, once the DOM is back in the pane. */
+export function restoreScroll(workspaceId: string, tabKey: string): void {
+  const e = entries.get(mapKey(workspaceId, tabKey));
+  const snapshots = e?.scroll;
+  if (!e || !snapshots) return;
+  e.views.forEach((v, i) => {
+    if (snapshots[i]) v.dispatch({ effects: snapshots[i] });
+  });
+  e.scroll = undefined;
 }
 
 export function setDirty(
