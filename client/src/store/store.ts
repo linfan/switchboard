@@ -11,6 +11,7 @@ import {
   type OpenFile,
   type Service,
   type ServiceRuntime,
+  type Transfer,
   type Workspace,
   type WorkspaceEditorState,
 } from "./types";
@@ -65,6 +66,12 @@ export interface AppState {
   editorState: Record<string, WorkspaceEditorState>;
   /** Last task-creation error surfaced by the server (in-memory, transient). */
   createError?: string;
+  /**
+   * File transfers in flight, in start order (in-memory, transient). Kept in the
+   * store rather than in the Files panel so switching workspace or focusing a
+   * terminal mid-transfer doesn't lose track of one.
+   */
+  transfers: Transfer[];
 
   // --- service management -------------------------------------------------
   addService: (svc: Omit<Service, "id"> & { id?: string }) => string;
@@ -75,6 +82,14 @@ export interface AppState {
   addRecentTool: (serviceId: string, cmd: string) => void;
   /** Clear the transient task-creation error. */
   clearCreateError: () => void;
+
+  // --- file transfers -------------------------------------------------------
+  /** Add a transfer row (a download or upload has just begun). */
+  startTransfer: (t: Transfer) => void;
+  /** Advance a transfer's byte counts; ignored once it has ended. */
+  progressTransfer: (id: number, done: number, total?: number) => void;
+  /** Drop a transfer row — it completed, failed, or was cancelled. */
+  endTransfer: (id: number) => void;
 
   // --- workspace management -----------------------------------------------
   addWorkspace: (ws: Omit<Workspace, "id"> & { id?: string }) => string;
@@ -162,6 +177,7 @@ export const useStore = create<AppState>()(
       selectedWorkspaceId: undefined,
       editorState: {},
       createError: undefined,
+      transfers: [],
 
       addService: (svc) => {
         const id = svc.id ?? newId();
@@ -244,6 +260,18 @@ export const useStore = create<AppState>()(
         }),
 
       clearCreateError: () => set({ createError: undefined }),
+
+      startTransfer: (t) => set((s) => ({ transfers: [...s.transfers, t] })),
+
+      progressTransfer: (id, done, total) =>
+        set((s) => ({
+          transfers: s.transfers.map((t) =>
+            t.id === id ? { ...t, done, total: total ?? t.total } : t,
+          ),
+        })),
+
+      endTransfer: (id) =>
+        set((s) => ({ transfers: s.transfers.filter((t) => t.id !== id) })),
 
       addWorkspace: (ws) => {
         const id = ws.id ?? newId();

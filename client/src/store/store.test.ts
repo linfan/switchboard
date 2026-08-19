@@ -24,6 +24,7 @@ beforeEach(() => {
     selectedWorkspaceId: undefined,
     editorState: {},
     createError: undefined,
+    transfers: [],
   });
 });
 
@@ -521,5 +522,47 @@ describe("workspace editor selection", () => {
     const s = useStore.getState();
     expect(s.editorState[ws]).toBeUndefined();
     expect(s.selectedWorkspaceId).toBeUndefined();
+  });
+});
+
+describe("file transfers", () => {
+  it("tracks a transfer from start through progress to end", () => {
+    const st = useStore.getState();
+    st.startTransfer({
+      id: 1,
+      kind: "download",
+      workspaceId: "w1",
+      name: "big.bin",
+      done: 0,
+    });
+    st.startTransfer({
+      id: 2,
+      kind: "upload",
+      workspaceId: "w2",
+      name: "up.bin",
+      done: 0,
+      total: 50,
+    });
+
+    // A first tick can supply the total the start didn't know yet.
+    useStore.getState().progressTransfer(1, 25, 100);
+    expect(useStore.getState().transfers).toEqual([
+      { id: 1, kind: "download", workspaceId: "w1", name: "big.bin", done: 25, total: 100 },
+      { id: 2, kind: "upload", workspaceId: "w2", name: "up.bin", done: 0, total: 50 },
+    ]);
+
+    // A later tick without a total keeps the known one.
+    useStore.getState().progressTransfer(1, 60);
+    expect(useStore.getState().transfers[0]).toMatchObject({ done: 60, total: 100 });
+
+    useStore.getState().endTransfer(1);
+    expect(useStore.getState().transfers.map((t) => t.id)).toEqual([2]);
+  });
+
+  it("ignores progress and end for an unknown transfer", () => {
+    const st = useStore.getState();
+    st.progressTransfer(99, 10, 20);
+    st.endTransfer(99);
+    expect(useStore.getState().transfers).toEqual([]);
   });
 });

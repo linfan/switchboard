@@ -39,7 +39,12 @@ fn init_logging() {
             max_files: 3,
         };
         log_file::RollingWriter::new(&cfg)
-            .map_err(|e| eprintln!("switchboard: failed to open log file {}: {e}", cfg.path.display()))
+            .map_err(|e| {
+                eprintln!(
+                    "switchboard: failed to open log file {}: {e}",
+                    cfg.path.display()
+                )
+            })
             .ok()
             .map(|w| (w, cfg.path))
     });
@@ -59,7 +64,9 @@ fn init_logging() {
             );
         }
         None => {
-            tracing_subscriber::fmt().with_env_filter(env_filter()).init();
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter())
+                .init();
         }
     }
     install_panic_hook();
@@ -202,6 +209,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .manage(net::new_state())
+        .manage(net::new_transfer_state())
         .invoke_handler(tauri::generate_handler![
             net::http_request,
             net::hash_file,
@@ -210,6 +218,7 @@ pub fn run() {
             net::ws_close,
             net::download_file,
             net::upload_file,
+            net::cancel_transfer,
             net::cache_media,
             net::drop_cached_media,
             frontend_log

@@ -19,20 +19,23 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::{ring, verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms};
+use rustls::crypto::{
+    ring, verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms,
+};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use serde::Serialize;
 use switchboard_shared::auth::{ct_eq, from_hex, hex, sha256};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager, State};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::protocol::Message, Connector};
 
@@ -47,6 +50,108 @@ pub type WsState = Arc<WsInner>;
 
 pub fn new_state() -> WsState {
     Arc::new(WsInner::default())
+}
+
+/// Cancel flags for in-flight byte transfers, keyed by the id the frontend
+/// allocated for them. The id comes from the frontend because a transfer's own
+/// `invoke` only resolves when it is over — a cancel has to reach us while that
+/// call is still pending.
+#[derive(Default)]
+pub struct TransferInner {
+    flags: Mutex<HashMap<u64, Arc<AtomicBool>>>,
+}
+
+pub type TransferState = Arc<TransferInner>;
+
+pub fn new_transfer_state() -> TransferState {
+    Arc::new(TransferInner::default())
+}
+
+impl TransferInner {
+    /// The flag a transfer polls, creating it if this is the first mention of
+    /// `id`. A `cancel_transfer` that arrives before the transfer registers
+    /// inserts an already-set flag, which the transfer then observes at once.
+    fn flag(&self, id: u64) -> Arc<AtomicBool> {
+        self.flags.lock().unwrap().entry(id).or_default().clone()
+    }
+
+    fn forget(&self, id: u64) {
+        self.flags.lock().unwrap().remove(&id);
+    }
+}
+
+/// Ask the transfer with this id to stop. Its streaming loop notices between
+/// chunks and unwinds; the command then reports cancellation rather than an error.
+#[tauri::command]
+pub async fn cancel_transfer(state: State<'_, TransferState>, id: u64) -> Result<(), String> {
+    state.flag(id).store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// One progress tick for a byte transfer. `total` is absent when the size isn't
+/// known up front (a download whose response carried no `Content-Length`).
+#[derive(Serialize)]
+pub struct Progress {
+    done: u64,
+    total: Option<u64>,
+}
+
+/// Pushes {@link Progress} to the frontend, coalescing ticks so a fast transfer
+/// can't flood the webview with a render per chunk: after the opening tick only a
+/// whole-percent change or `MIN_GAP` of silence sends another. The final tick is
+/// always sent so the bar lands exactly on 100%.
+struct ProgressEmitter {
+    channel: Channel<Progress>,
+    total: Option<u64>,
+    done: u64,
+    sent_at: Instant,
+    sent_pct: Option<u64>,
+}
+
+impl ProgressEmitter {
+    const MIN_GAP: Duration = Duration::from_millis(100);
+
+    fn new(channel: Channel<Progress>, total: Option<u64>) -> Self {
+        let mut me = Self {
+            channel,
+            total,
+            done: 0,
+            sent_at: Instant::now(),
+            sent_pct: None,
+        };
+        me.send();
+        me
+    }
+
+    fn advance(&mut self, bytes: u64) {
+        self.done += bytes;
+        let pct = self.percent();
+        if pct != self.sent_pct || self.sent_at.elapsed() >= Self::MIN_GAP {
+            self.send();
+        }
+    }
+
+    /// Report the transfer as complete, so the frontend never leaves a bar shy of
+    /// its total because the last tick was coalesced away.
+    fn finish(&mut self) {
+        self.send();
+    }
+
+    fn percent(&self) -> Option<u64> {
+        match self.total {
+            Some(t) if t > 0 => Some(self.done * 100 / t),
+            _ => None,
+        }
+    }
+
+    fn send(&mut self) {
+        let _ = self.channel.send(Progress {
+            done: self.done,
+            total: self.total,
+        });
+        self.sent_at = Instant::now();
+        self.sent_pct = self.percent();
+    }
 }
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
@@ -170,7 +275,10 @@ fn log_err<T>(command: &str, result: Result<T, String>) -> Result<T, String> {
 }
 
 /// Apply frontend-supplied headers (already includes the SWB signing headers).
-fn apply_headers(mut req: reqwest::RequestBuilder, headers: &[(String, String)]) -> reqwest::RequestBuilder {
+fn apply_headers(
+    mut req: reqwest::RequestBuilder,
+    headers: &[(String, String)],
+) -> reqwest::RequestBuilder {
     for (k, v) in headers {
         req = req.header(k.as_str(), v.as_str());
     }
@@ -196,36 +304,43 @@ pub async fn http_request(
     body: Option<String>,
     pin: Option<String>,
 ) -> Result<HttpResponse, String> {
-    log_err("http_request", async {
-        let (client, verifier) = reqwest_client(pin)?;
-        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
-        let mut req = apply_headers(client.request(method, &url), &headers);
-        if let Some(b) = body {
-            req = req
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(b);
+    log_err(
+        "http_request",
+        async {
+            let (client, verifier) = reqwest_client(pin)?;
+            let method =
+                reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
+            let mut req = apply_headers(client.request(method, &url), &headers);
+            if let Some(b) = body {
+                req = req
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(b);
+            }
+            let resp = req.send().await.map_err(|e| e.to_string())?;
+            let status = resp.status().as_u16();
+            let body = resp.text().await.map_err(|e| e.to_string())?;
+            Ok(HttpResponse {
+                status,
+                body,
+                cert_fp: captured_fp(&verifier),
+            })
         }
-        let resp = req.send().await.map_err(|e| e.to_string())?;
-        let status = resp.status().as_u16();
-        let body = resp.text().await.map_err(|e| e.to_string())?;
-        Ok(HttpResponse {
-            status,
-            body,
-            cert_fp: captured_fp(&verifier),
-        })
-    }
-    .await)
+        .await,
+    )
 }
 
 /// SHA-256 (hex) of a local file's contents. Lets the frontend sign an upload
 /// whose bytes live only on the Rust side (the body hash is part of the MAC).
 #[tauri::command]
 pub async fn hash_file(path: String) -> Result<String, String> {
-    log_err("hash_file", async {
-        let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-        Ok(hex(&sha256(&bytes)))
-    }
-    .await)
+    log_err(
+        "hash_file",
+        async {
+            let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+            Ok(hex(&sha256(&bytes)))
+        }
+        .await,
+    )
 }
 
 /// Extract a server error message from a JSON body, or fall back to the status.
@@ -238,31 +353,60 @@ fn error_message(status: reqwest::StatusCode, body: &str) -> String {
 
 /// Download a file from the hosting service to a local `dest` path. Pinned TLS,
 /// signed via the frontend's `headers`; binary-safe (no base64 round-trip).
+///
+/// The bytes stream straight to disk, reporting progress on `on_progress`, and the
+/// loop polls the `transfer_id` cancel flag between chunks. Returns whether the
+/// file was written: `false` means the user cancelled, which is not an error, and
+/// leaves no partial file behind.
 #[tauri::command]
 pub async fn download_file(
+    state: State<'_, TransferState>,
     url: String,
     headers: Vec<(String, String)>,
     pin: Option<String>,
     dest: String,
-) -> Result<(), String> {
-    log_err("download_file", async {
-        let (client, _) = reqwest_client(pin)?;
-        let resp = apply_headers(client.get(&url), &headers)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(error_message(status, &body));
+    transfer_id: u64,
+    on_progress: Channel<Progress>,
+) -> Result<bool, String> {
+    let cancel = state.flag(transfer_id);
+    let result = log_err(
+        "download_file",
+        async {
+            let (client, _) = reqwest_client(pin)?;
+            let resp = apply_headers(client.get(&url), &headers)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(error_message(status, &body));
+            }
+
+            let mut progress = ProgressEmitter::new(on_progress, resp.content_length());
+            let mut file = tokio::fs::File::create(&dest)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                if cancel.load(Ordering::Relaxed) {
+                    drop(file);
+                    // A truncated file is worse than none: the user asked to stop.
+                    let _ = tokio::fs::remove_file(&dest).await;
+                    return Ok(false);
+                }
+                let chunk = chunk.map_err(|e| e.to_string())?;
+                file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+                progress.advance(chunk.len() as u64);
+            }
+            file.flush().await.map_err(|e| e.to_string())?;
+            progress.finish();
+            Ok(true)
         }
-        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-        tokio::fs::write(&dest, &bytes)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-    .await)
+        .await,
+    );
+    state.forget(transfer_id);
+    result
 }
 
 /// Where downloaded media previews live: `<app cache dir>/preview`. One file per
@@ -288,7 +432,9 @@ pub fn sweep_preview_dir(app: &AppHandle) {
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => tracing::info!(dir = %dir.display(), "swept media preview cache"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!(dir = %dir.display(), error = %e, "cannot sweep media preview cache"),
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), error = %e, "cannot sweep media preview cache")
+        }
     }
 }
 
@@ -311,43 +457,46 @@ pub async fn cache_media(
     key: String,
     ext: String,
 ) -> Result<String, String> {
-    log_err("cache_media", async {
-        if !is_name_safe(&key) || !is_name_safe(&ext) {
-            return Err(format!("invalid preview cache name: {key}.{ext}"));
-        }
-        let dir = preview_dir(&app)?;
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|e| e.to_string())?;
-        let dest = dir.join(format!("{key}.{ext}"));
+    log_err(
+        "cache_media",
+        async {
+            if !is_name_safe(&key) || !is_name_safe(&ext) {
+                return Err(format!("invalid preview cache name: {key}.{ext}"));
+            }
+            let dir = preview_dir(&app)?;
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|e| e.to_string())?;
+            let dest = dir.join(format!("{key}.{ext}"));
 
-        let (client, _) = reqwest_client(pin)?;
-        let resp = apply_headers(client.get(&url), &headers)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(error_message(status, &body));
-        }
+            let (client, _) = reqwest_client(pin)?;
+            let resp = apply_headers(client.get(&url), &headers)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(error_message(status, &body));
+            }
 
-        let mut file = tokio::fs::File::create(&dest)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| e.to_string())?;
-            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        }
-        file.flush().await.map_err(|e| e.to_string())?;
+            let mut file = tokio::fs::File::create(&dest)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| e.to_string())?;
+                file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+            }
+            file.flush().await.map_err(|e| e.to_string())?;
 
-        app.asset_protocol_scope()
-            .allow_file(&dest)
-            .map_err(|e| e.to_string())?;
-        Ok(dest.to_string_lossy().into_owned())
-    }
-    .await)
+            app.asset_protocol_scope()
+                .allow_file(&dest)
+                .map_err(|e| e.to_string())?;
+            Ok(dest.to_string_lossy().into_owned())
+        }
+        .await,
+    )
 }
 
 /// Delete one cached preview once its tab closed. Anything outside the preview
@@ -356,47 +505,105 @@ pub async fn cache_media(
 /// block re-allowing the same path if the very same file is previewed again.
 #[tauri::command]
 pub async fn drop_cached_media(app: AppHandle, path: String) -> Result<(), String> {
-    log_err("drop_cached_media", async {
-        let dir = preview_dir(&app)?;
-        let file = PathBuf::from(&path);
-        if file.parent() != Some(dir.as_path()) {
-            return Err(format!("not a cached preview: {path}"));
+    log_err(
+        "drop_cached_media",
+        async {
+            let dir = preview_dir(&app)?;
+            let file = PathBuf::from(&path);
+            if file.parent() != Some(dir.as_path()) {
+                return Err(format!("not a cached preview: {path}"));
+            }
+            match tokio::fs::remove_file(&file).await {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.to_string()),
+            }
         }
-        match tokio::fs::remove_file(&file).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.to_string()),
-        }
-    }
-    .await)
+        .await,
+    )
 }
+
+/// How much of the source file each upload body chunk carries. Small enough that
+/// progress moves smoothly, large enough not to make a syscall per kilobyte.
+const UPLOAD_CHUNK: usize = 64 * 1024;
 
 /// Upload a local file at `src` to the hosting service by POSTing its raw bytes
 /// to `url` (which carries the target `?dir=&name=`). Pinned TLS, signed headers.
+///
+/// The body streams from disk (so a large file never sits in memory whole),
+/// reporting progress on `on_progress` as chunks are handed to the connection and
+/// stopping if the `transfer_id` cancel flag is set. Returns whether the upload
+/// completed: `false` means the user cancelled, which is not an error.
 #[tauri::command]
 pub async fn upload_file(
+    state: State<'_, TransferState>,
     url: String,
     headers: Vec<(String, String)>,
     pin: Option<String>,
     src: String,
-) -> Result<(), String> {
-    log_err("upload_file", async {
-        let bytes = tokio::fs::read(&src).await.map_err(|e| e.to_string())?;
-        let (client, _) = reqwest_client(pin)?;
-        let resp = apply_headers(client.post(&url), &headers)
-            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(bytes)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(error_message(status, &body));
+    transfer_id: u64,
+    on_progress: Channel<Progress>,
+) -> Result<bool, String> {
+    let cancel = state.flag(transfer_id);
+    let result = log_err(
+        "upload_file",
+        async {
+            let total = tokio::fs::metadata(&src)
+                .await
+                .map_err(|e| e.to_string())?
+                .len();
+            let file = tokio::fs::File::open(&src)
+                .await
+                .map_err(|e| e.to_string())?;
+            let progress = ProgressEmitter::new(on_progress, Some(total));
+
+            // Feed the request body a chunk at a time, counting bytes as the
+            // connection drains them. Erroring out of the stream is how a cancel
+            // aborts the request mid-flight; the flag is re-checked below to tell
+            // that apart from a genuine transport failure.
+            let cancelled = cancel.clone();
+            let body = reqwest::Body::wrap_stream(futures_util::stream::try_unfold(
+                (file, progress),
+                move |(mut file, mut progress)| {
+                    let cancelled = cancelled.clone();
+                    async move {
+                        if cancelled.load(Ordering::Relaxed) {
+                            return Err(std::io::Error::other("cancelled"));
+                        }
+                        let mut buf = vec![0u8; UPLOAD_CHUNK];
+                        let n = file.read(&mut buf).await?;
+                        if n == 0 {
+                            progress.finish();
+                            return Ok(None);
+                        }
+                        buf.truncate(n);
+                        progress.advance(n as u64);
+                        Ok(Some((buf, (file, progress))))
+                    }
+                },
+            ));
+
+            let (client, _) = reqwest_client(pin)?;
+            let sent = apply_headers(client.post(&url), &headers)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(body)
+                .send()
+                .await;
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            let resp = sent.map_err(|e| e.to_string())?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(error_message(status, &body));
+            }
+            Ok(true)
         }
-        Ok(())
-    }
-    .await)
+        .await,
+    );
+    state.forget(transfer_id);
+    result
 }
 
 /// Outer framing tags for the raw bytes streamed to the frontend over the
@@ -499,20 +706,23 @@ pub async fn ws_send(
     text: Option<String>,
     binary_b64: Option<String>,
 ) -> Result<(), String> {
-    log_err("ws_send", async {
-        let msg = if let Some(t) = text {
-            Message::Text(t.into())
-        } else if let Some(b) = binary_b64 {
-            Message::Binary(b64().decode(b).map_err(|e| e.to_string())?.into())
-        } else {
-            return Ok(());
-        };
-        if let Some(tx) = state.conns.lock().await.get(&id) {
-            tx.send(msg).map_err(|_| "connection closed".to_string())?;
+    log_err(
+        "ws_send",
+        async {
+            let msg = if let Some(t) = text {
+                Message::Text(t.into())
+            } else if let Some(b) = binary_b64 {
+                Message::Binary(b64().decode(b).map_err(|e| e.to_string())?.into())
+            } else {
+                return Ok(());
+            };
+            if let Some(tx) = state.conns.lock().await.get(&id) {
+                tx.send(msg).map_err(|_| "connection closed".to_string())?;
+            }
+            Ok(())
         }
-        Ok(())
-    }
-    .await)
+        .await,
+    )
 }
 
 /// Close connection `id` (sends a Close frame; the reader task then cleans up).

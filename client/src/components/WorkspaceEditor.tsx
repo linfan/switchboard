@@ -10,7 +10,13 @@ import {
   listDir,
   renamePath,
 } from "../net/rest";
-import { downloadFile, uploadFile } from "../net/transfer";
+import { formatBytes } from "../net/media";
+import {
+  cancelTransfer,
+  downloadFile,
+  uploadFile,
+  type TransferHooks,
+} from "../net/transfer";
 import type {
   FsEntry,
   FsListing,
@@ -23,6 +29,7 @@ import {
   tabKey,
   WORKING_COMMIT,
   type DiffLayout,
+  type Transfer,
   type Workspace,
 } from "../store/types";
 import { EditorArea } from "./EditorArea";
@@ -51,6 +58,9 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
   const closeAllTabs = useStore((s) => s.closeAllTabs);
 
   const closeTabsUnder = useStore((s) => s.closeTabsUnder);
+  const startTransfer = useStore((s) => s.startTransfer);
+  const progressTransfer = useStore((s) => s.progressTransfer);
+  const endTransfer = useStore((s) => s.endTransfer);
 
   const [git, setGit] = useState<GitInfo | null>(null);
   const [gitError, setGitError] = useState<string | null>(null);
@@ -153,21 +163,45 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
     }
   };
 
+  // Feed a transfer's progress into the store so the strip under the tree can
+  // follow it; `ended` clears the row however the transfer finished.
+  const transferHooks = (
+    kind: Transfer["kind"],
+  ): TransferHooks & { ended: () => void } => {
+    let started: number | null = null;
+    return {
+      onStart: ({ id, name, total }) => {
+        started = id;
+        startTransfer({ id, kind, workspaceId: workspace.id, name, total, done: 0 });
+      },
+      onProgress: progressTransfer,
+      ended: () => started !== null && endTransfer(started),
+    };
+  };
+
   const handleDownload = async (entry: FsEntry) => {
     setFsError(null);
+    const hooks = transferHooks("download");
     try {
-      await downloadFile(service, entry.path, entry.name);
+      await downloadFile(service, entry.path, entry.name, hooks);
     } catch (e) {
       setFsError(errMsg(e));
+    } finally {
+      hooks.ended();
     }
   };
 
   const handleUpload = async (entry: FsEntry) => {
     setFsError(null);
+    const hooks = transferHooks("upload");
     try {
-      if (await uploadFile(service, entry.path)) setRefreshKey((k) => k + 1);
+      if (await uploadFile(service, entry.path, hooks)) {
+        setRefreshKey((k) => k + 1);
+      }
     } catch (e) {
       setFsError(errMsg(e));
+    } finally {
+      hooks.ended();
     }
   };
 
@@ -225,6 +259,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
                 onCreate={handleCreate}
               />
             </div>
+            <TransferStrip workspaceId={workspace.id} />
           </section>
 
           {showGit && (
@@ -290,6 +325,67 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
       {gitError && <p className="hint hint--error">{gitError}</p>}
       {fsError && <p className="hint hint--error">{fsError}</p>}
     </main>
+  );
+}
+
+// --- transfers --------------------------------------------------------------
+
+/**
+ * Progress for this workspace's in-flight downloads/uploads, pinned below the
+ * file tree so it stays visible however far the tree is scrolled. Absent while
+ * nothing is transferring.
+ */
+function TransferStrip({ workspaceId }: { workspaceId: string }) {
+  const all = useStore((s) => s.transfers);
+  // Filtering inside the selector would return a fresh array on every store
+  // change, which zustand treats as a new snapshot.
+  const mine = useMemo(
+    () => all.filter((t) => t.workspaceId === workspaceId),
+    [all, workspaceId],
+  );
+  if (mine.length === 0) return null;
+
+  return (
+    <div className="weditor__transfers">
+      {mine.map((t) => {
+        // No total yet (headers not in, or none sent): show bytes moved instead
+        // of a percentage, and let the bar say "working" rather than "0%".
+        const pct =
+          t.total && t.total > 0
+            ? Math.min(100, Math.floor((t.done / t.total) * 100))
+            : null;
+        return (
+          <div className="weditor__xfer" key={t.id}>
+            <span className="weditor__xfer-dir" aria-hidden>
+              {t.kind === "download" ? "↓" : "↑"}
+            </span>
+            <span className="weditor__label" title={t.name}>
+              {t.name}
+            </span>
+            <span
+              className={`weditor__xfer-bar ${pct === null ? "is-waiting" : ""}`}
+              role="progressbar"
+              aria-label={`${t.kind} ${t.name}`}
+              aria-valuenow={pct ?? undefined}
+            >
+              <span style={pct === null ? undefined : { width: `${pct}%` }} />
+            </span>
+            <span className="weditor__xfer-pct">
+              {pct === null ? formatBytes(t.done) : `${pct}%`}
+            </span>
+            <button
+              type="button"
+              className="weditor__xfer-cancel"
+              aria-label={`Cancel ${t.kind} of ${t.name}`}
+              title="Cancel"
+              onClick={() => cancelTransfer(t.id)}
+            >
+              ×
+            </button>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

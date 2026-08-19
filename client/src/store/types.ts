@@ -104,6 +104,24 @@ export interface WorkspaceEditorState {
 /** Sentinel commit id for the working tree (uncommitted changes) node. */
 export const WORKING_COMMIT = "WORKING";
 
+/**
+ * A file transfer in flight between the host and this machine, shown in the
+ * Files panel's transfers strip. Ids are allocated by `net/transfer.ts`, which
+ * also holds the handle that cancels one.
+ */
+export interface Transfer {
+  id: number;
+  kind: "download" | "upload";
+  /** Workspace whose Files panel shows this transfer. */
+  workspaceId: string;
+  /** Base name of the file being moved. */
+  name: string;
+  /** Bytes moved so far. */
+  done: number;
+  /** Total bytes, absent until known (or unknown for good, e.g. no Content-Length). */
+  total?: number;
+}
+
 /** A conversation === one agent task on one service. */
 export interface Conversation {
   serviceId: string;
