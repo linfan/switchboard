@@ -238,18 +238,18 @@ function WorkspaceGroup({
   const [addingTask, setAddingTask] = useState(false);
   const [creatingWorktree, setCreatingWorktree] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  // Whether this workspace folder is a git repo (drives the "Create worktree"
-  // menu item). Probed once the service is online; null while unknown.
+  // Whether this workspace folder is a git repo (drives the "Create git
+  // worktree" menu item). Probed once the service is online; null while unknown.
   const [isRepo, setIsRepo] = useState<boolean | null>(null);
-  // A worktree workspace (created via "Create worktree") gets a single "Remove
-  // worktree" action instead of "Create worktree"/"Remove workspace". The cwd
-  // fallback covers worktrees created before the flag existed.
+  // A worktree workspace (created via "Create git worktree") gets a single
+  // "Remove worktree" action instead of "Create git worktree"/"Remove
+  // workspace". The cwd fallback covers worktrees created before the flag existed.
   const isWorktree =
     workspace.worktree === true ||
     workspace.cwd.includes("/.switchboard/worktree/");
 
   useEffect(() => {
-    // Worktrees never offer "Create worktree", so skip the repo probe for them.
+    // Worktrees never offer "Create git worktree", so skip the repo probe for them.
     if (!service || !online || isWorktree) {
       setIsRepo(null);
       return;

@@ -135,7 +135,7 @@ export function CreateWorktreeDialog({
 
   return (
     <Modal
-      title="Create worktree"
+      title="Create git worktree"
       onClose={onClose}
       onSubmit={submit}
       dismissOnScrimClick={false}
