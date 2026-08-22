@@ -352,7 +352,7 @@ function WorkspaceGroup({
                   ...(isRepo
                     ? [
                         {
-                          label: "Create worktree",
+                          label: "Create git worktree",
                           disabled: !online,
                           onClick: () => setCreatingWorktree(true),
                         },
