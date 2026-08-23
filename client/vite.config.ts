@@ -12,6 +12,27 @@ export default defineConfig({
   build: {
     target: "es2020",
     outDir: "dist",
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (id.includes("@xterm")) return "xterm";
+          if (
+            id.includes("@codemirror") ||
+            id.includes("/codemirror/") ||
+            id.includes("@lezer")
+          ) {
+            const isLang =
+              id.includes("@codemirror/lang-") ||
+              id.includes("@codemirror/legacy-modes") ||
+              (id.includes("@lezer/") &&
+                !/\/@lezer\/(common|highlight|lr)\//.test(id));
+            return isLang ? "codemirror-langs" : "codemirror";
+          }
+          if (id.includes("react") || id.includes("scheduler")) return "react";
+        },
+      },
+    },
   },
   test: {
     globals: true,
