@@ -350,6 +350,9 @@ body {
   color: #f85149;
 }
 .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--fg-dim);
