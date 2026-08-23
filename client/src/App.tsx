@@ -1,10 +1,12 @@
 import { useEffect } from "react";
 
 import { ConversationPanel } from "./components/ConversationPanel";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceEditor } from "./components/WorkspaceEditor";
 import * as editors from "./net/editors";
 import { pool } from "./net/pool";
+import { listen } from "./net/tauri";
 import * as terminals from "./net/terminals";
 import { useStore } from "./store/store";
 
@@ -16,6 +18,8 @@ export default function App() {
   const terminalFontSize = useStore((s) => s.terminalFontSize);
   const editorFontSize = useStore((s) => s.editorFontSize);
   const zoomFont = useStore((s) => s.zoomFont);
+  const settingsOpen = useStore((s) => s.settingsOpen);
+  const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   // A selected workspace routes the right pane to its file editor; otherwise the
   // selected task's terminal shows (the original behavior).
   const workspace = useStore((s) =>
@@ -46,6 +50,21 @@ export default function App() {
     );
     editors.remeasureAll();
   }, [editorFontSize]);
+
+  // The macOS `Settings…` menu item (and ⌘,) reaches the webview as an event;
+  // inert in the browser build, where the sidebar gear is the only route.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    listen("open-settings", () => setSettingsOpen(true)).then((off) => {
+      if (cancelled) off();
+      else unlisten = off;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [setSettingsOpen]);
 
   // Global zoom shortcuts: ⇧⌘= grows, ⇧⌘- shrinks. Whichever pane is on screen
   // (editor when a workspace is selected, else the terminal) is the target. A
@@ -122,6 +141,9 @@ export default function App() {
         <WorkspaceEditor key={workspace.id} workspace={workspace} />
       ) : (
         <ConversationPanel />
+      )}
+      {settingsOpen && (
+        <SettingsDialog onClose={() => setSettingsOpen(false)} />
       )}
     </div>
   );

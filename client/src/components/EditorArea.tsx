@@ -14,16 +14,18 @@ import { html } from "@codemirror/lang-html";
 import { css } from "@codemirror/lang-css";
 
 import * as editors from "../net/editors";
-import {
-  formatBytes,
-  MAX_PREVIEW_BYTES,
-  mediaForPath,
-  type MediaKind,
-} from "../net/media";
+import { formatBytes, mediaForPath, type MediaKind } from "../net/media";
 import { gitFileDiff, readFile, statPath, writeFile } from "../net/rest";
 import { openPreview } from "../net/transfer";
+import { useStore } from "../store/store";
 import { tabKey, type DiffLayout, type OpenFile } from "../store/types";
 import { ContextMenu } from "./Menu";
+
+const PREVIEW_CAP_KEY = {
+  image: "previewMaxImageBytes",
+  audio: "previewMaxAudioBytes",
+  video: "previewMaxVideoBytes",
+} as const;
 
 /** Map a file path's extension to a CodeMirror language extension (or none). */
 function langForPath(path: string): Extension {
@@ -382,7 +384,12 @@ export function EditorArea({
           // Stat first: an oversize file is never transferred at all.
           const st = await statPath(service, path);
           if (cancelled) return;
-          const cap = MAX_PREVIEW_BYTES[media.kind];
+          // Read the cap at open time instead of subscribing: keeping it out of
+          // this effect's deps avoids tearing down live CodeMirror views when an
+          // unrelated setting changes. Raising the cap therefore applies to the
+          // next open of an oversize tab, not retroactively to this one.
+          const cap =
+            useStore.getState().settings[PREVIEW_CAP_KEY[media.kind]];
           if (st.size > cap) {
             setOversizeNote(
               `This ${media.kind} is ${formatBytes(st.size)} — too large to preview (limit ${formatBytes(cap)}).`,

@@ -26,6 +26,7 @@ export function AddServiceDialog({
 }) {
   const addService = useStore((s) => s.addService);
   const updateService = useStore((s) => s.updateService);
+  const probeTimeoutMs = useStore((s) => s.settings.probeTimeoutMs);
   const editing = service !== undefined;
 
   const initial: ServiceAddr = service
@@ -54,7 +55,7 @@ export function AddServiceDialog({
     try {
       // Trust-on-first-use: the probe captures the server's leaf-cert
       // fingerprint, which we persist so every later connection can pin it.
-      ({ certFingerprint } = await probeService(svc));
+      ({ certFingerprint } = await probeService(svc, probeTimeoutMs));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setVerifying(false);

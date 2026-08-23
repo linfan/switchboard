@@ -3,6 +3,7 @@
 //! talks to — it never touches sockets directly.
 
 import type { ClientMsg, ServerMsg } from "../protocol";
+import type { Settings } from "../store/settings";
 import { useStore } from "../store/store";
 import { ConnectionManager } from "./connection";
 import { decode, encodeInput } from "./frame";
@@ -20,8 +21,22 @@ interface ServiceConfig {
   certFingerprint?: string;
 }
 
-function configKey(svc: ServiceConfig): string {
-  return `${svc.url} ${svc.token} ${svc.certFingerprint ?? ""}`;
+/**
+ * Identity of everything a `ConnectionManager` captures at construction, so a
+ * change to any of it forces a rebuild. The timings come from user settings and
+ * a live manager never re-reads them, hence their inclusion here.
+ */
+function configKey(svc: ServiceConfig, s: Settings): string {
+  return [
+    svc.url,
+    svc.token,
+    svc.certFingerprint ?? "",
+    s.reconnectBaseMs,
+    s.reconnectMaxMs,
+    s.heartbeatIntervalMs,
+    s.heartbeatTimeoutMs,
+    s.handshakeTimeoutMs,
+  ].join(" ");
 }
 
 /** Stable per-install client id (persisted). Used in every Hello. */
@@ -66,7 +81,7 @@ export class ConnectionPool {
       (sid, tid, bytes) => this.sendInput(sid, tid, bytes),
       (sid, tid, cols, rows) => this.sendResize(sid, tid, cols, rows),
     );
-    const sync = (services: ServiceConfig[]) => {
+    const sync = (services: ServiceConfig[], settings: Settings) => {
       const live = new Set(services.map((s) => s.id));
       // Drop managers for removed services. Delete from the map *before*
       // stopping: `mgr.stop()` fires an `onStatus("offline")` that writes to the
@@ -81,12 +96,12 @@ export class ConnectionPool {
           mgr.stop();
         }
       }
-      // Tear down managers whose service was edited (url/token changed) so the
-      // block below rebuilds them with the new config — a live ConnectionManager
-      // captures url/token at construction and never re-reads them.
+      // Tear down managers whose config changed (edited url/token, or new timing
+      // settings) so the block below rebuilds them — a live ConnectionManager
+      // captures all of that at construction and never re-reads it.
       for (const svc of services) {
         const mgr = this.managers.get(svc.id);
-        if (mgr && this.configs.get(svc.id) !== configKey(svc)) {
+        if (mgr && this.configs.get(svc.id) !== configKey(svc, settings)) {
           this.managers.delete(svc.id);
           this.configs.delete(svc.id);
           mgr.stop();
@@ -95,12 +110,21 @@ export class ConnectionPool {
       // Spin up managers for new (or just-edited) services.
       for (const svc of services) {
         if (this.managers.has(svc.id)) continue;
-        this.configs.set(svc.id, configKey(svc));
+        this.configs.set(svc.id, configKey(svc, settings));
         const mgr = new ConnectionManager({
           clientId: id,
           url: svc.url,
           token: svc.token,
           certFingerprint: svc.certFingerprint,
+          reconnect: {
+            baseDelayMs: settings.reconnectBaseMs,
+            maxDelayMs: settings.reconnectMaxMs,
+          },
+          heartbeat: {
+            intervalMs: settings.heartbeatIntervalMs,
+            timeoutMs: settings.heartbeatTimeoutMs,
+          },
+          handshake: { timeoutMs: settings.handshakeTimeoutMs },
           // In the desktop app, route the socket through Rust so it can pin the
           // server's leaf cert (which the webview would reject if self-signed).
           wsFactory: isTauri ? makeTauriWsFactory(svc.certFingerprint) : undefined,
@@ -129,13 +153,18 @@ export class ConnectionPool {
       }
     };
 
-    sync(useStore.getState().services);
+    sync(useStore.getState().services, useStore.getState().settings);
     // Zustand fires this on *every* store mutation. Re-syncing managers only
-    // matters when the service list itself changes, so gate on its identity —
-    // otherwise the replay burst's thousands of cursor writes would each re-run
-    // the full sync (Set allocation + manager/service scan) for nothing.
+    // matters when the service list or the connection timings change, so gate on
+    // their identity — otherwise the replay burst's thousands of cursor writes
+    // would each re-run the full sync (Set allocation + manager/service scan)
+    // for nothing. The re-entrancy hazard described above is unaffected: the
+    // `onStatus` write from `mgr.stop()` leaves both identities untouched, so
+    // the re-entrant pass short-circuits here.
     this.unsub = useStore.subscribe((s, prev) => {
-      if (s.services !== prev.services) sync(s.services);
+      if (s.services !== prev.services || s.settings !== prev.settings) {
+        sync(s.services, s.settings);
+      }
     });
 
     if (typeof window !== "undefined") {

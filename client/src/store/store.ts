@@ -3,6 +3,14 @@ import { createJSONStorage, persist } from "zustand/middleware";
 
 import type { ServerMsg } from "../protocol";
 import { applyMsg, DEFAULT_RUNTIME } from "./reducer";
+import {
+  clampSettings,
+  DEFAULT_FONT_SIZE,
+  DEFAULT_SETTINGS,
+  FONT_SIZE_BOUNDS,
+  withSettingDefaults,
+  type Settings,
+} from "./settings";
 import { persistStorage } from "./storage";
 import {
   convKey,
@@ -39,6 +47,14 @@ export interface AppState {
   terminalFontSize: number;
   /** File-editor font size in px, adjustable via zoom shortcuts (persisted). */
   editorFontSize: number;
+  /** Configurable limits and timings from the settings panel (persisted). */
+  settings: Settings;
+  /**
+   * Whether the settings dialog is showing (in-memory). Kept in the store because
+   * two entry points open it — the macOS menu and the sidebar's gear button —
+   * and they must drive the same single dialog.
+   */
+  settingsOpen: boolean;
   /** Per-service live connection state (in-memory). */
   runtime: Record<string, ServiceRuntime>;
   /** Conversations keyed by `serviceId::taskId`. */
@@ -108,6 +124,13 @@ export interface AppState {
   setSidebarWidth: (width: number) => void;
   /** Adjust a pane type's font size by `delta` px (clamped); used by zoom shortcuts. */
   zoomFont: (target: "terminal" | "editor", delta: number) => void;
+  /** Set a pane type's font size directly (clamped); used by the settings panel. */
+  setFontSize: (target: "terminal" | "editor", px: number) => void;
+
+  // --- settings ------------------------------------------------------------
+  /** Merge a patch into the persisted settings, clamped to their valid ranges. */
+  setSettings: (patch: Partial<Settings>) => void;
+  setSettingsOpen: (open: boolean) => void;
 
   // --- sync application ----------------------------------------------------
   /** Apply one server (control-plane) message for a given service. */
@@ -157,6 +180,11 @@ function emptyEditorState(): WorkspaceEditorState {
   return { expandedDirs: [], openTabs: [] };
 }
 
+function clampFontSize(px: number): number {
+  const { min, max } = FONT_SIZE_BOUNDS;
+  return Math.min(max, Math.max(min, Math.round(px)));
+}
+
 export const useStore = create<AppState>()(
   persist(
     (set, get) => ({
@@ -167,8 +195,10 @@ export const useStore = create<AppState>()(
       pendingWorkspace: {},
       sidebarCollapsed: false,
       sidebarWidth: 260,
-      terminalFontSize: 13,
-      editorFontSize: 13,
+      terminalFontSize: DEFAULT_FONT_SIZE,
+      editorFontSize: DEFAULT_FONT_SIZE,
+      settings: DEFAULT_SETTINGS,
+      settingsOpen: false,
       runtime: {},
       conversations: {},
       cursors: {},
@@ -344,11 +374,26 @@ export const useStore = create<AppState>()(
 
       zoomFont: (target, delta) =>
         set((s) => {
-          const clamp = (n: number) => Math.min(28, Math.max(8, n));
+          const current =
+            (target === "terminal" ? s.terminalFontSize : s.editorFontSize) ??
+            DEFAULT_FONT_SIZE;
+          const px = clampFontSize(current + delta);
           return target === "terminal"
-            ? { terminalFontSize: clamp((s.terminalFontSize ?? 13) + delta) }
-            : { editorFontSize: clamp((s.editorFontSize ?? 13) + delta) };
+            ? { terminalFontSize: px }
+            : { editorFontSize: px };
         }),
+
+      setFontSize: (target, px) =>
+        set(
+          target === "terminal"
+            ? { terminalFontSize: clampFontSize(px) }
+            : { editorFontSize: clampFontSize(px) },
+        ),
+
+      setSettings: (patch) =>
+        set((s) => ({ settings: { ...s.settings, ...clampSettings(patch) } })),
+
+      setSettingsOpen: (open) => set({ settingsOpen: open }),
 
       applyServerMsg: (serviceId, msg) =>
         set((s) => applyMsg(s, serviceId, msg)),
@@ -556,9 +601,24 @@ export const useStore = create<AppState>()(
         sidebarWidth: s.sidebarWidth,
         terminalFontSize: s.terminalFontSize,
         editorFontSize: s.editorFontSize,
+        settings: s.settings,
         selectedWorkspaceId: s.selectedWorkspaceId,
         editorState: s.editorState,
       }),
+      // zustand's default merge spreads the persisted state over the current one
+      // at the top level only, so a `settings` object written by an older build
+      // would replace the defaults wholesale and leave any setting added since
+      // `undefined`. Rebuild it from the defaults instead. `persisted` is absent
+      // on a first run, and the result replaces the whole state, so this must
+      // return every key.
+      merge: (persisted, current) => {
+        const saved = (persisted ?? {}) as Partial<AppState>;
+        return {
+          ...current,
+          ...saved,
+          settings: withSettingDefaults(saved.settings),
+        };
+      },
     },
   ),
 );

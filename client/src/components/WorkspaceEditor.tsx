@@ -24,6 +24,7 @@ import type {
   GitCommit,
   GitInfo,
 } from "../protocol";
+import type { Settings } from "../store/settings";
 import { useStore } from "../store/store";
 import {
   tabKey,
@@ -420,14 +421,6 @@ interface TreeActions {
   onCreate: (dir: string, name: string, isDir: boolean) => void;
 }
 
-// Bounds that keep the recursive filter scan from choking on a huge project.
-// Hitting any of these just stops descending (partial results are fine — the
-// user can narrow the filter); the scan never blocks or fans out unbounded.
-const SCAN_MAX_CONCURRENCY = 8; // simultaneous directory listings
-const SCAN_MAX_DIRS = 4000; // total directories read before giving up
-const SCAN_MAX_DEPTH = 32; // nesting levels to descend
-const SCAN_TIME_BUDGET_MS = 5000; // wall-clock ceiling for the whole scan
-
 /** Run `fn`s with at most `max` in flight at once. */
 function makeLimiter(max: number) {
   let active = 0;
@@ -452,21 +445,23 @@ function makeLimiter(max: number) {
  * folders aren't descended into — the render reveals their whole subtree via
  * `forceShow`.
  *
- * The walk is bounded by the SCAN_* limits so a very deep tree or a folder with
- * a huge number of entries can't hang the UI or flood the server with requests.
+ * The walk is bounded by the caller's `scan*` settings so a very deep tree or a
+ * folder with a huge number of entries can't hang the UI or flood the server
+ * with requests.
  */
 async function scanMatches(
   service: ServiceRef,
   root: string,
   filter: string,
   cancelled: () => boolean,
+  bounds: Settings,
 ): Promise<Set<string>> {
   const dirs = new Set<string>();
-  const listLimited = makeLimiter(SCAN_MAX_CONCURRENCY);
-  const deadline = Date.now() + SCAN_TIME_BUDGET_MS;
+  const listLimited = makeLimiter(bounds.scanMaxConcurrency);
+  const deadline = Date.now() + bounds.scanTimeBudgetMs;
   let visited = 0;
   const overBudget = () =>
-    cancelled() || visited >= SCAN_MAX_DIRS || Date.now() > deadline;
+    cancelled() || visited >= bounds.scanMaxDirs || Date.now() > deadline;
 
   async function walk(dir: string, chain: string[], depth: number): Promise<void> {
     if (overBudget()) return;
@@ -485,7 +480,7 @@ async function scanMatches(
       if (matches) for (const p of here) dirs.add(p);
       // Descend into non-matching folders to find deeper matches, but stop
       // queueing work once we hit a bound so we don't build up a huge backlog.
-      if (e.is_dir && !matches && depth < SCAN_MAX_DEPTH && !overBudget()) {
+      if (e.is_dir && !matches && depth < bounds.scanMaxDepth && !overBudget()) {
         childWalks.push(walk(e.path, here, depth + 1));
       }
     }
@@ -548,9 +543,14 @@ function FileTree({
     }
     let cancelled = false;
     const timer = setTimeout(() => {
-      scanMatches(service, root, normFilter, () => cancelled).then((dirs) => {
-        if (!cancelled) setVisibleDirs(dirs);
-      });
+      // Bounds are read here rather than subscribed to: a scan keeps the limits
+      // it started with, and editing them shouldn't restart one mid-flight.
+      const bounds = useStore.getState().settings;
+      scanMatches(service, root, normFilter, () => cancelled, bounds).then(
+        (dirs) => {
+          if (!cancelled) setVisibleDirs(dirs);
+        },
+      );
     }, 200);
     return () => {
       cancelled = true;

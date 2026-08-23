@@ -37,11 +37,12 @@ const EXTENSIONS: Record<string, MediaKind> = {
 };
 
 /**
- * Largest file previewed per kind. The cap is about transfer time and disk, not
- * memory — previews stream from a local cache file — so it mainly stops an
- * accidental click on a huge file from pulling it over a slow link.
+ * Default largest file previewed per kind; the effective cap is configurable in
+ * the settings panel. The cap is about transfer time and disk, not memory —
+ * previews stream from a local cache file — so it mainly stops an accidental
+ * click on a huge file from pulling it over a slow link.
  */
-export const MAX_PREVIEW_BYTES: Record<MediaKind, number> = {
+export const DEFAULT_MAX_PREVIEW_BYTES: Record<MediaKind, number> = {
   image: 8 * 1024 * 1024,
   audio: 16 * 1024 * 1024,
   video: 32 * 1024 * 1024,

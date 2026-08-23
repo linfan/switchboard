@@ -17,6 +17,21 @@ export async function invoke<T>(
 }
 
 /**
+ * Subscribe to an event emitted by the native layer (e.g. a menu item that has
+ * no predefined action). Resolves to an unsubscribe function; in the browser,
+ * where nothing can emit, it resolves to a no-op so callers need no `isTauri`
+ * branch of their own.
+ */
+export async function listen(
+  event: string,
+  handler: () => void,
+): Promise<() => void> {
+  if (!isTauri) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen(event, () => handler());
+}
+
+/**
  * Turn a local file path into an `asset:` URL the webview can load — used for
  * media previews, which stream from a cache file on disk. The path must have been
  * allowed on the asset-protocol scope first (see the `cache_media` command).

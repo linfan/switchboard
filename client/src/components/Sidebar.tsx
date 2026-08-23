@@ -61,9 +61,30 @@ function FolderIcon() {
   );
 }
 
+function GearIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle cx="8" cy="8" r="2.25" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.13 1.13M11.47 11.47l1.13 1.13M12.6 3.4l-1.13 1.13M4.53 11.47L3.4 12.6"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 export function Sidebar() {
   const services = useStore((s) => s.services);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
+  const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const [addServiceOpen, setAddServiceOpen] = useState(false);
 
   return (
@@ -84,6 +105,15 @@ export function Sidebar() {
             onClick={() => setAddServiceOpen(true)}
           >
             +svc
+          </button>
+          {/* The only route to settings on Windows and Linux, which get no menu bar. */}
+          <button
+            className="icon-btn"
+            title="Settings"
+            aria-label="Settings"
+            onClick={() => setSettingsOpen(true)}
+          >
+            <GearIcon />
           </button>
         </div>
       </header>

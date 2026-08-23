@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { probeService, upgradeFromUrl } from "../net/rest";
 import { uploadBinaryUpgrade } from "../net/transfer";
+import { useStore } from "../store/store";
 import type { Service } from "../store/types";
 import { Modal } from "./Modal";
 
@@ -35,6 +36,7 @@ export function UpgradeHostDialog({
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | undefined>();
   const [newVersion, setNewVersion] = useState<string | undefined>();
+  const probeTimeoutMs = useStore((s) => s.settings.probeTimeoutMs);
 
   const busy = phase === "sending" || phase === "waiting";
   const urlValid = source === "url" ? url.trim() !== "" : true;
@@ -47,7 +49,7 @@ export function UpgradeHostDialog({
     await sleep(WAIT_INTERVAL_MS);
     for (;;) {
       try {
-        const { info } = await probeService(service);
+        const { info } = await probeService(service, probeTimeoutMs);
         setNewVersion(info.version);
         setPhase("done");
         return;

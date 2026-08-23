@@ -104,17 +104,17 @@ export interface ConnectionDeps {
   wake?: Partial<WakeOptions>;
 }
 
-const DEFAULT_RECONNECT: ReconnectOptions = {
+export const DEFAULT_RECONNECT: ReconnectOptions = {
   baseDelayMs: 1000,
   maxDelayMs: 30000,
   factor: 2,
   jitter: 0.2,
 };
-const DEFAULT_HEARTBEAT: HeartbeatOptions = {
+export const DEFAULT_HEARTBEAT: HeartbeatOptions = {
   intervalMs: 15000,
   timeoutMs: 10000,
 };
-const DEFAULT_HANDSHAKE: HandshakeOptions = { timeoutMs: 10000 };
+export const DEFAULT_HANDSHAKE: HandshakeOptions = { timeoutMs: 10000 };
 const DEFAULT_WAKE: WakeOptions = { checkMs: 2000, driftMs: 5000 };
 
 const WS_OPEN = 1;

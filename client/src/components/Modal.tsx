@@ -5,6 +5,7 @@ export function Modal({
   onClose,
   onSubmit,
   dismissOnScrimClick = true,
+  className,
   children,
   footer,
 }: {
@@ -23,6 +24,8 @@ export function Modal({
    * a half-filled form.
    */
   dismissOnScrimClick?: boolean;
+  /** Extra class on the dialog box, for dialogs needing a different size. */
+  className?: string;
   children: ReactNode;
   footer?: ReactNode;
 }) {
@@ -63,7 +66,7 @@ export function Modal({
     >
       <div
         ref={ref}
-        className="modal"
+        className={className ? `modal ${className}` : "modal"}
         role="dialog"
         aria-label={title}
         tabIndex={-1}

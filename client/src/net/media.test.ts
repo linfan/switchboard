@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatBytes, MAX_PREVIEW_BYTES, mediaForPath } from "./media";
+import { DEFAULT_MAX_PREVIEW_BYTES, formatBytes, mediaForPath } from "./media";
 
 describe("mediaForPath", () => {
   it("classifies images, audio, and video", () => {
@@ -32,10 +32,11 @@ describe("mediaForPath", () => {
   });
 });
 
-describe("MAX_PREVIEW_BYTES", () => {
+describe("DEFAULT_MAX_PREVIEW_BYTES", () => {
   it("allows video to be the largest", () => {
-    expect(MAX_PREVIEW_BYTES.image).toBeLessThan(MAX_PREVIEW_BYTES.audio);
-    expect(MAX_PREVIEW_BYTES.audio).toBeLessThan(MAX_PREVIEW_BYTES.video);
+    const caps = DEFAULT_MAX_PREVIEW_BYTES;
+    expect(caps.image).toBeLessThan(caps.audio);
+    expect(caps.audio).toBeLessThan(caps.video);
   });
 });
 

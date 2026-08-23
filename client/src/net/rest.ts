@@ -23,8 +23,11 @@ interface ServiceRef {
   certFingerprint?: string;
 }
 
-/** How long `probeService` waits for the server before giving up. */
-export const PROBE_TIMEOUT_MS = 5000;
+/**
+ * Default time `probeService` waits for the server before giving up; the
+ * effective timeout is configurable in the settings panel.
+ */
+export const DEFAULT_PROBE_TIMEOUT_MS = 5000;
 
 /** Status + raw body from the native REST bridge (mirrors a `fetch` response). */
 interface BridgeResponse {
@@ -179,12 +182,15 @@ export interface ProbeResult {
  *
  * A non-responding host (e.g. a firewalled address that never refuses the
  * connection) would otherwise hang the dialog indefinitely, so each request is
- * aborted after `PROBE_TIMEOUT_MS` and reported as a timeout.
+ * aborted after `timeoutMs` and reported as a timeout.
  */
-export async function probeService(service: ServiceRef): Promise<ProbeResult> {
+export async function probeService(
+  service: ServiceRef,
+  timeoutMs: number = DEFAULT_PROBE_TIMEOUT_MS,
+): Promise<ProbeResult> {
   const base = service.url.replace(/\/+$/, "");
   const timeoutErr = () =>
-    new Error(`Server did not respond within ${PROBE_TIMEOUT_MS / 1000}s.`);
+    new Error(`Server did not respond within ${timeoutMs / 1000}s.`);
 
   if (isTauri) {
     // 1. Capture the leaf-cert fingerprint via unauthenticated `/health`.
@@ -192,7 +198,7 @@ export async function probeService(service: ServiceRef): Promise<ProbeResult> {
     try {
       health = await withTimeout(
         bridge("GET", `${base}/health`, {}, null, service.certFingerprint),
-        PROBE_TIMEOUT_MS,
+        timeoutMs,
       );
     } catch (e) {
       if (e === TIMEOUT) throw timeoutErr();
@@ -206,7 +212,7 @@ export async function probeService(service: ServiceRef): Promise<ProbeResult> {
       const headers = await signHeaders(probed, "GET", "/api/info", null);
       res = await withTimeout(
         bridge("GET", `${base}/api/info`, headers, null, fp),
-        PROBE_TIMEOUT_MS,
+        timeoutMs,
       );
     } catch (e) {
       if (e === TIMEOUT) throw timeoutErr();
@@ -217,7 +223,7 @@ export async function probeService(service: ServiceRef): Promise<ProbeResult> {
 
   // Browser: no cert pinning, so the channel binding is empty (cb = ∅).
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
   try {
     const headers = await signHeaders(service, "GET", "/api/info", null);

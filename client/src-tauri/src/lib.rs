@@ -14,6 +14,13 @@ const BUILD_TIME: &str = env!("SWITCHBOARD_BUILD_TIME");
 /// Short commit it was compiled from, or `"unknown"` outside a git checkout.
 const GIT_COMMIT: &str = env!("SWITCHBOARD_GIT_COMMIT");
 
+/// Menu id of the app menu's `Settings…` item, and the event it emits. The
+/// frontend listens for the event and opens the settings dialog.
+#[cfg(target_os = "macos")]
+const MENU_ID_SETTINGS: &str = "settings";
+#[cfg(target_os = "macos")]
+const EVENT_OPEN_SETTINGS: &str = "open-settings";
+
 /// `~/.switchboard/logs/switchboard-client.log`, or `None` if no home directory
 /// is discoverable (`HOME` on Unix, `USERPROFILE` on Windows).
 fn log_path() -> Option<PathBuf> {
@@ -109,12 +116,17 @@ fn install_panic_hook() {
 /// the block underneath; it ignores the `comments`/`authors`/`license`/`website`
 /// fields, so the build time goes in `credits`.
 ///
+/// `Settings…` sits under About on the platform's usual ⌘, key. There is no
+/// predefined item for it (unlike About or Services), so it carries an id and
+/// `on_menu_event` in `run` forwards it to the frontend, which owns the dialog.
+///
 /// Window and Help keep Tauri's well-known submenu ids — `init_app_menu` looks
 /// them up by id to hand them to `NSApp` as the windows and help menus.
 #[cfg(target_os = "macos")]
 fn app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{
-        AboutMetadata, Menu, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
+        AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
+        WINDOW_SUBMENU_ID,
     };
 
     let pkg = app.package_info();
@@ -148,6 +160,14 @@ fn app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wr
                 true,
                 &[
                     &PredefinedMenuItem::about(app, None, Some(metadata))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &MenuItem::with_id(
+                        app,
+                        MENU_ID_SETTINGS,
+                        "Settings…",
+                        true,
+                        Some("CmdOrCtrl+,"),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::services(app, None)?,
                     &PredefinedMenuItem::separator(app)?,
@@ -204,7 +224,14 @@ pub fn run() {
     // macOS-only. Their windows come up bare; the webview handles the clipboard
     // shortcuts on both.
     #[cfg(target_os = "macos")]
-    let builder = builder.menu(app_menu);
+    let builder = builder.menu(app_menu).on_menu_event(|app, event| {
+        if event.id() == MENU_ID_SETTINGS {
+            use tauri::Emitter;
+            if let Err(e) = app.emit(EVENT_OPEN_SETTINGS, ()) {
+                tracing::error!(error = %e, "failed to open the settings dialog");
+            }
+        }
+    });
     builder
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
