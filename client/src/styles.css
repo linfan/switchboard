@@ -377,7 +377,7 @@ body {
   border-color: #f85149;
 }
 /* Caret toggles are borderless so they read as an affordance on the row,
-   not a button competing with the +ws/×/etc. actions. */
+   not a button competing with the ⋯ menu trigger. */
 .caret-btn {
   border: none;
   background: transparent;

@@ -209,7 +209,7 @@ function ServiceGroup({ service }: { service: Service }) {
       {!collapsed &&
         (serviceWorkspaces.length === 0 && ungrouped.length === 0 ? (
           <p className="empty empty--sm">
-            No workspaces. Click <b>+ws</b> to add one.
+            No workspaces. Add one from this service's <b>⋯</b> menu.
           </p>
         ) : (
           <>
