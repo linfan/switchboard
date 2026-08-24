@@ -409,6 +409,24 @@ make deploy-server     # stage the server binary in ./dist
 make package-client    # Tauri desktop bundles
 ```
 
+### Cross-compiling the hosting service
+The server cross-builds to Linux and Windows from any dev machine using `zig` as
+the C compiler/linker (`brew install zig`) — no mingw-w64, MSVC, or musl toolchain
+to install:
+```bash
+make setup-server-linux      # rustup target + zig check
+make package-server-linux    # -> dist/switchboard-server-linux (static musl)
+make setup-server-windows
+make package-server-windows  # -> dist/switchboard-server.exe
+```
+The Windows build targets `x86_64-pc-windows-gnullvm` (zig's bundled mingw is
+ucrt/lld-based) and imports only system DLLs. Terminal tasks there run on a
+**ConPTY**, so `cmd`, `powershell`, and `pwsh` all work as a task's command —
+which needs Windows 10 1809 or newer. Bare names resolve through `PATHEXT`, and
+CLIs installed as `.cmd` shims (npm's `claude`) are launched via `%COMSPEC%`.
+Self-upgrade (`POST /upgrade`) stays unix-only: it re-execs in place to carry live
+PTYs across the restart, which has no Windows equivalent.
+
 ### App icon
 The icon is authored as SVG (`client/src-tauri/icons/icon.svg` for large sizes,
 `icon-small.svg` for ≤64px). After editing an SVG, regenerate the bundled PNGs

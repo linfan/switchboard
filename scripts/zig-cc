@@ -1,25 +1,76 @@
 #!/bin/sh
-# Linker/CC wrapper for cross-building to Linux via zig (used as cargo linker and cc-rs CC).
-# Translates rust-style target triples (x86_64-unknown-linux-musl) into zig form.
-new_args=""
-next_is_target=0
+# Linker/CC wrapper for cross-builds via zig (used as cargo linker and cc-rs CC).
+#
+# Translates rust-style target triples into zig form (x86_64-unknown-linux-musl
+# -> x86_64-linux-musl, x86_64-pc-windows-gnullvm -> x86_64-windows-gnu; zig's
+# bundled mingw is ucrt/lld-based, which is what the gnullvm targets expect),
+# and rewrites the two library names rustc's windows link line uses that zig's
+# mingw does not answer to.
+xlate() {
+  printf '%s' "$1" | sed -e 's/-unknown-/-/' -e 's/-pc-windows-/-windows-/' \
+    -e 's/-windows-gnullvm$/-windows-gnu/'
+}
+
+# Pass 1: find the target. rustc omits it on the link step (ZIG_TARGET covers
+# that); cc-rs passes --target=<rust triple> when compiling C.
+target="$ZIG_TARGET"
 has_target=0
+next_is_target=0
 for a in "$@"; do
   if [ "$next_is_target" = 1 ]; then
-    new_args="$new_args $(printf '%s' "$a" | sed 's/-unknown-/-/')"
+    target=$(xlate "$a")
     next_is_target=0
-    has_target=1
     continue
   fi
   case "$a" in
-    --target=*) t="${a#--target=}"; new_args="$new_args --target=$(printf '%s' "$t" | sed 's/-unknown-/-/')"; has_target=1 ;;
-    -target=*)  t="${a#-target=}";  new_args="$new_args --target=$(printf '%s' "$t" | sed 's/-unknown-/-/')"; has_target=1 ;;
-    --target|-target) new_args="$new_args --target"; next_is_target=1 ;;
-    *) new_args="$new_args $a" ;;
+    --target=*|-target=*) target=$(xlate "${a#*=}"); has_target=1 ;;
+    --target|-target) next_is_target=1; has_target=1 ;;
   esac
 done
+
+case "$target" in
+  *windows*) windows=1 ;;
+  *) windows=0 ;;
+esac
+
+# Pass 2: rebuild argv, xlating triples and (windows only) mapping libraries:
+#   msvcrt         -> ucrtbase, since gnullvm is a ucrt target but rustc still
+#                     emits the legacy msvcrt name in its late link args.
+#   synchronization -> the api-set import lib that actually exports
+#                     WaitOnAddress & friends; zig ships no umbrella alias.
+n=$#
+i=0
+next_is_target=0
+while [ "$i" -lt "$n" ]; do
+  a=$1
+  shift
+  i=$((i + 1))
+  if [ "$next_is_target" = 1 ]; then
+    next_is_target=0
+    set -- "$@" "$(xlate "$a")"
+    continue
+  fi
+  case "$a" in
+    --target=*) set -- "$@" "--target=$(xlate "${a#--target=}")" ;;
+    -target=*) set -- "$@" "-target=$(xlate "${a#-target=}")" ;;
+    --target | -target)
+      next_is_target=1
+      set -- "$@" "$a"
+      ;;
+    -lmsvcrt)
+      [ "$windows" = 1 ] && a=-lucrtbase
+      set -- "$@" "$a"
+      ;;
+    -lsynchronization)
+      [ "$windows" = 1 ] && a=-lapi-ms-win-core-synch-l1-2-0
+      set -- "$@" "$a"
+      ;;
+    *) set -- "$@" "$a" ;;
+  esac
+done
+
 if [ "$has_target" = 0 ] && [ -n "$ZIG_TARGET" ]; then
-  new_args="--target=$ZIG_TARGET$new_args"
+  set -- "--target=$ZIG_TARGET" "$@"
 fi
-# shellcheck disable=SC2086
-exec zig cc $new_args
+
+exec zig cc "$@"

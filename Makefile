@@ -13,6 +13,15 @@ LINUX_LINKER_ENV = CARGO_TARGET_$(shell echo $(LINUX_TARGET) | tr 'a-z-' 'A-Z_')
 LINUX_CC_ENV = CC_$(shell echo $(LINUX_TARGET) | tr '-' '_')
 LINUX_AR_ENV = AR_$(shell echo $(LINUX_TARGET) | tr '-' '_')
 ZIG_TARGET = $(subst -unknown-,-,$(LINUX_TARGET))
+# Windows cross-build. `gnullvm` rather than `gnu` because zig's bundled mingw is
+# ucrt/lld-based, so the same zig that cross-builds Linux also links a native
+# .exe — no mingw-w64 or MSVC toolchain to install.
+WINDOWS_TARGET ?= x86_64-pc-windows-gnullvm
+WINDOWS_LINKER ?= $(CURDIR)/scripts/zig-cc
+WINDOWS_LINKER_ENV = CARGO_TARGET_$(shell echo $(WINDOWS_TARGET) | tr 'a-z-' 'A-Z_')_LINKER
+WINDOWS_CC_ENV = CC_$(shell echo $(WINDOWS_TARGET) | tr '-' '_')
+WINDOWS_AR_ENV = AR_$(shell echo $(WINDOWS_TARGET) | tr '-' '_')
+WINDOWS_ZIG_TARGET = x86_64-windows-gnu
 SERVER_ADDR ?= 127.0.0.1:8787
 SERVER_TOKEN ?= dev-token
 SERVER_DATA ?= server/data/switchboard.db
@@ -31,12 +40,15 @@ help: ## Show this help
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
 # ---------------------------------------------------------------- setup
-.PHONY: setup setup-server setup-server-linux setup-client setup-e2e
+.PHONY: setup setup-server setup-server-linux setup-server-windows setup-client setup-e2e
 setup: setup-server setup-client setup-e2e ## Install all toolchains/deps
 setup-server: ## Fetch Rust deps
 	$(CARGO) fetch
 setup-server-linux: ## Install Rust target + check linker for Linux cross-builds
 	rustup target add $(LINUX_TARGET)
+	@command -v zig >/dev/null || { echo "zig not found. Install: brew install zig"; exit 1; }
+setup-server-windows: ## Install Rust target + check linker for Windows cross-builds
+	rustup target add $(WINDOWS_TARGET)
 	@command -v zig >/dev/null || { echo "zig not found. Install: brew install zig"; exit 1; }
 setup-client: ## Install client node deps
 	cd client && $(NPM) install
@@ -44,7 +56,7 @@ setup-e2e: ## Install e2e harness deps
 	cd e2e && $(NPM) install
 
 # ---------------------------------------------------------------- build
-.PHONY: build build-server build-server-linux build-client build-shared
+.PHONY: build build-server build-server-linux build-server-windows build-client build-shared
 build: build-server build-client ## Build everything
 build-shared: ## Build shared protocol crate + emit TS bindings into client/src/protocol
 	TS_RS_EXPORT_DIR="$(CURDIR)" $(CARGO) test -p switchboard-shared
@@ -57,6 +69,12 @@ build-server-linux: ## Cross-compile a static server for Linux (needs zig: brew 
 	$(LINUX_AR_ENV)=$(CURDIR)/scripts/zig-ar \
 	RUSTFLAGS="$${RUSTFLAGS:-} -C link-self-contained=no" \
 	$(CARGO) build -p switchboard-server --release --target $(LINUX_TARGET)
+build-server-windows: ## Cross-compile the server .exe for Windows (needs zig: brew install zig)
+	ZIG_TARGET=$(WINDOWS_ZIG_TARGET) \
+	$(WINDOWS_LINKER_ENV)=$(WINDOWS_LINKER) \
+	$(WINDOWS_CC_ENV)=$(WINDOWS_LINKER) \
+	$(WINDOWS_AR_ENV)=$(CURDIR)/scripts/zig-ar \
+	$(CARGO) build -p switchboard-server --release --target $(WINDOWS_TARGET)
 build-client: build-shared ## Build the Tauri client
 	cd client && $(NPM) install --silent && $(NPM) run build
 
@@ -131,7 +149,7 @@ set-version: ## Align every component to one version: make set-version VERSION=x
 	@echo "All components set to $(VERSION) — review with: git diff"
 
 # ---------------------------------------------------------------- deploy
-.PHONY: package-server package-server-linux package-client clean distclean
+.PHONY: package-server package-server-linux package-server-windows package-client clean distclean
 package-server: build-server ## Produce a self-contained server release artifact
 	@mkdir -p dist
 	cp target/release/$(SERVER_BIN) dist/ 2>/dev/null || true
@@ -140,6 +158,10 @@ package-server-linux: build-server-linux ## Produce a Linux server release artif
 	@mkdir -p dist
 	cp target/$(LINUX_TARGET)/release/$(SERVER_BIN) dist/$(SERVER_BIN)-linux
 	@echo "Linux server binary staged in ./dist/$(SERVER_BIN)-linux"
+package-server-windows: build-server-windows ## Produce a Windows server release artifact
+	@mkdir -p dist
+	cp target/$(WINDOWS_TARGET)/release/$(SERVER_BIN).exe dist/$(SERVER_BIN).exe
+	@echo "Windows server binary staged in ./dist/$(SERVER_BIN).exe"
 package-client: build-client ## Package the desktop client (Tauri bundles)
 	cd client && $(NPM) run tauri build
 clean: ## Remove build artifacts (keeps fetched deps)

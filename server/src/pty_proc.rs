@@ -407,10 +407,34 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn sh(script: &str) -> (PtyHandle, mpsc::UnboundedReceiver<PtyOutput>) {
         spawn_pty("sh", &["-c".into(), script.into()], None, 80, 24).expect("spawn sh")
     }
 
+    /// A bare interactive `cmd.exe` on a ConPTY must echo typed commands and run
+    /// them — the Windows equivalent of the `sh` round-trip below.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cmd_shell_round_trip() {
+        let (handle, mut rx) = spawn_pty("cmd.exe", &[], None, 80, 24).expect("spawn cmd.exe");
+        handle.send_input(b"echo PING\r\n").unwrap();
+        wait_for(&mut rx, "PING").await;
+        handle.terminate();
+    }
+
+    /// PowerShell is the other shell a Windows host is expected to serve.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn powershell_round_trip() {
+        let (handle, mut rx) =
+            spawn_pty("powershell.exe", &["-NoLogo".into()], None, 80, 24).expect("spawn pwsh");
+        handle.send_input(b"Write-Output PING\r\n").unwrap();
+        wait_for(&mut rx, "PING").await;
+        handle.terminate();
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn emits_output_and_echoes_input() {
         // Print a marker (with an ANSI colour to prove raw bytes pass through),
@@ -426,6 +450,7 @@ mod tests {
         assert!(acc.contains("ping"), "expected echo of input; got {acc:?}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn resize_takes_effect() {
         // Re-poll the terminal size so the assertion is race-free.
@@ -436,6 +461,7 @@ mod tests {
         handle.terminate();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn clean_exit_reports_code() {
         let (_handle, mut rx) = sh("printf 'bye\\n'; exit 3");
@@ -483,6 +509,7 @@ mod tests {
         handle.terminate();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn terminate_kills_process() {
         let (handle, mut rx) = sh("printf 'up\\n'; sleep 30");

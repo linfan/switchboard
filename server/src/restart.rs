@@ -7,9 +7,11 @@ use crate::error::{AppError, AppResult};
 
 /// Env var handed to the replacement process, carrying the inherited-PTY map:
 /// `task_id:fd:pid:cols:rows` entries joined by commas.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub const INHERIT_ENV: &str = "SWITCHBOARD_INHERIT_PTYS";
 
 /// One live PTY to pass to the replacement process across the re-exec.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct InheritEntry {
     pub task_id: String,
     pub fd: i32,

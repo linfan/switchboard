@@ -114,6 +114,7 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| std::env::var("HOSTNAME").ok())
+            .or_else(|| std::env::var("COMPUTERNAME").ok())
             .unwrap_or_else(|| "agent-host".to_string());
         let agent_permission_mode = env("SWITCHBOARD_PERMISSION_MODE", "default");
         // Optional size-based rolling log file. A malformed spec is a

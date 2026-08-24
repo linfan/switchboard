@@ -52,9 +52,37 @@ fn process_alive(pid: i64) -> bool {
     rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Non-unix platforms don't run PTY workers; treat any recorded pid as gone so
-/// orphans reconcile to a terminal `Exited` state.
-#[cfg(not(unix))]
+/// Windows equivalent: a pid we can open whose exit code is still `STILL_ACTIVE`
+/// is running. A pid we cannot open is gone (or belongs to someone else).
+#[cfg(windows)]
+fn process_alive(pid: i64) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    /// What `GetExitCodeProcess` reports for a process that hasn't exited.
+    const STILL_ACTIVE: u32 = 259;
+
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: OpenProcess only reads the pid; the handle is closed below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32) };
+    if handle.is_null() {
+        return false;
+    }
+    // SAFETY: `handle` is live and `code` is a valid out-param.
+    let mut code: u32 = 0;
+    let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
+    unsafe { CloseHandle(handle) };
+    ok != 0 && code == STILL_ACTIVE
+}
+
+/// Platforms with neither signals nor the Win32 process API don't run PTY
+/// workers; treat any recorded pid as gone so orphans reconcile to a terminal
+/// `Exited` state.
+#[cfg(not(any(unix, windows)))]
 fn process_alive(_pid: i64) -> bool {
     false
 }
@@ -73,7 +101,30 @@ fn kill_pid(pid: i64) {
     }
 }
 
-#[cfg(not(unix))]
+/// Windows equivalent of the SIGKILL above: `TerminateProcess`, which is also
+/// what `portable-pty`'s killer uses. Best-effort — an already-dead pid can't be
+/// opened and is a no-op.
+#[cfg(windows)]
+fn kill_pid(pid: i64) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    if pid <= 0 {
+        return;
+    }
+    // SAFETY: OpenProcess only reads the pid; the handle is closed below.
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid as u32) };
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: `handle` is a live process handle opened for termination.
+    unsafe {
+        TerminateProcess(handle, 1);
+        CloseHandle(handle);
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn kill_pid(_pid: i64) {}
 
 #[derive(Clone)]
