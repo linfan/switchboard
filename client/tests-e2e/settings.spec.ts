@@ -74,6 +74,22 @@ test("blocks Save when the heartbeat timeout would never fire", async ({
   await expect(save).toBeEnabled();
 });
 
+test("the Hotkeys tab lists the shortcuts and keeps pending edits", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const dialog = await open(page);
+  await field(dialog, "Image").fill("64");
+
+  await dialog.getByRole("tab", { name: "Hotkeys" }).click();
+  await expect(dialog.getByText("Zoom in (larger font)")).toBeVisible();
+  await expect(field(dialog, "Image")).toHaveCount(0);
+
+  await dialog.getByRole("tab", { name: "General" }).click();
+  await expect(field(dialog, "Image")).toHaveValue("64");
+});
+
 test("Restore defaults refills the form but needs a Save to stick", async ({
   page,
 }) => {

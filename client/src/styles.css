@@ -372,14 +372,6 @@ body {
 .icon-btn--sm {
   padding: 0 5px;
 }
-/* The ⌨ glyph renders visually small for its font size; enlarge it and match
-   the height of adjacent .btn buttons (e.g. Delete) in panel headers. */
-.icon-btn--kbd {
-  font-size: 19px;
-  line-height: 1;
-  padding: 0 7px;
-  height: 29px;
-}
 .icon-btn--danger {
   color: #f85149;
   border-color: #f85149;
@@ -509,7 +501,7 @@ body {
   padding: 12px 16px;
   border-top: 1px solid var(--border);
 }
-/* --- shortcuts help popup --- */
+/* --- hotkey reference (Settings › Hotkeys) --- */
 .shortcuts {
   width: 100%;
   border-collapse: collapse;
@@ -548,6 +540,29 @@ body {
   max-height: min(64vh, 560px);
   overflow-y: auto;
   gap: 20px;
+}
+.settings__tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.settings__tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 10px 6px;
+  margin-bottom: -1px;
+  cursor: pointer;
+}
+.settings__tab:hover {
+  color: var(--fg);
+}
+.settings__tab--active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
 }
 .settings__group {
   display: flex;

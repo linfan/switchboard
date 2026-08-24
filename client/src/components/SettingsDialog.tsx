@@ -72,6 +72,16 @@ const GROUPS: { legend: string; hint?: string; fields: Field[] }[] = [
 
 const FIELDS = GROUPS.flatMap((g) => g.fields);
 
+/** Read-only reference, shown on the Hotkeys tab. */
+const SHORTCUTS: { keys: string; action: string }[] = [
+  { keys: "⇧ ⌘ =", action: "Zoom in (larger font)" },
+  { keys: "⇧ ⌘ -", action: "Zoom out (smaller font)" },
+  { keys: "⌘ S", action: "Save the active file" },
+];
+
+const TABS = ["General", "Hotkeys"] as const;
+type Tab = (typeof TABS)[number];
+
 function isFontKey(key: FieldKey): key is FontKey {
   return (FONT_KEYS as readonly string[]).includes(key);
 }
@@ -111,6 +121,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [draft, setDraft] = useState(() =>
     toDraft({ ...settings, terminalFontSize, editorFontSize }),
   );
+  const [tab, setTab] = useState<Tab>("General");
 
   // Parse every field once per render: `values` feeds Save, `invalid` drives the
   // per-input highlight, and both are needed for the cross-field checks below.
@@ -206,31 +217,62 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         </>
       }
     >
-      {GROUPS.map((group) => (
-        <div className="settings__group" key={group.legend}>
-          <div className="settings__legend">{group.legend}</div>
-          {group.fields.map((f) => {
-            const { min, max } = boundsFor(f);
-            return (
-              <div className="settings__row" key={f.key}>
-                <label htmlFor={`setting-${f.key}`}>{f.label}</label>
-                <input
-                  id={`setting-${f.key}`}
-                  value={draft[f.key]}
-                  inputMode="numeric"
-                  title={`${min}–${max}${f.unit ? ` ${f.unit}` : ""}`}
-                  aria-invalid={invalid.has(f.key)}
-                  onChange={(e) =>
-                    setDraft((d) => ({ ...d, [f.key]: e.target.value }))
-                  }
-                />
-                <span className="settings__unit">{f.unit}</span>
-              </div>
-            );
-          })}
-          {group.hint && <p className="hint hint--muted">{group.hint}</p>}
-        </div>
-      ))}
+      <div className="settings__tabs" role="tablist">
+        {TABS.map((t) => (
+          <button
+            key={t}
+            type="button"
+            role="tab"
+            aria-selected={t === tab}
+            className={`settings__tab ${t === tab ? "settings__tab--active" : ""}`}
+            onClick={() => setTab(t)}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+      {tab === "Hotkeys" ? (
+        <table className="shortcuts">
+          <tbody>
+            {SHORTCUTS.map((s) => (
+              <tr key={s.action}>
+                <td className="shortcuts__keys">
+                  <kbd>{s.keys}</kbd>
+                </td>
+                <td className="shortcuts__action">{s.action}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        GROUPS.map((group) => (
+          <div className="settings__group" key={group.legend}>
+            <div className="settings__legend">{group.legend}</div>
+            {group.fields.map((f) => {
+              const { min, max } = boundsFor(f);
+              return (
+                <div className="settings__row" key={f.key}>
+                  <label htmlFor={`setting-${f.key}`}>{f.label}</label>
+                  <input
+                    id={`setting-${f.key}`}
+                    value={draft[f.key]}
+                    inputMode="numeric"
+                    title={`${min}–${max}${f.unit ? ` ${f.unit}` : ""}`}
+                    aria-invalid={invalid.has(f.key)}
+                    onChange={(e) =>
+                      setDraft((d) => ({ ...d, [f.key]: e.target.value }))
+                    }
+                  />
+                  <span className="settings__unit">{f.unit}</span>
+                </div>
+              );
+            })}
+            {group.hint && <p className="hint hint--muted">{group.hint}</p>}
+          </div>
+        ))
+      )}
+      {/* Kept outside the tab switch so a disabled Save is always explained,
+          even while the Hotkeys tab hides the offending field. */}
       {invalid.size > 0 && (
         <p className="hint hint--error">
           Highlighted values are outside their accepted range (hover a field to

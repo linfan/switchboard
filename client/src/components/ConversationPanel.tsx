@@ -1,7 +1,6 @@
 import { pool } from "../net/pool";
 import { useStore } from "../store/store";
 import { ConfirmButton } from "./ConfirmButton";
-import { ShortcutsHelp } from "./ShortcutsHelp";
 import { TerminalView } from "./TerminalView";
 
 export function ConversationPanel() {
@@ -32,7 +31,6 @@ export function ConversationPanel() {
           {conv.task.status.state}
         </span>
         <span className="panel__spacer" />
-        <ShortcutsHelp />
         <ConfirmButton
           className="btn btn--danger"
           armedTitle="Click again to delete this task and its history"
