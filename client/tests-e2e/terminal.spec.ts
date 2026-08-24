@@ -5,7 +5,10 @@ import { HTTP, TOKEN } from "./constants";
 // Create a workspace (name + a real server folder) so tasks have a home. Tasks
 // inherit its folder, so the New-task dialog no longer prompts for one.
 async function addWorkspace(page: Page, name: string) {
-  await page.getByTitle("Add workspace").click();
+  // The row's ⋯ trigger only appears on hover.
+  await page.locator(".service__head").hover();
+  await page.getByTitle("Service actions").click();
+  await page.getByRole("menuitem", { name: "Add workspace" }).click();
   const dialog = page.getByRole("dialog", { name: "Add workspace" });
   await dialog.getByPlaceholder("my-project").fill(name);
   await dialog.getByRole("button", { name: "Browse…" }).click();
@@ -16,6 +19,21 @@ async function addWorkspace(page: Page, name: string) {
   await picker.getByRole("button", { name: "Select this folder" }).click();
   await dialog.getByRole("button", { name: "Add" }).click();
   await expect(dialog).toBeHidden();
+}
+
+// Both the workspace's New-task action and the service's Reconnect live in the
+// row's ⋯ menu, which is only rendered while the row is hovered.
+async function openNewTask(page: Page, workspace: string) {
+  const head = page.locator(".workspace__head").filter({ hasText: workspace });
+  await head.hover();
+  await head.getByTitle("Workspace actions").click();
+  await page.getByRole("menuitem", { name: "New task" }).click();
+}
+
+async function reconnect(page: Page) {
+  await page.locator(".service__head").hover();
+  await page.getByTitle("Service actions").click();
+  await page.getByRole("menuitem", { name: "Reconnect now" }).click();
 }
 
 // Seed a registered service into localStorage before the app boots, so the
@@ -53,7 +71,7 @@ test("renders a PTY terminal, streams output, echoes input, and survives reconne
 
   // Create a task under a workspace (tool defaults to first available).
   await addWorkspace(page, "proj");
-  await page.getByTitle("New task").click();
+  await openNewTask(page, "proj");
   await expect(page.getByRole("dialog", { name: "New task" })).toBeVisible();
   await page.getByRole("button", { name: "Create" }).click();
 
@@ -74,7 +92,7 @@ test("renders a PTY terminal, streams output, echoes input, and survives reconne
 
   // Force a reconnect; the server redraws the screen (snapshot or byte replay),
   // so the prior output must still be present afterwards.
-  await page.getByTitle("Reconnect now").click();
+  await reconnect(page);
   await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
   await expect(rows).toContainText("reply:hello", { timeout: 15000 });
 });
@@ -89,7 +107,7 @@ test("terminal screen content is restored after a full client reload", async ({
   // A unique title lets us re-select exactly this task after reload — the shared
   // host DB accumulates tasks across tests, so `.conv first` isn't reliable.
   await addWorkspace(page, "proj");
-  await page.getByTitle("New task").click();
+  await openNewTask(page, "proj");
   const dialog = page.getByRole("dialog", { name: "New task" });
   await dialog.getByLabel("Title (optional)").fill("reload-task");
   await dialog.getByRole("button", { name: "Create" }).click();

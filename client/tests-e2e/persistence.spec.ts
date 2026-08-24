@@ -29,15 +29,15 @@ test("a deleted service stays deleted across a reload", async ({ page }) => {
   await page.reload();
   await expect(page.locator(".service", { hasText: "Demo" })).toBeVisible();
 
-  // Delete it via the two-click "Sure?" confirm. Locate the button by position
-  // (last button in the service header) since its title/text flip when armed.
-  const del = page
+  // Delete it from the service's ⋯ menu, whose Remove row needs two clicks —
+  // the second matches on the armed label, since arming rewrites the row.
+  const head = page
     .locator(".service", { hasText: "Demo" })
-    .locator(".service__head")
-    .getByRole("button")
-    .last();
-  await del.click(); // arm
-  await del.click(); // confirm
+    .locator(".service__head");
+  await head.hover();
+  await head.getByTitle("Service actions").click();
+  await page.getByRole("menuitem", { name: "Remove service" }).click();
+  await page.getByRole("menuitem", { name: "Click again to remove" }).click();
   await expect(page.locator(".service", { hasText: "Demo" })).toHaveCount(0);
 
   // The crux: after a reload it must not come back.
