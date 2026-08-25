@@ -306,6 +306,17 @@ reaches self-signed hosts (which the webview's fetch/WebSocket would reject) whi
 still authenticating the channel by the captured leaf-cert fingerprint, so an
 active MITM is rejected on pin mismatch.
 
+To supply your own self-signed key pair instead of letting the server generate
+one, create a `tls/` directory and run:
+
+```bash
+mkdir -p tls
+openssl req -x509 -newkey rsa:2048 -keyout tls/private.key -out tls/certificate.pem \
+    -days 3650 -nodes -subj "/C=CN/ST=Beijing/L=Beijing/O=None/CN=localhost"
+```
+
+Then point `SWITCHBOARD_TLS_CERT` / `SWITCHBOARD_TLS_KEY` at the generated files.
+
 ## Testing
 ```bash
 make test          # fast: shared + server + client unit/integration tests
