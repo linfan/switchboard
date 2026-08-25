@@ -427,13 +427,36 @@ CLIs installed as `.cmd` shims (npm's `claude`) are launched via `%COMSPEC%`.
 Self-upgrade (`POST /upgrade`) stays unix-only: it re-execs in place to carry live
 PTYs across the restart, which has no Windows equivalent.
 
+### Cross-compiling the desktop client
+The Tauri shell also cross-builds to Windows, but needs one extra tool:
+mingw-w64's `windres`, the only resource compiler `tauri-build` drives on a
+non-Windows host (it embeds `icons/icon.ico` and the version metadata).
+```bash
+brew install zig mingw-w64
+make setup-client-windows
+make package-client-windows  # -> dist/Switchboard.exe + WebView2Loader.dll
+```
+The frontend bundle is compiled into the binary, so the staged pair is the whole
+app — copy both files to the Windows machine and run the `.exe`. Three caveats:
+- **`WebView2Loader.dll` must sit next to the .exe.** `webview2-com-sys` links
+  the loader statically only under MSVC; every other target (including this one)
+  imports it from the DLL, so `package-client-windows` stages it alongside.
+- **No installer off-Windows.** The NSIS and MSI bundlers only exist in the
+  Tauri CLI's Windows build (`tauri build --bundles` offers just `app`/`dmg`/`ios`
+  on macOS), so the target passes `--no-bundle`. Run `make package-client` on a
+  Windows host, or in CI, if you need an `.msi`/`-setup.exe`.
+- **WebView2 itself is a runtime dependency.** Tauri renders through it rather
+  than shipping a browser engine. Windows 11 and current Windows 10 include it;
+  older installs need Microsoft's Evergreen bootstrapper once.
+
 ### App icon
 The icon is authored as SVG (`client/src-tauri/icons/icon.svg` for large sizes,
 `icon-small.svg` for ≤64px). After editing an SVG, regenerate the bundled PNGs
-and `.icns` (needs `iconutil`, macOS-only):
+and `.icns` (needs `iconutil`, macOS-only). `render-icon.mjs` writes `icon.ico`
+itself — Windows needs every frame in one file, so there is nothing to rename:
 ```bash
 cd client/src-tauri/icons
-node render-icon.mjs                        # render 16–1024px PNGs from the SVGs
+node render-icon.mjs                        # render 16–1024px PNGs + icon.ico
 cp 32.png 32x32.png                         # map to the names tauri.conf.json bundles
 cp 128.png 128x128.png
 cp 256.png 128x128@2x.png
@@ -445,7 +468,7 @@ cp 128.png "$ICONSET/icon_128x128.png";   cp 256.png "$ICONSET/icon_128x128@2x.p
 cp 256.png "$ICONSET/icon_256x256.png";   cp 512.png "$ICONSET/icon_256x256@2x.png"
 cp 512.png "$ICONSET/icon_512x512.png";   cp 1024.png "$ICONSET/icon_512x512@2x.png"
 iconutil -c icns "$ICONSET" -o icon.icns
-rm -rf "$ICONSET" 16.png 32.png 64.png 128.png 256.png 512.png 1024.png
+rm -rf "$ICONSET" 16.png 32.png 48.png 64.png 128.png 256.png 512.png 1024.png
 ```
 
 ## Design rationale

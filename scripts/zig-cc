@@ -4,27 +4,60 @@
 # Translates rust-style target triples into zig form (x86_64-unknown-linux-musl
 # -> x86_64-linux-musl, x86_64-pc-windows-gnullvm -> x86_64-windows-gnu; zig's
 # bundled mingw is ucrt/lld-based, which is what the gnullvm targets expect),
-# and rewrites the two library names rustc's windows link line uses that zig's
-# mingw does not answer to.
+# and reconciles the three windows link-line spellings rustc emits that zig does
+# not answer to (two library names and the cdylib export list).
 xlate() {
   printf '%s' "$1" | sed -e 's/-unknown-/-/' -e 's/-pc-windows-/-windows-/' \
     -e 's/-windows-gnullvm$/-windows-gnu/'
 }
 
-# Pass 1: find the target. rustc omits it on the link step (ZIG_TARGET covers
-# that); cc-rs passes --target=<rust triple> when compiling C.
+# Look for an import/static archive matching -l<name> in the collected -L dirs,
+# printing its path if found. `lib_dirs` is newline-delimited so paths may
+# contain spaces.
+find_lib() {
+  _name=$1
+  _old_ifs=$IFS
+  IFS='
+'
+  for _dir in $lib_dirs; do
+    for _cand in "$_dir/lib$_name.a" "$_dir/$_name.lib" "$_dir/lib$_name.lib"; do
+      if [ -f "$_cand" ]; then
+        IFS=$_old_ifs
+        printf '%s' "$_cand"
+        return 0
+      fi
+    done
+  done
+  IFS=$_old_ifs
+  return 1
+}
+
+# Pass 1: find the target and the library search path. rustc omits the target on
+# the link step (ZIG_TARGET covers that); cc-rs passes --target=<rust triple>
+# when compiling C.
 target="$ZIG_TARGET"
 has_target=0
 next_is_target=0
+next_is_libdir=0
+lib_dirs=
 for a in "$@"; do
   if [ "$next_is_target" = 1 ]; then
     target=$(xlate "$a")
     next_is_target=0
     continue
   fi
+  if [ "$next_is_libdir" = 1 ]; then
+    lib_dirs="$lib_dirs
+$a"
+    next_is_libdir=0
+    continue
+  fi
   case "$a" in
     --target=*|-target=*) target=$(xlate "${a#*=}"); has_target=1 ;;
     --target|-target) next_is_target=1; has_target=1 ;;
+    -L) next_is_libdir=1 ;;
+    -L?*) lib_dirs="$lib_dirs
+${a#-L}" ;;
   esac
 done
 
@@ -33,11 +66,21 @@ case "$target" in
   *) windows=0 ;;
 esac
 
-# Pass 2: rebuild argv, xlating triples and (windows only) mapping libraries:
+# Pass 2: rebuild argv, xlating triples and (windows only) rewriting:
 #   msvcrt         -> ucrtbase, since gnullvm is a ucrt target but rustc still
 #                     emits the legacy msvcrt name in its late link args.
 #   synchronization -> the api-set import lib that actually exports
 #                     WaitOnAddress & friends; zig ships no umbrella alias.
+#   -Wl,<x>.def    -> a plain input path. rustc hands the cdylib export list to
+#                     the linker behind -Wl, which zig's arg filter rejects; as a
+#                     positional it reaches lld and is honored (verified by
+#                     diffing the resulting DLL's export table).
+#   -l<name>       -> the archive's path, when one exists under -L. rustc marks
+#                     its system libs with -Wl,-Bdynamic, under which zig looks
+#                     for <name>.dll *only* and never falls back to the static
+#                     import archive — which is the form the windows-sys and
+#                     WebView2 crates ship. Names zig does resolve itself
+#                     (kernel32, advapi32, …) match nothing here and pass through.
 n=$#
 i=0
 next_is_target=0
@@ -63,6 +106,16 @@ while [ "$i" -lt "$n" ]; do
       ;;
     -lsynchronization)
       [ "$windows" = 1 ] && a=-lapi-ms-win-core-synch-l1-2-0
+      set -- "$@" "$a"
+      ;;
+    -Wl,*.def)
+      [ "$windows" = 1 ] && a=${a#-Wl,}
+      set -- "$@" "$a"
+      ;;
+    -l?*)
+      if [ "$windows" = 1 ] && resolved=$(find_lib "${a#-l}"); then
+        a=$resolved
+      fi
       set -- "$@" "$a"
       ;;
     *) set -- "$@" "$a" ;;

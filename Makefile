@@ -15,13 +15,22 @@ LINUX_AR_ENV = AR_$(shell echo $(LINUX_TARGET) | tr '-' '_')
 ZIG_TARGET = $(subst -unknown-,-,$(LINUX_TARGET))
 # Windows cross-build. `gnullvm` rather than `gnu` because zig's bundled mingw is
 # ucrt/lld-based, so the same zig that cross-builds Linux also links a native
-# .exe — no mingw-w64 or MSVC toolchain to install.
+# .exe. The server needs nothing else; the client additionally needs mingw-w64's
+# windres, the only resource compiler tauri-build knows how to drive off-Windows.
 WINDOWS_TARGET ?= x86_64-pc-windows-gnullvm
 WINDOWS_LINKER ?= $(CURDIR)/scripts/zig-cc
 WINDOWS_LINKER_ENV = CARGO_TARGET_$(shell echo $(WINDOWS_TARGET) | tr 'a-z-' 'A-Z_')_LINKER
 WINDOWS_CC_ENV = CC_$(shell echo $(WINDOWS_TARGET) | tr '-' '_')
 WINDOWS_AR_ENV = AR_$(shell echo $(WINDOWS_TARGET) | tr '-' '_')
 WINDOWS_ZIG_TARGET = x86_64-windows-gnu
+# One cross-build environment shared by the server and the Tauri client shell.
+WINDOWS_CROSS_ENV = ZIG_TARGET=$(WINDOWS_ZIG_TARGET) \
+  $(WINDOWS_LINKER_ENV)=$(WINDOWS_LINKER) \
+  $(WINDOWS_CC_ENV)=$(WINDOWS_LINKER) \
+  $(WINDOWS_AR_ENV)=$(CURDIR)/scripts/zig-ar
+# Raw cargo artifact name for the client shell (`tauri build --no-bundle` leaves
+# the binary under the crate's target dir rather than renaming it to productName).
+CLIENT_WINDOWS_BIN ?= switchboard-client.exe
 SERVER_ADDR ?= 127.0.0.1:8787
 SERVER_TOKEN ?= dev-token
 SERVER_DATA ?= server/data/switchboard.db
@@ -40,7 +49,7 @@ help: ## Show this help
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
 # ---------------------------------------------------------------- setup
-.PHONY: setup setup-server setup-server-linux setup-server-windows setup-client setup-e2e
+.PHONY: setup setup-server setup-server-linux setup-server-windows setup-client setup-client-windows setup-e2e
 setup: setup-server setup-client setup-e2e ## Install all toolchains/deps
 setup-server: ## Fetch Rust deps
 	$(CARGO) fetch
@@ -52,11 +61,16 @@ setup-server-windows: ## Install Rust target + check linker for Windows cross-bu
 	@command -v zig >/dev/null || { echo "zig not found. Install: brew install zig"; exit 1; }
 setup-client: ## Install client node deps
 	cd client && $(NPM) install
+setup-client-windows: ## Install Rust target + check linker/resource compiler for Windows client cross-builds
+	rustup target add $(WINDOWS_TARGET)
+	@command -v zig >/dev/null || { echo "zig not found. Install: brew install zig"; exit 1; }
+	@command -v x86_64-w64-mingw32-windres >/dev/null \
+	  || { echo "x86_64-w64-mingw32-windres not found (embeds the icon + version resource). Install: brew install mingw-w64"; exit 1; }
 setup-e2e: ## Install e2e harness deps
 	cd e2e && $(NPM) install
 
 # ---------------------------------------------------------------- build
-.PHONY: build build-server build-server-linux build-server-windows build-client build-shared
+.PHONY: build build-server build-server-linux build-server-windows build-client build-client-windows build-shared
 build: build-server build-client ## Build everything
 build-shared: ## Build shared protocol crate + emit TS bindings into client/src/protocol
 	TS_RS_EXPORT_DIR="$(CURDIR)" $(CARGO) test -p switchboard-shared
@@ -70,13 +84,14 @@ build-server-linux: ## Cross-compile a static server for Linux (needs zig: brew 
 	RUSTFLAGS="$${RUSTFLAGS:-} -C link-self-contained=no" \
 	$(CARGO) build -p switchboard-server --release --target $(LINUX_TARGET)
 build-server-windows: ## Cross-compile the server .exe for Windows (needs zig: brew install zig)
-	ZIG_TARGET=$(WINDOWS_ZIG_TARGET) \
-	$(WINDOWS_LINKER_ENV)=$(WINDOWS_LINKER) \
-	$(WINDOWS_CC_ENV)=$(WINDOWS_LINKER) \
-	$(WINDOWS_AR_ENV)=$(CURDIR)/scripts/zig-ar \
+	$(WINDOWS_CROSS_ENV) \
 	$(CARGO) build -p switchboard-server --release --target $(WINDOWS_TARGET)
 build-client: build-shared ## Build the Tauri client
 	cd client && $(NPM) install --silent && $(NPM) run build
+build-client-windows: build-shared ## Cross-compile the desktop client .exe for Windows (portable, no installer)
+	cd client && $(NPM) install --silent && \
+	$(WINDOWS_CROSS_ENV) \
+	$(NPM) exec -- tauri build --target $(WINDOWS_TARGET) --no-bundle
 
 # ---------------------------------------------------------------- run
 .PHONY: run-server run-client
@@ -149,7 +164,7 @@ set-version: ## Align every component to one version: make set-version VERSION=x
 	@echo "All components set to $(VERSION) — review with: git diff"
 
 # ---------------------------------------------------------------- deploy
-.PHONY: package-server package-server-linux package-server-windows package-client clean distclean
+.PHONY: package-server package-server-linux package-server-windows package-client package-client-windows clean distclean
 package-server: build-server ## Produce a self-contained server release artifact
 	@mkdir -p dist
 	cp target/release/$(SERVER_BIN) dist/ 2>/dev/null || true
@@ -164,6 +179,13 @@ package-server-windows: build-server-windows ## Produce a Windows server release
 	@echo "Windows server binary staged in ./dist/$(SERVER_BIN).exe"
 package-client: build-client ## Package the desktop client (Tauri bundles)
 	cd client && $(NPM) run tauri build
+package-client-windows: build-client-windows ## Produce a portable Windows client artifact
+	@mkdir -p dist
+	cp client/src-tauri/target/$(WINDOWS_TARGET)/release/$(CLIENT_WINDOWS_BIN) dist/Switchboard.exe
+	@# Non-MSVC builds of webview2-com-sys import the loader dynamically, so the
+	@# DLL it extracted from the WebView2 SDK has to travel next to the .exe.
+	cp "$$(find client/src-tauri/target/$(WINDOWS_TARGET)/release/build -path '*webview2-com-sys*/out/x64/WebView2Loader.dll' | head -1)" dist/
+	@echo "Windows client staged in ./dist: Switchboard.exe + WebView2Loader.dll"
 clean: ## Remove build artifacts (keeps fetched deps)
 	$(CARGO) clean
 	cd client/src-tauri && $(CARGO) clean

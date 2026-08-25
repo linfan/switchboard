@@ -17,6 +17,12 @@ client/.vite
 client/src-tauri/target
 client/src-tauri/gen
 
+# Bare-size PNGs that render-icon.mjs emits on the way to icon.ico / icon.icns.
+# Only the named variants fed from them are committed, and those all carry an
+# `x` (32x32.png, 128x128@2x.png), so the negation keeps them tracked.
+client/src-tauri/icons/[0-9]*.png
+!client/src-tauri/icons/*x*.png
+
 # Playwright (browser E2E) artifacts
 client/test-results
 client/playwright-report
