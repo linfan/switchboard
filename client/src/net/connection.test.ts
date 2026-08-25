@@ -11,10 +11,17 @@ import {
 // WebCrypto (crypto.subtle) resolves on the libuv threadpool, not a timer or a
 // microtask, so it never settles under vitest fake timers via
 // `advanceTimersByTimeAsync`. Capture the real setTimeout before faking and
-// yield to a genuine macrotask to let the handshake HMAC complete.
+// yield genuine macrotasks until the manager has actually answered the
+// challenge — a single yield is usually enough, but the threadpool can be slower
+// than that when the rest of the suite runs alongside, which made this flaky.
 const realSetTimeout = globalThis.setTimeout;
-function settleCrypto(): Promise<void> {
-  return new Promise((r) => realSetTimeout(r, 0));
+async function settleCrypto(s: FakeSocket): Promise<void> {
+  const before = s.count("auth_response");
+  for (let i = 0; i < 1000; i++) {
+    if (s.count("auth_response") > before) return;
+    await new Promise((r) => realSetTimeout(r, 0));
+  }
+  throw new Error("handshake HMAC never settled");
 }
 
 /** In-memory WebSocket the tests drive by hand. */
@@ -67,6 +74,9 @@ class FakeSocket implements WebSocketLike {
   find(type: string): any {
     return this.parsed().find((m) => m.type === type);
   }
+  count(type: string): number {
+    return this.parsed().filter((m) => m.type === type).length;
+  }
 }
 
 function mkManager(over: Partial<Parameters<typeof makeDeps>[0]> = {}) {
@@ -78,13 +88,12 @@ function mkManager(over: Partial<Parameters<typeof makeDeps>[0]> = {}) {
 /**
  * Drive the SWB-WS-v1 handshake to completion: open, answer the server's
  * challenge, and accept. `auth_ok` is applied synchronously, so afterwards the
- * manager is online with the heartbeat running. The interleaved
- * `advanceTimersByTimeAsync(0)` lets the async WebCrypto HMAC settle.
+ * manager is online with the heartbeat running.
  */
 async function driveHandshake(s: FakeSocket): Promise<void> {
   s.emitOpen();
   s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
-  await settleCrypto();
+  await settleCrypto(s);
   s.emitMessage({ type: "auth_ok" });
 }
 
@@ -140,7 +149,7 @@ describe("handshake", () => {
     expect(mgr.getStatus()).toBe("connecting");
     expect(s.find("hello")).toBeUndefined();
     s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
-    await settleCrypto();
+    await settleCrypto(s);
     expect(s.find("auth_response")).toMatchObject({
       type: "auth_response",
       client_nonce: expect.any(String),
@@ -339,7 +348,7 @@ describe("network + wake", () => {
     expect(FakeSocket.last()).toBe(s);
     // The delayed handshake still completes on the very same socket.
     s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
-    await settleCrypto();
+    await settleCrypto(s);
     s.emitMessage({ type: "auth_ok" });
     expect(mgr.getStatus()).toBe("online");
     mgr.stop();
@@ -412,7 +421,7 @@ describe("handshake watchdog", () => {
     expect(mgr.getStatus()).not.toBe("reconnecting");
     // The delayed handshake completes on the same socket.
     s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
-    await settleCrypto();
+    await settleCrypto(s);
     s.emitMessage({ type: "auth_ok" });
     expect(mgr.getStatus()).toBe("online");
     mgr.stop();
