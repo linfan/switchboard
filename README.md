@@ -279,7 +279,14 @@ directories are created if missing. Size units are case-insensitive — `b`, `kb
 `mb`, `gb` (or the bare `k` / `m` / `g`); a plain number is bytes. Applies to
 every role (worker, repeater, worker-repeater-client), and `RUST_LOG` still
 controls the level/filter. A `count` of `0` keeps no archives (the file is
-truncated in place on roll).
+truncated in place on roll). Quote the spec in shells where `|` is a pipe —
+`set "SWITCHBOARD_LOG=…|100mb*5"` in `cmd.exe`, single quotes in POSIX shells —
+otherwise the value arrives truncated and is ignored with a warning.
+
+Stdout logs are colorized only when stdout is a terminal that renders ANSI
+escapes (on Windows the console's virtual-terminal mode is switched on for this,
+and pre-1809 consoles that reject it get plain text). Redirected output and log
+files are never colorized; set `NO_COLOR=1` to turn color off everywhere.
 
 Role selection: `SWITCHBOARD_MODE=repeater` → **repeater**. Otherwise a worker
 with **no** `SWITCHBOARD_ADDR`/`SWITCHBOARD_TOKEN` but a `SWITCHBOARD_REPEATER_ADDR`
@@ -311,11 +318,52 @@ one, create a `tls/` directory and run:
 
 ```bash
 mkdir -p tls
-openssl req -x509 -newkey rsa:2048 -keyout tls/private.key -out tls/certificate.pem \
-    -days 3650 -nodes -subj "/C=CN/ST=Beijing/L=Beijing/O=None/CN=localhost"
+openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout tls/private.key -out tls/certificate.pem -days 397 \
+    -subj "/O=Switchboard/CN=Switchboard" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:192.168.1.50" \
+    -addext "extendedKeyUsage=serverAuth"
 ```
 
-Then point `SWITCHBOARD_TLS_CERT` / `SWITCHBOARD_TLS_KEY` at the generated files.
+Replace `192.168.1.50` with the address clients dial (add one `IP:`/`DNS:` entry
+per address). Then point `SWITCHBOARD_TLS_CERT` / `SWITCHBOARD_TLS_KEY` at the
+generated files. `-days 397` stays under the 398-day cap macOS/Safari enforce, so
+the same cert can also be trusted in a browser.
+
+Two encoding details are **not** optional — rustls (the desktop client's pinning
+verifier, the worker's outbound leg to a repeater, and the server's own key
+loader) is stricter than OpenSSL's defaults:
+
+- **`-addext` — the cert must be X.509 v3.** `openssl req -x509` with no
+  extensions at all emits a **v1** certificate, which rustls rejects at handshake
+  time with `invalid peer certificate: Other(OtherError(UnsupportedCertVersion))`.
+  Any one `-addext` forces v3, so `subjectAltName` already covers it. Whether the
+  older extension-less command happened to work depended entirely on the local
+  OpenSSL: OpenSSL 3.x with a config that sets `x509_extensions` adds extensions
+  (→ v3) on its own, while LibreSSL (macOS's `/usr/bin/openssl`) and any build
+  running without a usable `openssl.cnf` produce v1.
+- **EC keys need `-pkeyopt ec_param_enc:named_curve`.** If you prefer ECDSA
+  P-256 over RSA, use
+  `-newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -pkeyopt ec_param_enc:named_curve`.
+  Without the second `-pkeyopt`, OpenSSL/LibreSSL write the curve as *explicit*
+  parameters, which rustls can't read — the server then fails to start with
+  `failed to parse private key as RSA, ECDSA, or EdDSA`. RSA has no equivalent
+  trap, hence the default above.
+
+Verify both before deploying:
+
+```bash
+openssl x509 -in tls/certificate.pem -noout -text | grep -E "Version|DNS:|IP Address"
+#         Version: 3 (0x2)     <- must say 3, not 1
+head -1 tls/private.key        # BEGIN PRIVATE KEY (PKCS#8) or BEGIN RSA PRIVATE KEY
+```
+
+On Windows, use the OpenSSL that ships with Git for Windows
+(`C:\Program Files\Git\usr\bin\openssl.exe`); from Git Bash the command above works
+verbatim. If OpenSSL isn't available, **omit the cert/key files entirely and let the
+server generate the pair on startup** — it emits a correct v3 ECDSA P-256 cert with
+the right SANs, and the desktop client pins it on first add, so this is the
+recommended path on every platform.
 
 ## Testing
 ```bash

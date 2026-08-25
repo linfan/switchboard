@@ -197,6 +197,8 @@ Put the configuration in an environment file, `/etc/switchboard/switchboard.env`
 SWITCHBOARD_ADDR=0.0.0.0:8787
 SWITCHBOARD_TOKEN=choose-a-strong-token
 SWITCHBOARD_DB=/opt/switchboard/data/switchboard.db
+SWITCHBOARD_TLS_CERT=/opt/switchboard/data/switchboard-cert.pem
+SWITCHBOARD_TLS_KEY=/opt/switchboard/data/switchboard-key.pem
 SWITCHBOARD_LOG=/opt/switchboard/logs/switchboard.log|100mb*5
 RUST_LOG=info
 # must include the directories holding claude / qodercli
@@ -254,7 +256,7 @@ configure the working directory, environment, and restart policy:
 ```bat
 nssm install Switchboard "C:\Program Files\Switchboard\switchboard-server.exe"
 nssm set Switchboard AppDirectory "C:\Program Files\Switchboard"
-nssm set Switchboard AppEnvironmentExtra SWITCHBOARD_ADDR=0.0.0.0:8787 SWITCHBOARD_TOKEN=choose-a-strong-token SWITCHBOARD_DB="C:\ProgramData\Switchboard\switchboard.db" "SWITCHBOARD_LOG=C:\ProgramData\Switchboard\logs\switchboard.log|100mb*5" RUST_LOG=info "PATH=C:\Program Files\Switchboard;C:\Program Files\nodejs;%SystemRoot%\System32;%SystemRoot%"
+nssm set Switchboard AppEnvironmentExtra SWITCHBOARD_ADDR=0.0.0.0:8787 SWITCHBOARD_TOKEN=choose-a-strong-token SWITCHBOARD_DB="C:\ProgramData\Switchboard\switchboard.db" SWITCHBOARD_TLS_CERT="C:\ProgramData\Switchboard\switchboard-cert.pem" SWITCHBOARD_TLS_KEY="C:\ProgramData\Switchboard\switchboard-key.pem" "SWITCHBOARD_LOG=C:\ProgramData\Switchboard\logs\switchboard.log|100mb*5" RUST_LOG=info "PATH=C:\Program Files\Switchboard;C:\Program Files\nodejs;%SystemRoot%\System32;%SystemRoot%"
 nssm set Switchboard AppExit Default Restart
 nssm set Switchboard AppRestartDelay 3000
 ```
@@ -317,6 +319,10 @@ directories, then write a daemon plist,
         <string>choose-a-strong-token</string>
         <key>SWITCHBOARD_DB</key>
         <string>/opt/switchboard/data/switchboard.db</string>
+        <key>SWITCHBOARD_TLS_CERT</key>
+        <string>/opt/switchboard/data/switchboard-cert.pem</string>
+        <key>SWITCHBOARD_TLS_KEY</key>
+        <string>/opt/switchboard/data/switchboard-key.pem</string>
         <key>SWITCHBOARD_LOG</key>
         <string>/opt/switchboard/logs/switchboard.log|100mb*5</string>
         <key>RUST_LOG</key>
