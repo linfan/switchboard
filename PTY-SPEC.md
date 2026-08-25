@@ -69,6 +69,12 @@ durable per-client cursors), ts-rs for the control plane.
 `portable-pty` is synchronous; bridge it to tokio with dedicated threads +
 channels.
 
+> Since this spec was written, all of the below runs in the task's own detached
+> `pty-host` process rather than in the server (`server/src/host/`), so that
+> replacing the server binary does not kill running tasks. The mechanics are
+> unchanged; the server now reaches them over a local socket instead of owning
+> the PTY directly.
+
 1. `native_pty_system().openpty(PtySize { rows, cols, pixel_width:0, pixel_height:0 })`
    using the client-provided initial size from `create_task` (default 80×24).
 2. `CommandBuilder` with the tool's **native interactive argv** (see §7), `cwd`,

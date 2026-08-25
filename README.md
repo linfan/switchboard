@@ -36,7 +36,7 @@ Each task is an independent conversation with its own isolated context.
 | `client/`  | Tauri 2 + React + Zustand desktop client with xterm.js terminals |
 | `e2e/`     | End-to-end harness: real server binary + WS clients + fake PTY agent |
 | `Makefile` | Unified build/test/run/deploy |
-| `DEPLOY.md` | Quick start, release builds, and service registration (systemd / `sc` / launchd) |
+| `DEPLOY.md` | Quick start, release builds, and service registration (systemd / nssm / launchd) |
 | `PTY-SPEC.md` | The v2 PTY design |
 
 ## Architecture
@@ -49,8 +49,8 @@ Each task is an independent conversation with its own isolated context.
 │   └ ConnectionManager (×N)   │  + REST  │                      ▼         │     │
 │       • Hello + cursors      │          │   TaskManager ── broadcast bus │     │
 │       • heartbeat watchdog   │  JSON ctl│      │                         │     │
-│       • backoff reconnect    │  + binary│      ├─ PtyProc (spawn CLI) ───┤     │
-│       • sleep/online detect  │  frames  │      │    PTY master r/w       │     │
+│       • backoff reconnect    │  + binary│      ├─ HostLink ── local IPC ─┤     │
+│       • sleep/online detect  │  frames  │      │    to each pty-host     │     │
 │  xterm.js terminals (×N)     │          │      ├─ vt100 emulator         ▼     │
 │  Zustand store               │          │      ▼                  claude / …   │
 │   • services (persisted)     │          │   SQLite Store          qodercli     │
@@ -67,6 +67,12 @@ Each task is an independent conversation with its own isolated context.
   monotonic per-task sequence number, is persisted to SQLite *before*
   broadcasting, and is also fed to a server-side vt100 emulator that can redraw
   the current screen on demand.
+- Each task's PTY and agent live in a **separate `pty-host` process**, spawned
+  detached, which the server drives over a local socket (unix socket / named
+  pipe). So the server holds no OS resource belonging to a task and can be
+  replaced — for a self-upgrade, a crash, a service restart — without killing
+  anything: the new process re-attaches and resumes each byte stream at the
+  offset the old one had persisted. See [Self-upgrade](#self-upgrade).
 
 ### Durability & gap-free replay (the core guarantee)
 
@@ -195,15 +201,37 @@ In PTY mode each tool runs as an ordinary interactive terminal program (no `-p`,
 no stream-json) on a server-side pseudo-terminal; the PTY *is* the integration
 surface, so the agent answers its own trust/permission prompts live. The
 supervisor (`server/src/pty_proc.rs`) bridges the synchronous `portable-pty`
-master to tokio, and a vt100 emulator (`server/src/terminal.rs`) tracks the
-screen for snapshots. Adding a new CLI agent is one registry entry in
+master to tokio — inside the task's `pty-host` process (`server/src/host/`) —
+and a vt100 emulator (`server/src/terminal.rs`) tracks the screen for snapshots
+in the server. Adding a new CLI agent is one registry entry in
 `server/src/agent.rs`.
+
+### Self-upgrade
+
+A host can replace its own binary while it is serving: `POST
+/api/admin/upgrade/upload` takes the raw bytes, `POST /api/admin/upgrade/url` has
+the host download them itself, both with an optional SHA-256. The binary is
+rejected before anything is touched unless it is an executable for the host's own
+OS *and* CPU — pushing the wrong build is the one mistake that could otherwise
+leave a service down.
+
+**Running tasks are unaffected**, because they are not in the server process:
+their PTYs live in the detached `pty-host` processes described above, and the
+replacement server re-attaches to them. All an upgrade costs is a moment of
+buffered output.
+
+How the new process starts is the only platform difference. Linux and macOS
+`execve` in place, keeping the same pid. Windows cannot re-exec and cannot
+overwrite a running image either, so the server renames its own `.exe` aside
+(which the loader permits), writes the new one into that path, and exits — the
+service manager starts it. That requires nssm's `AppExit Default Restart`; see
+[DEPLOY.md](DEPLOY.md#upgrading).
 
 ## Quick start & deployment
 
 See [DEPLOY.md](DEPLOY.md) for prerequisites, the quick start (local, remote,
 and repeater setups), release/cross builds, installing the hosting service, and
-registering it with **systemd** (Linux), **`sc`** (Windows), or **launchd**
+registering it with **systemd** (Linux), **nssm** (Windows), or **launchd**
 (macOS).
 
 ## Configuration
@@ -389,7 +417,9 @@ make test-live     # live agent-CLI round-trip (needs claude/qodercli auth)
 - **End-to-end** (`e2e/`) spawns the real server binary supervising a fake PTY
   agent on `PATH`, connects real WebSocket clients, and proves the crown-jewel
   guarantee: after a disconnect a reconnecting client is fast-forwarded *exactly*
-  the terminal bytes it missed — gap-free, no loss, no duplicates.
+  the terminal bytes it missed — gap-free, no loss, no duplicates. It then kills
+  the server outright and requires the task to still be running, and still
+  answering input, under its replacement.
 - **Browser E2E** (`client/tests-e2e/`, Playwright) boots the real server + the
   Vite dev app and drives a live xterm.js terminal: renders PTY output, types
   input, and verifies the display survives a forced reconnect.

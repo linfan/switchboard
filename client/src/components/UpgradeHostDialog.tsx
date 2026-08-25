@@ -18,10 +18,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /**
  * Push a new server binary to a host and restart it in place. The binary comes
  * either from a locally-picked file (uploaded raw) or a URL the *host* downloads.
- * On success the server validates, swaps its own executable, and re-execs —
- * keeping live tasks — so the connection blips and auto-reconnects. After the
- * request lands we re-probe `/health` until the new version answers, and show it
- * as confirmation.
+ * On success the server validates the binary, swaps its own executable, and
+ * restarts — re-exec on unix, exit-and-let-the-service-manager-start-it on
+ * Windows. Either way running tasks survive, since their PTYs live in separate
+ * host processes the new server re-attaches to; only the connection blips. After
+ * the request lands we re-probe `/health` until the new version answers, and show
+ * it as confirmation.
  */
 export function UpgradeHostDialog({
   service,

@@ -103,8 +103,8 @@ ucrt/lld-based) and imports only system DLLs. Terminal tasks there run on a
 **ConPTY**, so `cmd`, `powershell`, and `pwsh` all work as a task's command —
 which needs Windows 10 1809 or newer. Bare names resolve through `PATHEXT`, and
 CLIs installed as `.cmd` shims (npm's `claude`) are launched via `%COMSPEC%`.
-Self-upgrade (`POST /upgrade`) stays unix-only: it re-execs in place to carry live
-PTYs across the restart, which has no Windows equivalent.
+Self-upgrade works here too — see [Upgrading](#upgrading); it needs the service
+to be registered so the manager restarts it, because Windows cannot re-exec.
 
 ### Cross-compiling the desktop client
 The Tauri shell also cross-builds to Windows, but needs one extra tool:
@@ -281,8 +281,11 @@ Notes:
 - There is no console under the SCM, so set `SWITCHBOARD_LOG` to get logs on
   disk (or redirect the binary's stdout instead:
   `nssm set Switchboard AppStdout <file>`).
-- Terminal tasks run on ConPTY (Windows 10 1809+). Self-upgrade (`POST /upgrade`)
-  is unix-only; on Windows upgrade by replacing the `.exe` and restarting.
+- Terminal tasks run on ConPTY (Windows 10 1809+).
+- The `AppExit Default Restart` line above is what makes self-upgrade work.
+  Windows has no `execve`, so the server swaps its own `.exe` and exits, leaving
+  nssm to start the new one; drop that setting and the service stays down after
+  an upgrade.
 
 Remove the service with:
 
@@ -352,9 +355,29 @@ sudo launchctl bootout system/com.switchboard.server        # unload
 
 - Back up the SQLite file (`SWITCHBOARD_DB`) before upgrading — it holds all task
   history and replay cursors.
-- On Linux/macOS the server supports in-place self-upgrade (`POST /upgrade`),
-  which re-execs and carries live PTYs across the restart. Under a service
-  manager you can equally just replace the binary and restart the service —
-  reconnecting clients are fast-forwarded from the persisted log, so nothing is
-  lost.
-- On Windows, stop the service, replace the `.exe`, and start it again.
+- **Running tasks survive an upgrade on every platform.** Each task's PTY and
+  agent live in a separate `pty-host` process, spawned detached from the server,
+  so replacing the server never touches them: the new process re-attaches over
+  the host's local socket and resumes each byte stream at the exact offset the
+  old one had persisted. An upgrade costs a moment of buffered output, not a
+  task. While no server is attached the host keeps buffering; if the gap runs
+  long enough to exhaust its retention (4 MiB unacknowledged) it stops draining
+  the PTY, which pauses the agent rather than losing its output.
+- Self-upgrade is exposed as `POST /api/admin/upgrade/upload` (raw binary body)
+  and `POST /api/admin/upgrade/url` (`{"url", "sha256"}`); both accept an
+  optional SHA-256 and reject a binary built for another OS or CPU before
+  replacing anything. The desktop client's *Upgrade host* dialog drives both.
+- Where the new process comes from differs by platform, and that is all that
+  differs: Linux and macOS re-exec in place, keeping the same pid. Windows cannot
+  re-exec, so the server renames the running `.exe` aside, writes the new one in
+  its place, and exits — the service manager starts it (see the nssm note above).
+  A self-spawned replacement is deliberately *not* used: nssm restarts the
+  service on exit, so it and our child would fight over the client port.
+- Replacing the binary by hand and restarting the service works equally well on
+  every platform, and keeps tasks running for the same reason. Reconnecting
+  clients are fast-forwarded from the persisted log, so nothing is lost either
+  way.
+- The client/server wire protocol is **not** version-negotiated, so keep the two
+  in step across releases (`make set-version` aligns every component). `GET
+  /health` and the client's service list both report the version a host is
+  actually running.
