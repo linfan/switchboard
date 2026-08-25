@@ -237,44 +237,56 @@ To repeat the same for a **repeater** or a **dial-out worker**, register a secon
 unit with that role's variables instead (see
 [Configuration](README.md#configuration)).
 
-### Windows — `sc`
+### Windows — nssm
 
-`sc` has no way to attach environment variables to a service, so either set them
-machine-wide (`setx /M SWITCHBOARD_ADDR 0.0.0.0:8787`, …) and register the `.exe`
-directly, or — recommended — register a small wrapper script that sets them:
+`switchboard-server.exe` is a plain console binary — it never speaks the SCM
+protocol (`StartServiceCtrlDispatcher` / `SetServiceStatus`), so registering it
+directly with `sc` would start the process but leave `sc start` blocking until
+the SCM's start timeout: the process never reports `SERVICE_RUNNING`. Wrap it
+with **nssm** (https://nssm.cc/) instead, which implements the SCM side and runs
+the binary as a child. Download nssm and make `nssm.exe` reachable (e.g. put it
+next to the binary or add it to `PATH`).
 
-`C:\Program Files\Switchboard\run-switchboard.cmd`:
+Register the service pointing straight at the `.exe` — nssm sets environment
+variables natively, so no `run-switchboard.cmd` wrapper is needed — then
+configure the working directory, environment, and restart policy:
 
 ```bat
-@echo off
-set SWITCHBOARD_ADDR=0.0.0.0:8787
-set SWITCHBOARD_TOKEN=choose-a-strong-token
-set SWITCHBOARD_DB=C:\ProgramData\Switchboard\switchboard.db
-set SWITCHBOARD_LOG=C:\ProgramData\Switchboard\logs\switchboard.log|100mb*5
-set RUST_LOG=info
-"C:\Program Files\Switchboard\switchboard-server.exe"
+nssm install Switchboard "C:\Program Files\Switchboard\switchboard-server.exe"
+nssm set Switchboard AppDirectory "C:\Program Files\Switchboard"
+nssm set Switchboard AppEnvironmentExtra SWITCHBOARD_ADDR=0.0.0.0:8787 SWITCHBOARD_TOKEN=choose-a-strong-token SWITCHBOARD_DB="C:\ProgramData\Switchboard\switchboard.db" "SWITCHBOARD_LOG=C:\ProgramData\Switchboard\logs\switchboard.log|100mb*5" RUST_LOG=info "PATH=C:\Program Files\Switchboard;C:\Program Files\nodejs;%SystemRoot%\System32;%SystemRoot%"
+nssm set Switchboard AppExit Default Restart
+nssm set Switchboard AppRestartDelay 3000
 ```
 
-From an **elevated** shell, create and start the service:
+From an **elevated** shell, start and check the service:
 
 ```bat
-sc create Switchboard binPath= "C:\Program Files\Switchboard\run-switchboard.cmd" start= auto
-sc start Switchboard
-sc query Switchboard
+nssm start Switchboard
+nssm status Switchboard
 ```
 
 Notes:
-- There is no console under the SCM, so set `SWITCHBOARD_LOG` to get logs on disk.
-- The service account's `PATH` must resolve `claude` / `qodercli`; add a
-  `set PATH=...` line to the wrapper if they live outside the default paths.
+- `AppEnvironmentExtra` merges each variable into the service's environment — it
+  does **not** replace the whole environment (that is `AppEnvironment`, which you
+  should avoid). Each `nssm set … AppEnvironmentExtra` call replaces the previous
+  list, so keep all variables in the single command above. Quote any value that
+  contains spaces or shell metacharacters — especially `SWITCHBOARD_LOG`:
+  unquoted, the `|` is a cmd pipe and the value gets cut at the path.
+- Drop the `PATH=` argument if `claude` / `qodercli` already resolve for the
+  service account; override it only when they live outside the default paths.
+  `cmd` expands `%SystemRoot%` before nssm stores the value.
+- There is no console under the SCM, so set `SWITCHBOARD_LOG` to get logs on
+  disk (or redirect the binary's stdout instead:
+  `nssm set Switchboard AppStdout <file>`).
 - Terminal tasks run on ConPTY (Windows 10 1809+). Self-upgrade (`POST /upgrade`)
   is unix-only; on Windows upgrade by replacing the `.exe` and restarting.
 
 Remove the service with:
 
 ```bat
-sc stop Switchboard
-sc delete Switchboard
+nssm stop Switchboard
+nssm remove Switchboard confirm
 ```
 
 ### macOS — launchd
