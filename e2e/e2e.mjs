@@ -5,6 +5,7 @@
 // guarantee: after a disconnect, a reconnecting client is fast-forwarded EXACTLY
 // the terminal bytes it missed — gap-free, nothing at or below its cursor.
 import { spawn } from "node:child_process";
+import { createHmac, randomBytes } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -21,7 +22,7 @@ const FAKE_AGENT_DIR = join(HERE, "fake-agent");
 const ADDR = "127.0.0.1:8799";
 const TOKEN = "e2e-token";
 const HTTP = `http://${ADDR}`;
-const WS_URL = `ws://${ADDR}/ws?token=${TOKEN}`;
+const WS_URL = `ws://${ADDR}/ws`;
 
 const dbDir = mkdtempSync(join(tmpdir(), "switchboard-e2e-"));
 const serverLog = [];
@@ -43,6 +44,24 @@ function eq(a, b, msg) {
   const as = JSON.stringify(a);
   const bs = JSON.stringify(b);
   if (as !== bs) fail(`${msg}: expected ${bs}, got ${as}`);
+}
+
+// --- SWB-WS-v1 auth (mirror of shared/src/auth.rs) --------------------------
+// The token is never transmitted: the client returns an HMAC over both nonces and
+// the channel binding. Every field is length-prefixed (u64 big-endian) so no value
+// can be confused for another. TLS is off here, so the channel binding is empty.
+const WS_DOMAIN = Buffer.from("SWB-WS-v1");
+const CHANNEL_BINDING = Buffer.alloc(0);
+
+function mac(key, domain, fields) {
+  const h = createHmac("sha256", key);
+  for (const field of [domain, ...fields]) {
+    const len = Buffer.alloc(8);
+    len.writeBigUInt64BE(BigInt(field.length));
+    h.update(len);
+    h.update(field);
+  }
+  return h.digest();
 }
 
 // --- binary data-plane codec (mirror of shared/src/frame.rs) ----------------
@@ -102,6 +121,28 @@ class Client {
   }
   open() {
     return this.opened;
+  }
+  // Answer the server's challenge, so the connection may proceed to `hello`.
+  async auth() {
+    await this.waitUntil(
+      () => this.hasText((m) => m.type === "auth_challenge"),
+      "auth_challenge",
+    );
+    const serverNonce = Buffer.from(
+      this.text.find((m) => m.type === "auth_challenge").server_nonce,
+      "hex",
+    );
+    const clientNonce = randomBytes(32);
+    this.send({
+      type: "auth_response",
+      client_nonce: clientNonce.toString("hex"),
+      mac: mac(Buffer.from(TOKEN), WS_DOMAIN, [
+        serverNonce,
+        clientNonce,
+        CHANNEL_BINDING,
+      ]).toString("hex"),
+    });
+    await this.waitUntil(() => this.hasText((m) => m.type === "auth_ok"), "auth_ok");
   }
   send(obj) {
     this.ws.send(JSON.stringify(obj));
@@ -167,9 +208,13 @@ function startServer() {
   return child;
 }
 
-async function waitForHealth(timeoutMs = 15000) {
+async function waitForHealth(server, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    // Our server dying (a port already in use, say) would otherwise leave the
+    // health probe answering from whatever else is listening on ADDR, and the
+    // failure would surface much later as an inexplicable protocol timeout.
+    if (server.exitCode !== null) fail(`server exited with code ${server.exitCode}`);
     try {
       const r = await fetch(`${HTTP}/health`);
       if (r.ok) return;
@@ -183,14 +228,17 @@ async function waitForHealth(timeoutMs = 15000) {
 
 async function main() {
   log(`server binary: ${BIN}`);
-  const server = startServer();
+  // Reassigned when the restart step replaces it; `finally` kills whichever
+  // process is current.
+  let server = startServer();
   try {
-    await waitForHealth();
+    await waitForHealth(server);
     log("server healthy");
 
     // 1. First client: handshake + create an interactive PTY task.
     const c1 = new Client(WS_URL);
     await c1.open();
+    await c1.auth();
     c1.send({ type: "hello", client_id: "c1", cursors: {} });
     await c1.waitUntil(() => c1.hasText((m) => m.type === "welcome"), "c1 welcome");
     log("c1 welcomed");
@@ -226,6 +274,7 @@ async function main() {
     // 5. While c1 is gone, another client drives more output on the same task.
     const c2 = new Client(WS_URL);
     await c2.open();
+    await c2.auth();
     c2.send({ type: "hello", client_id: "c2", cursors: {} });
     await c2.waitUntil(() => c2.hasText((m) => m.type === "welcome"), "c2 welcome");
     await c2.waitUntil(
@@ -241,6 +290,7 @@ async function main() {
     //    below it, and the missed reply present.
     const c1b = new Client(WS_URL);
     await c1b.open();
+    await c1b.auth();
     c1b.send({ type: "hello", client_id: "c1", cursors: { [taskId]: cursor } });
     await c1b.waitUntil(
       () => c1b.hasText((m) => m.type === "replay_done" && m.task_id === taskId),
@@ -263,11 +313,40 @@ async function main() {
     assert(!c1b.screen(taskId).includes("reply:m1"), "reconnect must NOT re-send bytes at/below cursor");
     log(`reconnect fast-forwarded exactly [${replayed.join(", ")}] — no loss, no dupes`);
 
-    // 7. Terminate the task and observe the terminal state transition.
-    c1b.send({ type: "terminate_task", task_id: taskId });
-    await c1b.waitUntil(
+    // 7. Replace the server process, exactly as a self-upgrade does. The agent
+    //    lives in its own pty-host process, so it must still be running when the
+    //    new server comes up — and must still be drivable, which is what proves
+    //    the new server re-attached to the PTY rather than merely finding a live
+    //    pid in the database.
+    await c1b.close();
+    await c2.close();
+    server.kill("SIGKILL");
+    await new Promise((res) => server.on("exit", res));
+    log("server killed (stands in for the upgrade re-exec)");
+
+    server = startServer();
+    await waitForHealth(server);
+    const c4 = new Client(WS_URL);
+    await c4.open();
+    await c4.auth();
+    c4.send({ type: "hello", client_id: "c4", cursors: {} });
+    await c4.waitUntil(() => c4.hasText((m) => m.type === "welcome"), "c4 welcome");
+    const survivor = c4.text
+      .find((m) => m.type === "welcome")
+      .tasks.find((t) => t.id === taskId);
+    assert(survivor, "the task must still exist after the server is replaced");
+    eq(survivor.status.state, "running", "task must still be running after the restart");
+    log("task survived the server restart, still running");
+
+    c4.sendInput(taskId, "m4\r");
+    await c4.waitUntil(() => c4.screen(taskId).includes("reply:m4"), "reply m4 after restart");
+    log("the same agent still answers on the new server — PTY re-attached");
+
+    // 8. Terminate the task and observe the terminal state transition.
+    c4.send({ type: "terminate_task", task_id: taskId });
+    await c4.waitUntil(
       () =>
-        c1b.hasText(
+        c4.hasText(
           (m) =>
             m.type === "task_state" &&
             m.task_id === taskId &&
@@ -277,8 +356,7 @@ async function main() {
     );
     log("task terminated");
 
-    await c1b.close();
-    await c2.close();
+    await c4.close();
     log("ALL CHECKS PASSED");
   } finally {
     server.kill("SIGKILL");
