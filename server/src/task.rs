@@ -12,7 +12,8 @@ use uuid::Uuid;
 use crate::{
     agent,
     error::{AppError, AppResult},
-    pty_proc::{self, PtyHandle, PtyOutput},
+    host::HostLink,
+    pty_proc::PtyOutput,
     store::Store,
     terminal::TerminalEmulator,
 };
@@ -130,10 +131,12 @@ fn kill_pid(_pid: i64) {}
 #[derive(Clone)]
 pub struct TaskManager {
     store: Store,
+    /// Where the database lives; host endpoints and logs are derived from it.
+    db_path: String,
     /// Fan-out of every server->client item to all live WS connections.
     events: broadcast::Sender<Outbound>,
-    /// Live PTY handles, keyed by task id.
-    running: Arc<Mutex<HashMap<String, PtyHandle>>>,
+    /// Links to the pty-hosts we are currently attached to, keyed by task id.
+    running: Arc<Mutex<HashMap<String, HostLink>>>,
     /// Authoritative screens, keyed by task id — the source of reconnect
     /// snapshots. A pure function of the ordered chunk log.
     terminals: Arc<Mutex<HashMap<String, TerminalEmulator>>>,
@@ -146,10 +149,11 @@ pub struct TaskManager {
 }
 
 impl TaskManager {
-    pub fn new(store: Store) -> Self {
+    pub fn new(store: Store, db_path: &str) -> Self {
         let (events, _) = broadcast::channel(2048);
         Self {
             store,
+            db_path: db_path.to_string(),
             events,
             running: Arc::new(Mutex::new(HashMap::new())),
             terminals: Arc::new(Mutex::new(HashMap::new())),
@@ -182,17 +186,17 @@ impl TaskManager {
             .map(TerminalEmulator::snapshot)
     }
 
-    /// On startup, any task still marked Starting/Running was owned by a process
-    /// this server can no longer drive (its PTY master died with the previous
-    /// server). The child itself may be orphaned-but-alive or truly gone, so
-    /// check the recorded pid: alive → `Detached` (honest — the process lives
-    /// but we can't stream it), dead/unknown → `Exited { code: None }`. Both are
-    /// terminal, so clients stop waiting instead of seeing a stuck Running row.
+    /// On startup, any task still marked Starting/Running whose host we failed to
+    /// re-attach to is unreachable: nothing can stream it again. The agent itself
+    /// may be orphaned-but-alive or truly gone, so check the recorded pid: alive
+    /// → `Detached` (honest — the process lives but we can't stream it),
+    /// dead/unknown → `Exited { code: None }`. Both are terminal, so clients stop
+    /// waiting instead of seeing a stuck Running row.
     pub async fn reconcile_orphans(&self) -> AppResult<()> {
         let rows = self.store.list_task_pids().await?;
-        // Tasks we just re-adopted across a self-upgrade re-exec are live in
-        // `running`; they must not be reconciled to a terminal state. Snapshot
-        // the live-id set with a short lock, never held across an await.
+        // Tasks we just re-attached to are live in `running`; they must not be
+        // reconciled to a terminal state. Snapshot the live-id set with a short
+        // lock, never held across an await.
         let adopted: HashSet<String> = {
             let running = self.running.lock().unwrap();
             rows.iter()
@@ -217,7 +221,7 @@ impl TaskManager {
                     ?pid,
                     alive,
                     now = ?next,
-                    "reconciling orphaned task after a cold restart (not a self-upgrade)"
+                    "reconciling orphaned task whose pty-host is unreachable"
                 );
                 self.store.update_status(&id, &next).await?;
             }
@@ -225,107 +229,84 @@ impl TaskManager {
         Ok(())
     }
 
-    /// Snapshot the live PTYs as an inherit-map for a self-upgrade re-exec: each
-    /// running task with a usable master fd + pid becomes an [`InheritEntry`] so
-    /// the replacement process can adopt the same live terminals.
-    pub fn prepare_inherit(&self) -> Vec<crate::restart::InheritEntry> {
-        let running = self.running.lock().unwrap();
-        let mut out = Vec::new();
-        for (id, handle) in running.iter() {
-            match (handle.master_fd(), handle.pid()) {
-                (Some(fd), Some(pid)) => out.push(crate::restart::InheritEntry {
-                    task_id: id.clone(),
-                    fd,
-                    pid,
-                }),
-                (fd, pid) => tracing::warn!(
-                    task = %id,
-                    has_fd = fd.is_some(),
-                    has_pid = pid.is_some(),
-                    "running task not inheritable across self-upgrade; skipping"
-                ),
+    /// Re-attach to the pty-hosts our predecessor left running.
+    ///
+    /// This is what makes a server replaceable: the PTY and the agent live in the
+    /// host, so a new server just dials each recorded endpoint and resumes the
+    /// byte stream at the offset it durably stored. Tasks whose host is gone are
+    /// left alone for [`reconcile_orphans`] to settle, so this must run first.
+    pub async fn reattach_hosts(&self) {
+        let hosted = match self.store.list_hosted().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!(error = %e, "cannot list hosted tasks; not re-attaching");
+                return;
             }
-        }
-        tracing::info!(
-            running = running.len(),
-            inheritable = out.len(),
-            "prepared inherit map for self-upgrade"
-        );
-        out
-    }
-
-    /// Adopt PTYs inherited across a self-upgrade re-exec. Parses
-    /// [`crate::restart::INHERIT_ENV`] (`task_id:fd:pid:cols:rows` entries joined
-    /// by commas), reattaches to each live master fd, rebuilds its authoritative
-    /// screen by replaying the persisted chunk log, keeps the task `Running`, and
-    /// starts pumping. Must run *before* [`reconcile_orphans`] so these ids stay
-    /// live instead of reconciling to `Detached`/`Exited`.
-    #[cfg(unix)]
-    pub async fn adopt_inherited(&self) {
-        let raw = match std::env::var(crate::restart::INHERIT_ENV) {
-            Ok(v) if !v.is_empty() => v,
-            _ => return,
         };
-        // Don't let the map leak into child processes we spawn later.
-        std::env::remove_var(crate::restart::INHERIT_ENV);
-
-        for entry in raw.split(',').filter(|s| !s.is_empty()) {
-            let parts: Vec<&str> = entry.split(':').collect();
-            if parts.len() != 5 {
-                tracing::warn!(%entry, "malformed inherit entry; skipping");
+        for row in hosted {
+            // Only tasks that were live when we went away can have a host worth
+            // dialing; a terminal status means the host has already exited.
+            if !matches!(row.status, TaskStatus::Starting | TaskStatus::Running) {
                 continue;
             }
-            let task_id = parts[0].to_string();
-            let (fd, pid, cols, rows) = match (
-                parts[1].parse::<i32>(),
-                parts[2].parse::<u32>(),
-                parts[3].parse::<u16>(),
-                parts[4].parse::<u16>(),
-            ) {
-                (Ok(fd), Ok(pid), Ok(cols), Ok(rows)) => (fd, pid, cols, rows),
-                _ => {
-                    tracing::warn!(%entry, "unparseable inherit entry; skipping");
-                    continue;
-                }
-            };
-
-            // The task row must still exist; otherwise the adopted fd has no home.
-            match self.store.get_task(&task_id).await {
-                Ok(Some(_)) => {}
-                _ => {
-                    tracing::warn!(%task_id, "inherited task not in store; skipping");
-                    continue;
-                }
-            }
-
-            let (handle, out_rx) = match pty_proc::adopt_pty(fd, pid, cols, rows) {
+            let (link, out_rx) = match HostLink::attach(
+                &row.task_id,
+                &row.endpoint,
+                row.host_offset,
+                row.host_pid.map(|p| p as u32),
+            )
+            .await
+            {
                 Ok(pair) => pair,
                 Err(e) => {
-                    tracing::warn!(%task_id, error = %e, "failed to adopt inherited pty");
+                    tracing::warn!(
+                        task = %row.task_id,
+                        endpoint = %row.endpoint,
+                        error = %e,
+                        "no pty-host answered; leaving the task to orphan reconciliation"
+                    );
                     continue;
                 }
             };
 
             // Rebuild the authoritative screen from the durable chunk log so
-            // reconnect snapshots match what the terminal showed pre-upgrade.
+            // reconnect snapshots match what the terminal showed before.
+            let (cols, rows) = link.size();
             let mut emu = TerminalEmulator::new(cols, rows);
-            if let Ok(chunks) = self.store.chunks_after(&task_id, 0).await {
+            if let Ok(chunks) = self.store.chunks_after(&row.task_id, 0).await {
                 for (_, bytes) in chunks {
                     emu.process(&bytes);
                 }
             }
 
-            self.running.lock().unwrap().insert(task_id.clone(), handle);
-            self.terminals.lock().unwrap().insert(task_id.clone(), emu);
-            let _ = self.store.update_status(&task_id, &TaskStatus::Running).await;
-            tracing::info!(%task_id, "adopted inherited pty across self-upgrade");
-            self.spawn_pump(task_id, out_rx);
+            let offset = link.attach_offset();
+            let agent_pid = link.pid();
+            self.running
+                .lock()
+                .unwrap()
+                .insert(row.task_id.clone(), link);
+            self.terminals
+                .lock()
+                .unwrap()
+                .insert(row.task_id.clone(), emu);
+            // Record where this attach actually resumed: the host may have been
+            // able to replay less than we asked for, and the offset the *next*
+            // server resumes from has to match what we are about to store.
+            let _ = self
+                .store
+                .set_host(&row.task_id, &row.endpoint, row.host_pid, offset)
+                .await;
+            if let Some(pid) = agent_pid {
+                let _ = self.store.set_pid(&row.task_id, pid as i64).await;
+            }
+            let _ = self
+                .store
+                .update_status(&row.task_id, &TaskStatus::Running)
+                .await;
+            tracing::info!(task = %row.task_id, resume_at = offset, ?agent_pid, "re-attached to pty-host");
+            self.spawn_pump(row.task_id, out_rx, offset);
         }
     }
-
-    /// Non-unix has no `execve`-based inheritance; nothing to adopt.
-    #[cfg(not(unix))]
-    pub async fn adopt_inherited(&self) {}
 
     /// Validate the tool, persist the task, open its PTY, and begin pumping raw
     /// output into the store + broadcast.
@@ -349,10 +330,24 @@ impl TaskManager {
         };
         self.store.create_task(&info).await?;
 
-        let (handle, out_rx) =
-            pty_proc::spawn_cmd(&cmd.bin, &cmd.argv, params.cwd.as_deref(), cols, rows)?;
-        let pid = handle.pid();
-        self.running.lock().unwrap().insert(id.clone(), handle);
+        // The PTY lives in its own process, so this task survives us being
+        // replaced — see `crate::host`.
+        let (link, out_rx) = HostLink::spawn(
+            &self.db_path,
+            &id,
+            &cmd.bin,
+            &cmd.argv,
+            params.cwd.as_deref(),
+            cols,
+            rows,
+        )
+        .await?;
+        let pid = link.pid();
+        let host_pid = link.host_pid();
+        self.store
+            .set_host(&id, link.endpoint(), host_pid.map(|p| p as i64), 0)
+            .await?;
+        self.running.lock().unwrap().insert(id.clone(), link);
         self.terminals
             .lock()
             .unwrap()
@@ -366,9 +361,9 @@ impl TaskManager {
         let _ = self.events.send(Outbound::Control(ServerMsg::TaskCreated {
             task: info.clone(),
         }));
-        tracing::info!(task = %id, tool = %cmd.tool_id, ?pid, "task created");
+        tracing::info!(task = %id, tool = %cmd.tool_id, ?pid, ?host_pid, "task created");
 
-        self.spawn_pump(id.clone(), out_rx);
+        self.spawn_pump(id.clone(), out_rx, 0);
         Ok(info)
     }
 
@@ -455,16 +450,30 @@ impl TaskManager {
         };
         self.terminating.lock().unwrap().remove(id);
         self.terminals.lock().unwrap().remove(id);
-        // A `Detached` task has no live handle but its orphaned child is still
-        // alive in the OS (that's what `Detached` means). Signal its recorded pid
-        // before we drop the row, or the delete would leak the process with no
-        // way to ever reach it again. Gate on the `Detached` status: an `Exited`
-        // task's stale pid may have been recycled to an unrelated process.
+        // A `Detached` task has no live link but its agent is still alive in the
+        // OS (that's what `Detached` means), and so may be the host that owns it.
+        // Signal both before we drop the row, or the delete would leak two
+        // processes with no way to ever reach them again — agent first, so it dies
+        // on its own terms rather than by losing its terminal. Gate on the
+        // `Detached` status: an `Exited` task's stale pids may have been recycled
+        // to unrelated processes.
         if !had_handle {
             if let Some(TaskStatus::Detached) = self.store.get_task(id).await?.map(|t| t.status) {
                 if let Some(pid) = self.store.get_pid(id).await? {
-                    tracing::info!(task = %id, %pid, "killing detached orphan on delete");
+                    tracing::info!(task = %id, %pid, "killing detached agent on delete");
                     kill_pid(pid);
+                }
+                if let Some(host) = self
+                    .store
+                    .list_hosted()
+                    .await?
+                    .into_iter()
+                    .find(|h| h.task_id == id)
+                {
+                    if let Some(pid) = host.host_pid {
+                        tracing::info!(task = %id, %pid, "killing unreachable pty-host on delete");
+                        kill_pid(pid);
+                    }
                 }
             }
         }
@@ -502,7 +511,13 @@ impl TaskManager {
         Ok(seq)
     }
 
-    fn spawn_pump(&self, task_id: String, mut out_rx: mpsc::UnboundedReceiver<PtyOutput>) {
+    /// Drain a host's output into the durable log, the authoritative screen, and
+    /// the broadcast bus — then tell the host how far we got.
+    ///
+    /// `offset` is the stream position this link resumed at; the running total is
+    /// what the host retains output against, so failing to ack eventually stalls
+    /// the agent rather than losing bytes.
+    fn spawn_pump(&self, task_id: String, mut out_rx: mpsc::Receiver<PtyOutput>, offset: u64) {
         let store = self.store.clone();
         let events = self.events.clone();
         let running = self.running.clone();
@@ -510,6 +525,7 @@ impl TaskManager {
         let terminating = self.terminating.clone();
         let deleting = self.deleting.clone();
         tokio::spawn(async move {
+            let mut durable = offset;
             while let Some(item) = out_rx.recv().await {
                 match item {
                     PtyOutput::Chunk(bytes) => {
@@ -524,6 +540,11 @@ impl TaskManager {
                             Ok(seq) => {
                                 if let Some(t) = terminals.lock().unwrap().get_mut(&task_id) {
                                     t.process(&bytes);
+                                }
+                                // Durable now, so the host may drop its copy.
+                                durable += bytes.len() as u64;
+                                if let Some(link) = running.lock().unwrap().get(&task_id) {
+                                    link.ack(durable);
                                 }
                                 let _ = events.send(Outbound::Pty {
                                     task_id: task_id.clone(),
@@ -584,7 +605,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_detaches_live_orphans_and_exits_dead_ones() {
         let store = Store::memory().await.unwrap();
-        let mgr = TaskManager::new(store.clone());
+        let mgr = TaskManager::new(store.clone(), ":memory:");
 
         // Live orphan: our own pid is guaranteed alive.
         store.create_task(&running_task("live")).await.unwrap();
@@ -623,10 +644,13 @@ mod tests {
     #[tokio::test]
     async fn delete_kills_detached_orphan() {
         let store = Store::memory().await.unwrap();
-        let mgr = TaskManager::new(store.clone());
+        let mgr = TaskManager::new(store.clone(), ":memory:");
 
         // A real, long-lived child standing in for the orphaned agent process.
-        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
         let pid = child.id() as i64;
 
         let mut task = running_task("orphan");
@@ -641,6 +665,9 @@ mod tests {
         // test doesn't leave a zombie, and confirm it was actually killed.
         let status = child.wait().unwrap();
         assert!(store.get_task("orphan").await.unwrap().is_none());
-        assert!(!status.success(), "expected the child to be killed by signal");
+        assert!(
+            !status.success(),
+            "expected the child to be killed by signal"
+        );
     }
 }

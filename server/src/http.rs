@@ -340,8 +340,8 @@ struct UpgradeUploadQuery {
 }
 
 /// Replace the running server binary with the uploaded raw bytes, then restart
-/// in place — inheriting live PTYs so running tasks keep streaming across the
-/// re-exec. The client's auto-reconnect covers the brief WS blip.
+/// in place. Running tasks live in their own pty-host processes, so they keep
+/// streaming across the restart; the client's auto-reconnect covers the WS blip.
 async fn upgrade_upload(
     State(state): State<SharedState>,
     Query(q): Query<UpgradeUploadQuery>,
@@ -363,7 +363,7 @@ struct UpgradeUrlBody {
 }
 
 /// Download a new server binary from `url` on the host, replace the running
-/// binary, then restart in place (inheriting live PTYs).
+/// binary, then restart in place.
 async fn upgrade_from_url(
     State(state): State<SharedState>,
     Json(body): Json<UpgradeUrlBody>,
@@ -390,9 +390,8 @@ fn apply_upgrade(state: &SharedState, bytes: &[u8]) -> AppResult<Json<Value>> {
 }
 
 /// Spawn the delayed in-place restart: wait briefly so the HTTP response flushes,
-/// snapshot the live PTYs as an inherit map, then `execve` the new binary. On
-/// success the process image is replaced and this never returns; a failure is
-/// logged and the (old) server keeps running.
+/// then `execve` the new binary. On success the process image is replaced and
+/// this never returns; a failure is logged and the (old) server keeps running.
 fn schedule_restart(state: SharedState) {
     tokio::spawn(async move {
         // Let the upgrade response flush to the client first. On a repeater-client
@@ -406,9 +405,8 @@ fn schedule_restart(state: SharedState) {
         state.tunnel_shutdown.notify_waiters();
         // Give the WS Close a moment to flush before we replace the process image.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        let inherit = state.tasks.prepare_inherit();
-        tracing::info!(inherited = inherit.len(), "self-upgrade: re-exec now");
-        if let Err(e) = crate::restart::exec_replacement(inherit) {
+        tracing::info!("self-upgrade: re-exec now");
+        if let Err(e) = crate::restart::exec_replacement() {
             tracing::error!(error = %e, "self-upgrade re-exec failed; still on old binary");
         }
     });

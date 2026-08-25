@@ -17,7 +17,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     status      TEXT NOT NULL,
     created_at  INTEGER NOT NULL,
     last_seq    INTEGER NOT NULL DEFAULT 0,
-    pid         INTEGER
+    pid         INTEGER,
+    -- IPC endpoint of the pty-host owning this task, and that host's own pid.
+    -- Together they let a freshly started server find and re-attach to the hosts
+    -- its predecessor left running.
+    host_endpoint  TEXT,
+    host_pid       INTEGER,
+    -- Bytes of this task's host output stream that are durably stored here. The
+    -- host replays from exactly this offset on re-attach, which is what makes
+    -- delivery lossless and duplicate-free across a server restart.
+    host_offset    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS pty_chunks (
@@ -60,12 +69,17 @@ impl Store {
             .connect_with(opts)
             .await?;
         sqlx::query(SCHEMA).execute(&pool).await?;
-        // Migration for databases created before the `pid` column existed. The
-        // ALTER errors ("duplicate column") on already-migrated DBs, which is
-        // expected and harmless — ignore it.
-        let _ = sqlx::query("ALTER TABLE tasks ADD COLUMN pid INTEGER")
-            .execute(&pool)
-            .await;
+        // Migrations for databases created before a column existed. Each ALTER
+        // errors ("duplicate column") on an already-migrated DB, which is expected
+        // and harmless — ignore it.
+        for alter in [
+            "ALTER TABLE tasks ADD COLUMN pid INTEGER",
+            "ALTER TABLE tasks ADD COLUMN host_endpoint TEXT",
+            "ALTER TABLE tasks ADD COLUMN host_pid INTEGER",
+            "ALTER TABLE tasks ADD COLUMN host_offset INTEGER NOT NULL DEFAULT 0",
+        ] {
+            let _ = sqlx::query(alter).execute(&pool).await;
+        }
         Ok(Self { pool })
     }
 
@@ -147,6 +161,51 @@ impl Store {
         Ok(())
     }
 
+    /// Record the pty-host serving a task, together with the stream offset the
+    /// server is starting from. Called on task creation and on every re-attach,
+    /// so `host_offset` is always the offset a *new* attach should resume at.
+    pub async fn set_host(
+        &self,
+        id: &str,
+        endpoint: &str,
+        host_pid: Option<i64>,
+        host_offset: u64,
+    ) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE tasks SET host_endpoint = ?, host_pid = ?, host_offset = ? WHERE id = ?",
+        )
+        .bind(endpoint)
+        .bind(host_pid)
+        .bind(host_offset as i64)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Every task that has a recorded pty-host, with the state a server needs to
+    /// re-attach: what to dial, which process should be listening, and where in
+    /// the byte stream our durable copy ends.
+    pub async fn list_hosted(&self) -> AppResult<Vec<HostedTask>> {
+        let rows: Vec<(String, String, String, Option<i64>, i64)> = sqlx::query_as(
+            "SELECT id, status, host_endpoint, host_pid, host_offset
+             FROM tasks WHERE host_endpoint IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(task_id, status, endpoint, host_pid, host_offset)| {
+                Ok(HostedTask {
+                    task_id,
+                    status: serde_json::from_str(&status)?,
+                    endpoint,
+                    host_pid,
+                    host_offset: host_offset as u64,
+                })
+            })
+            .collect()
+    }
+
     /// Every task's `(id, status, pid)` — used by startup orphan reconciliation
     /// to decide, per task, whether its recorded pid is still alive.
     pub async fn list_task_pids(&self) -> AppResult<Vec<(String, TaskStatus, Option<i64>)>> {
@@ -186,11 +245,17 @@ impl Store {
     /// allocated under the same transaction as the insert, so concurrent writers
     /// can never collide. Persist-before-broadcast is what makes reconnect
     /// gap-free.
+    ///
+    /// The host stream offset advances in the same transaction: it must never
+    /// claim bytes that aren't stored, or a re-attach would resume past output
+    /// this server never saw.
     pub async fn append_chunk(&self, task_id: &str, bytes: &[u8]) -> AppResult<u64> {
         let mut tx = self.pool.begin().await?;
         let (seq,): (i64,) = sqlx::query_as(
-            "UPDATE tasks SET last_seq = last_seq + 1 WHERE id = ? RETURNING last_seq",
+            "UPDATE tasks SET last_seq = last_seq + 1, host_offset = host_offset + ?
+             WHERE id = ? RETURNING last_seq",
         )
+        .bind(bytes.len() as i64)
         .bind(task_id)
         .fetch_one(&mut *tx)
         .await?;
@@ -253,6 +318,15 @@ impl Store {
         .await?;
         Ok(row.map(|(s,)| s as u64).unwrap_or(0))
     }
+}
+
+/// A task whose PTY lives in a pty-host process, as recorded durably.
+pub struct HostedTask {
+    pub task_id: String,
+    pub status: TaskStatus,
+    pub endpoint: String,
+    pub host_pid: Option<i64>,
+    pub host_offset: u64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -318,6 +392,36 @@ mod tests {
         assert_eq!(after1[0].1, b"b");
         let after_all = s.chunks_after("t1", 4).await.unwrap();
         assert!(after_all.is_empty());
+    }
+
+    /// The host offset must equal the bytes we actually stored, counted from
+    /// whatever offset the current attach started at — that is the contract a
+    /// re-attach resumes on.
+    #[tokio::test]
+    async fn host_offset_tracks_persisted_bytes() {
+        let s = Store::memory().await.unwrap();
+        s.create_task(&task("t1")).await.unwrap();
+        assert!(s.list_hosted().await.unwrap().is_empty(), "no host yet");
+
+        s.set_host("t1", "/tmp/t1.sock", Some(4242), 0)
+            .await
+            .unwrap();
+        s.append_chunk("t1", b"hello").await.unwrap();
+        s.append_chunk("t1", b" world").await.unwrap();
+
+        let hosted = s.list_hosted().await.unwrap();
+        assert_eq!(hosted.len(), 1);
+        assert_eq!(hosted[0].endpoint, "/tmp/t1.sock");
+        assert_eq!(hosted[0].host_pid, Some(4242));
+        assert_eq!(hosted[0].host_offset, 11);
+
+        // A re-attach rebases the offset (e.g. the host could only replay from
+        // further along); subsequent bytes count from there.
+        s.set_host("t1", "/tmp/t1.sock", Some(99), 100)
+            .await
+            .unwrap();
+        s.append_chunk("t1", b"abc").await.unwrap();
+        assert_eq!(s.list_hosted().await.unwrap()[0].host_offset, 103);
     }
 
     #[tokio::test]

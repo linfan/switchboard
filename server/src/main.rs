@@ -7,7 +7,9 @@ mod console;
 mod editor;
 mod error;
 mod fs;
+mod host;
 mod http;
+mod ipc;
 mod log_file;
 mod pty_proc;
 mod repeater;
@@ -40,6 +42,13 @@ use crate::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `switchboard-server pty-host` is not a mode a human invokes: the server
+    // re-executes itself this way to put a task's PTY in its own process. Handle
+    // it before any server setup, since a host opens no port and no database.
+    if std::env::args().nth(1).as_deref() == Some(host::HOST_ARG) {
+        return run_pty_host().await;
+    }
+
     let config = Config::from_env();
 
     // Route logs to a size-based rolling file when `SWITCHBOARD_LOG` is set;
@@ -87,14 +96,46 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Run as a pty-host: own one task's PTY and serve whichever server attaches.
+///
+/// A host is spawned detached with no console, so its diagnostics can only go to
+/// the file named in the spec. It shares no state with the server beyond the IPC
+/// endpoint — in particular it never opens the database.
+async fn run_pty_host() -> anyhow::Result<()> {
+    let spec = host::HostSpec::from_env()?;
+
+    let log_cfg = log_file::LogFileConfig {
+        path: spec.log_path.clone(),
+        max_size: 8 * 1024 * 1024,
+        max_files: 2,
+    };
+    match log_file::RollingWriter::new(&log_cfg) {
+        Ok(writer) => tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .with_ansi(false)
+            .with_writer(writer)
+            .init(),
+        // Losing the log is not worth losing the task over; the host is
+        // functional without it.
+        Err(e) => eprintln!("pty-host: cannot open log {}: {e}", spec.log_path),
+    }
+
+    host::run(spec).await?;
+    Ok(())
+}
+
 /// The worker that dials out: run PTYs locally, but serve every client through a
 /// reverse tunnel to the repeater instead of binding a client-facing port.
 async fn run_worker_repeater_client(config: Config) -> anyhow::Result<()> {
     tracing::info!(repeater = ?config.repeater_addr, "worker-repeater-client");
 
     let store = Store::connect(&config.db_path).await?;
-    let tasks = TaskManager::new(store.clone());
-    tasks.adopt_inherited().await;
+    let tasks = TaskManager::new(store.clone(), &config.db_path);
+    // Re-attach before reconciling: a task whose host answers stays live, and
+    // only the ones nobody answers for settle to a terminal state.
+    tasks.reattach_hosts().await;
     tasks.reconcile_orphans().await?;
     let state: state::SharedState = Arc::new(AppState {
         config,
@@ -134,8 +175,10 @@ async fn run_worker_direct(config: Config) -> anyhow::Result<()> {
     };
 
     let store = Store::connect(&config.db_path).await?;
-    let tasks = TaskManager::new(store.clone());
-    tasks.adopt_inherited().await;
+    let tasks = TaskManager::new(store.clone(), &config.db_path);
+    // Re-attach before reconciling: a task whose host answers stays live, and
+    // only the ones nobody answers for settle to a terminal state.
+    tasks.reattach_hosts().await;
     tasks.reconcile_orphans().await?;
     let state: state::SharedState = Arc::new(AppState {
         config: config.clone(),

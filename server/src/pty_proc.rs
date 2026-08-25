@@ -1,4 +1,6 @@
-//! PTY process supervisor for a single interactive agent task.
+//! PTY process supervisor for a single interactive agent task. This runs inside
+//! a pty-host process (see [`crate::host`]), never in the server itself — the
+//! server owns no PTY, which is what lets it be replaced without killing tasks.
 //!
 //! Allocates a real pseudo-terminal via `portable-pty`, spawns the CLI in its
 //! native interactive mode, and surfaces raw terminal bytes as [`PtyOutput`].
@@ -14,14 +16,19 @@
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
-#[cfg(unix)]
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use tokio::sync::mpsc;
 
 use crate::error::{AppError, AppResult};
 
 /// Read chunk cap: bounds frame size / rate for the binary data plane.
 const READ_CHUNK: usize = 8 * 1024;
+
+/// Depth of the output channel. Bounded on purpose: when the consumer stops
+/// draining (a pty-host whose unacked buffer is full because no server is
+/// listening), the reader thread blocks, the PTY's own buffer fills, and the
+/// agent blocks on write. Backpressure all the way to the process is what makes
+/// a server restart lossless instead of merely large.
+pub const OUTPUT_DEPTH: usize = 32;
 
 /// Output items produced by a running PTY-backed process.
 #[derive(Debug)]
@@ -41,22 +48,12 @@ pub struct PtyHandle {
     /// to check liveness after a server restart (the child may be orphaned but
     /// still running).
     pid: Option<u32>,
-    /// Raw master-PTY file descriptor (unix). Captured so a self-upgrade re-exec
-    /// can hand the *same* fd to the replacement process and keep the task live
-    /// across the restart. `None` on non-unix or when unavailable.
-    master_fd: Option<i32>,
 }
 
 impl PtyHandle {
     /// OS process id of the child, if known.
     pub fn pid(&self) -> Option<u32> {
         self.pid
-    }
-
-    /// Raw master-PTY fd (unix), for inheriting this live PTY across an
-    /// `execve`-based self-upgrade. `None` on non-unix / when unavailable.
-    pub fn master_fd(&self) -> Option<i32> {
-        self.master_fd
     }
 
     /// Write raw keystroke bytes into the PTY.
@@ -88,7 +85,7 @@ pub fn spawn_cmd(
     cwd: Option<&str>,
     cols: u16,
     rows: u16,
-) -> AppResult<(PtyHandle, mpsc::UnboundedReceiver<PtyOutput>)> {
+) -> AppResult<(PtyHandle, mpsc::Receiver<PtyOutput>)> {
     spawn_pty(bin, argv, cwd, cols, rows)
 }
 
@@ -99,7 +96,7 @@ fn spawn_pty(
     cwd: Option<&str>,
     cols: u16,
     rows: u16,
-) -> AppResult<(PtyHandle, mpsc::UnboundedReceiver<PtyOutput>)> {
+) -> AppResult<(PtyHandle, mpsc::Receiver<PtyOutput>)> {
     let size = PtySize {
         rows,
         cols,
@@ -128,13 +125,6 @@ fn spawn_pty(
     drop(pair.slave);
     let master = pair.master;
 
-    // Capture the master's raw fd before the master is moved into the resize
-    // thread, so a self-upgrade can inherit this live PTY across the re-exec.
-    #[cfg(unix)]
-    let master_fd = master.as_raw_fd();
-    #[cfg(not(unix))]
-    let master_fd: Option<i32> = None;
-
     let mut reader = master
         .try_clone_reader()
         .map_err(|e| AppError::Other(anyhow::anyhow!("pty reader clone failed: {e}")))?;
@@ -143,12 +133,13 @@ fn spawn_pty(
         .map_err(|e| AppError::Other(anyhow::anyhow!("pty writer take failed: {e}")))?;
     let mut killer = child.clone_killer();
 
-    let (out_tx, out_rx) = mpsc::unbounded_channel::<PtyOutput>();
+    let (out_tx, out_rx) = mpsc::channel::<PtyOutput>(OUTPUT_DEPTH);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u16, u16)>();
     let (kill_tx, mut kill_rx) = mpsc::unbounded_channel::<()>();
 
-    // reader: raw bytes → Chunk frames, coalesced to ≤ READ_CHUNK.
+    // reader: raw bytes → Chunk frames, coalesced to ≤ READ_CHUNK. `blocking_send`
+    // is the backpressure hinge described on `OUTPUT_DEPTH`.
     {
         let out_tx = out_tx.clone();
         std::thread::spawn(move || {
@@ -157,7 +148,10 @@ fn spawn_pty(
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if out_tx.send(PtyOutput::Chunk(buf[..n].to_vec())).is_err() {
+                        if out_tx
+                            .blocking_send(PtyOutput::Chunk(buf[..n].to_vec()))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -200,7 +194,7 @@ fn spawn_pty(
     // waiter: reap the exit code.
     std::thread::spawn(move || {
         let code = child.wait().ok().map(|s| s.exit_code() as i32);
-        let _ = out_tx.send(PtyOutput::Exited(code));
+        let _ = out_tx.blocking_send(PtyOutput::Exited(code));
     });
 
     Ok((
@@ -209,170 +203,6 @@ fn spawn_pty(
             resize_tx,
             kill_tx,
             pid,
-            master_fd,
-        },
-        out_rx,
-    ))
-}
-
-/// Set a PTY's window size via `ioctl(TIOCSWINSZ)` on its master fd.
-#[cfg(unix)]
-pub fn set_winsize(fd: RawFd, cols: u16, rows: u16) {
-    let ws = libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: `fd` is a live master PTY; the ioctl only reads `ws`.
-    unsafe {
-        libc::ioctl(fd, libc::TIOCSWINSZ as _, &ws);
-    }
-}
-
-/// Read a PTY's current window size via `ioctl(TIOCGWINSZ)`; `None` if the fd
-/// isn't a tty or the call fails.
-#[cfg(unix)]
-pub fn get_winsize(fd: RawFd) -> Option<(u16, u16)> {
-    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    // SAFETY: `fd` is a live master PTY; the ioctl fills `ws`.
-    let rc = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ as _, &mut ws) };
-    if rc == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-        Some((ws.ws_col, ws.ws_row))
-    } else {
-        None
-    }
-}
-
-/// Adopt an already-open master-PTY fd (inherited across an `execve` self-
-/// upgrade) and its still-running child `pid`, reconstructing the same
-/// reader/writer/resize/kill/waiter threads that [`spawn_pty`] wires up — but
-/// driven from a bare fd instead of a `portable-pty` object.
-///
-/// The caller passes the *inherited* fd; we keep it as the canonical
-/// `master_fd` (so a subsequent upgrade can inherit it again) and `dup` a
-/// private copy for each I/O thread. The waiter reaps via `waitpid`, which
-/// works because the replacement process kept the same PID across `execve` and
-/// so remains the child's parent.
-#[cfg(unix)]
-pub fn adopt_pty(
-    fd: RawFd,
-    pid: u32,
-    cols: u16,
-    rows: u16,
-) -> AppResult<(PtyHandle, mpsc::UnboundedReceiver<PtyOutput>)> {
-    // dup a private, close-on-exec copy of `fd` for a thread. dup(2) clears
-    // FD_CLOEXEC on the new fd, so set it back: only the canonical `master_fd`
-    // should survive a future re-exec (it's un-CLOEXEC'd deliberately at that
-    // point), never these worker dups.
-    let dup_cloexec = |src: RawFd| -> AppResult<RawFd> {
-        let d = unsafe { libc::dup(src) };
-        if d < 0 {
-            return Err(AppError::Other(anyhow::anyhow!(
-                "dup pty fd failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        let flags = unsafe { libc::fcntl(d, libc::F_GETFD) };
-        if flags >= 0 {
-            unsafe {
-                libc::fcntl(d, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-            }
-        }
-        Ok(d)
-    };
-
-    let reader_fd = dup_cloexec(fd)?;
-    let writer_fd = dup_cloexec(fd)?;
-    let resize_fd = dup_cloexec(fd)?;
-
-    // Re-apply the last known size to the adopted terminal.
-    set_winsize(resize_fd, cols, rows);
-
-    let (out_tx, out_rx) = mpsc::unbounded_channel::<PtyOutput>();
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u16, u16)>();
-    let (kill_tx, mut kill_rx) = mpsc::unbounded_channel::<()>();
-
-    // reader: master → Chunk frames.
-    {
-        let out_tx = out_tx.clone();
-        std::thread::spawn(move || {
-            let mut file = unsafe { std::fs::File::from_raw_fd(reader_fd) };
-            let mut buf = [0u8; READ_CHUNK];
-            loop {
-                match file.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if out_tx.send(PtyOutput::Chunk(buf[..n].to_vec())).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    // writer: keystrokes → master (verbatim).
-    std::thread::spawn(move || {
-        let mut file = unsafe { std::fs::File::from_raw_fd(writer_fd) };
-        while let Some(bytes) = input_rx.blocking_recv() {
-            if file.write_all(&bytes).is_err() || file.flush().is_err() {
-                break;
-            }
-        }
-    });
-
-    // resize: apply size changes; owns `resize_fd` so it's closed on teardown.
-    std::thread::spawn(move || {
-        let owned = unsafe { OwnedFd::from_raw_fd(resize_fd) };
-        while let Some((cols, rows)) = resize_rx.blocking_recv() {
-            set_winsize(owned.as_raw_fd(), cols, rows);
-        }
-    });
-
-    // kill: a value terminates the child by pid (no portable-pty killer here).
-    std::thread::spawn(move || {
-        if kill_rx.blocking_recv().is_some() {
-            // SAFETY: signalling a pid never touches our address space.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
-    });
-
-    // waiter: reap the inherited child and report its exit code.
-    {
-        let out_tx = out_tx.clone();
-        std::thread::spawn(move || {
-            let mut status: libc::c_int = 0;
-            let code = loop {
-                let r = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
-                if r == pid as libc::pid_t {
-                    break if libc::WIFEXITED(status) {
-                        Some(libc::WEXITSTATUS(status))
-                    } else {
-                        None
-                    };
-                }
-                let err = std::io::Error::last_os_error();
-                if r < 0 && err.raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
-                // ECHILD or anything else: not reapable here (already gone).
-                break None;
-            };
-            let _ = out_tx.send(PtyOutput::Exited(code));
-        });
-    }
-
-    Ok((
-        PtyHandle {
-            input_tx,
-            resize_tx,
-            kill_tx,
-            pid: Some(pid),
-            master_fd: Some(fd),
         },
         out_rx,
     ))
@@ -385,7 +215,7 @@ mod tests {
 
     /// Collect output (lossy UTF-8) until `needle` appears or we time out.
     /// Returns the accumulated text; panics on timeout.
-    async fn wait_for(rx: &mut mpsc::UnboundedReceiver<PtyOutput>, needle: &str) -> String {
+    async fn wait_for(rx: &mut mpsc::Receiver<PtyOutput>, needle: &str) -> String {
         let mut acc = String::new();
         loop {
             match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
@@ -408,7 +238,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn sh(script: &str) -> (PtyHandle, mpsc::UnboundedReceiver<PtyOutput>) {
+    fn sh(script: &str) -> (PtyHandle, mpsc::Receiver<PtyOutput>) {
         spawn_pty("sh", &["-c".into(), script.into()], None, 80, 24).expect("spawn sh")
     }
 
@@ -473,40 +303,6 @@ mod tests {
             }
         }
         assert_eq!(code, Some(Some(3)), "expected exit code 3");
-    }
-
-    /// Simulate post-`execve` adoption without a real re-exec: open a PTY and
-    /// spawn a child directly, then hand the *bare* master fd + pid to
-    /// `adopt_pty` (leaking the original master/child so their Drop doesn't close
-    /// the fd or reap the pid — exactly the state after an execve, where only the
-    /// inherited fd survives). Input and output must still flow through the
-    /// adopted handle.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn adopt_pty_reattaches_live_terminal() {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("openpty");
-        let mut cmd = CommandBuilder::new("sh");
-        cmd.args(["-c", "while IFS= read -r l; do printf 'GOT:%s\\n' \"$l\"; done"]);
-        let child = pair.slave.spawn_command(cmd).expect("spawn sh");
-        drop(pair.slave);
-        let fd = pair.master.as_raw_fd().expect("master fd");
-        let pid = child.process_id().expect("child pid");
-        // Keep the fd open and leave the child un-reaped, as across an execve.
-        std::mem::forget(pair.master);
-        std::mem::forget(child);
-
-        let (handle, mut rx) = adopt_pty(fd, pid, 80, 24).expect("adopt");
-        handle.send_input(b"ping\n").unwrap();
-        let acc = wait_for(&mut rx, "GOT:ping").await;
-        assert!(acc.contains("GOT:ping"), "adopted pty must echo; got {acc:?}");
-        handle.terminate();
     }
 
     #[cfg(unix)]

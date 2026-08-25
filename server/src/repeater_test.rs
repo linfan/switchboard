@@ -131,7 +131,7 @@ async fn boot() -> Harness {
         log_file: None,
     };
     let store = Store::connect(&wdb).await.unwrap();
-    let tasks = TaskManager::new(store.clone());
+    let tasks = TaskManager::new(store.clone(), &wdb);
     let worker: SharedState = Arc::new(AppState {
         config: wcfg,
         store,

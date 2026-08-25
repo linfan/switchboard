@@ -31,7 +31,7 @@ async fn build_state() -> Arc<AppState> {
     std::mem::forget(dir); // keep the tempdir alive for the whole process
 
     let store = Store::connect(db.to_str().unwrap()).await.unwrap();
-    let tasks = TaskManager::new(store.clone());
+    let tasks = TaskManager::new(store.clone(), db.to_str().unwrap());
     Arc::new(AppState {
         config: Config {
             role: crate::config::Role::WorkerDirect,
