@@ -104,8 +104,48 @@ fn check_format(bytes: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
+/// Windows: require a PE image whose COFF `Machine` matches this host's arch.
+/// Pushing a Linux or macOS build here used to sail through and only fail at the
+/// restart, leaving the service down with a binary it cannot execute.
+#[cfg(target_os = "windows")]
+fn check_format(bytes: &[u8]) -> AppResult<()> {
+    if &bytes[0..2] != b"MZ" {
+        return Err(AppError::BadRequest(
+            "not a PE executable (wrong OS for this host?)".into(),
+        ));
+    }
+    // The DOS stub ends with e_lfanew at 0x3C: the offset of the PE signature,
+    // followed by the COFF header whose first field is Machine.
+    let e_lfanew = u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
+    let machine_at = e_lfanew + 6;
+    if machine_at + 2 > bytes.len() || &bytes[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
+        return Err(AppError::BadRequest(
+            "malformed PE header (truncated or not an executable)".into(),
+        ));
+    }
+    let machine = u16::from_le_bytes([bytes[e_lfanew + 4], bytes[e_lfanew + 5]]);
+    const IMAGE_FILE_MACHINE_I386: u16 = 0x014C;
+    const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+    const IMAGE_FILE_MACHINE_ARM64: u16 = 0xAA64;
+    let want = match std::env::consts::ARCH {
+        "x86_64" => Some(IMAGE_FILE_MACHINE_AMD64),
+        "aarch64" => Some(IMAGE_FILE_MACHINE_ARM64),
+        "x86" => Some(IMAGE_FILE_MACHINE_I386),
+        _ => None,
+    };
+    if let Some(want) = want {
+        if machine != want {
+            return Err(AppError::BadRequest(format!(
+                "PE machine 0x{machine:04x} does not match this host ({})",
+                std::env::consts::ARCH
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Other platforms don't run PTY workers; accept any non-trivial blob.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn check_format(_bytes: &[u8]) -> AppResult<()> {
     Ok(())
 }
@@ -174,15 +214,18 @@ pub fn verify_sha256(bytes: &[u8], want_hex: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Atomically replace the currently-running executable's file with `bytes`,
-/// returning the executable path. Writes a temp file in the *same directory*
-/// (so the rename is atomic on one filesystem), fsyncs, marks it executable,
-/// then renames over the current exe. Renaming over a running binary is legal on
-/// Unix: the live process keeps the old inode, and the next exec picks up the new
-/// file.
+/// Replace the currently-running executable's file with `bytes`, returning the
+/// executable path.
 pub fn replace_current_exe(bytes: &[u8]) -> AppResult<PathBuf> {
     let exe = std::env::current_exe()
         .map_err(|e| AppError::Other(anyhow::anyhow!("cannot resolve current exe: {e}")))?;
+    replace_at(&exe, bytes)?;
+    Ok(exe)
+}
+
+/// Stage `bytes` beside `exe` and swap it in. Both files live in the same
+/// directory so the rename is a single-filesystem metadata operation.
+fn replace_at(exe: &std::path::Path, bytes: &[u8]) -> AppResult<()> {
     let dir = exe
         .parent()
         .ok_or_else(|| AppError::Other(anyhow::anyhow!("exe has no parent directory")))?;
@@ -210,13 +253,83 @@ pub fn replace_current_exe(bytes: &[u8]) -> AppResult<PathBuf> {
         )));
     }
 
-    if let Err(e) = std::fs::rename(&tmp, &exe) {
+    if let Err(e) = swap_in(&tmp, exe, dir, &file_name) {
         let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Unix: rename straight over the live binary. The running process keeps the old
+/// inode and the next exec picks up the new file.
+#[cfg(unix)]
+fn swap_in(
+    tmp: &std::path::Path,
+    exe: &std::path::Path,
+    _dir: &std::path::Path,
+    _file_name: &str,
+) -> AppResult<()> {
+    std::fs::rename(tmp, exe)
+        .map_err(|e| AppError::Other(anyhow::anyhow!("failed to swap in new binary: {e}")))
+}
+
+/// Windows: a running image cannot be written or replaced, but the loader opens
+/// it with `FILE_SHARE_DELETE`, which permits *renaming* it. So move the live
+/// binary aside, then move the new one into its place — the exe path holds the
+/// new build while this process keeps executing the old bytes from the renamed
+/// file. Deleting that file has to wait until the process exits, so it is left
+/// behind and reaped by a later upgrade.
+#[cfg(windows)]
+fn swap_in(
+    tmp: &std::path::Path,
+    exe: &std::path::Path,
+    dir: &std::path::Path,
+    file_name: &str,
+) -> AppResult<()> {
+    reap_stale(dir, file_name);
+
+    let old = dir.join(format!(".{file_name}.old-{}", uuid::Uuid::new_v4()));
+    std::fs::rename(exe, &old).map_err(|e| {
+        AppError::Other(anyhow::anyhow!(
+            "cannot move the running binary aside (is another instance holding it?): {e}"
+        ))
+    })?;
+    if let Err(e) = std::fs::rename(tmp, exe) {
+        // Put the old binary back, or the service has no executable at all.
+        if let Err(restore) = std::fs::rename(&old, exe) {
+            return Err(AppError::Other(anyhow::anyhow!(
+                "failed to swap in new binary ({e}) AND failed to restore the old one ({restore}); \
+                 the previous binary is at {}",
+                old.display()
+            )));
+        }
         return Err(AppError::Other(anyhow::anyhow!(
             "failed to swap in new binary: {e}"
         )));
     }
-    Ok(exe)
+    // Expected to fail while we are still executing these bytes.
+    if std::fs::remove_file(&old).is_err() {
+        tracing::debug!(
+            path = %old.display(),
+            "previous binary is still mapped; it will be reaped by the next upgrade"
+        );
+    }
+    Ok(())
+}
+
+/// Delete `.old-*` binaries left by earlier upgrades. Their processes are gone by
+/// now — this one replaced them — so the files are finally deletable.
+#[cfg(windows)]
+fn reap_stale(dir: &std::path::Path, file_name: &str) {
+    let prefix = format!(".{file_name}.old-");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -303,20 +416,29 @@ mod tests {
             .is_err());
     }
 
+    /// The real swap path, against a throwaway target so the test runner's own
+    /// executable is left alone. Leaving no staging or `.old-*` files behind
+    /// matters: on Windows those accumulate in the install directory.
     #[test]
-    fn replace_swaps_file_contents() {
-        // Point `current_exe` semantics at a throwaway file by exercising the
-        // same rename logic against a temp target directly.
+    fn replace_swaps_file_contents_and_leaves_no_debris() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("switchboard-server");
         std::fs::write(&target, b"old-binary-contents").unwrap();
 
-        // Mirror replace_current_exe's core (temp in same dir -> rename) so the
-        // test doesn't clobber the real test runner executable.
-        let tmp = dir.path().join(".switchboard-server.upgrade-test");
-        std::fs::write(&tmp, b"new-binary-contents").unwrap();
-        std::fs::rename(&tmp, &target).unwrap();
-
+        replace_at(&target, b"new-binary-contents").expect("swap must succeed");
         assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-contents");
+
+        // A second upgrade in a row must work too, and reap anything the first
+        // one could not delete.
+        replace_at(&target, b"newer-binary-contents").expect("second swap must succeed");
+        assert_eq!(std::fs::read(&target).unwrap(), b"newer-binary-contents");
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "switchboard-server")
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected leftovers: {leftovers:?}");
     }
 }

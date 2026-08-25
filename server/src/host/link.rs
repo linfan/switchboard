@@ -26,6 +26,17 @@ use crate::{
     pty_proc::{PtyOutput, OUTPUT_DEPTH},
 };
 
+/// No console at all — the host logs to a file.
+#[cfg(windows)]
+const DETACHED: u32 = 0x0000_0008;
+/// Console signals (Ctrl-C in the server's window) stop at our boundary.
+#[cfg(windows)]
+const NEW_GROUP: u32 = 0x0000_0200;
+/// Escape the service job object that would otherwise kill the host when the
+/// server is stopped — the whole point is outliving the server.
+#[cfg(windows)]
+const BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
 /// Cap on the HELLO/ATTACH exchange. A host that is reachable but wedged must not
 /// hang us: `reattach_hosts` runs this during startup, so an unbounded wait here
 /// would keep the whole server from coming up.
@@ -363,17 +374,7 @@ fn spawn_detached(spec: &HostSpec) -> AppResult<u32> {
         });
     }
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // DETACHED_PROCESS: no console at all (the host logs to a file).
-        // CREATE_NEW_PROCESS_GROUP: console signals stop at our boundary.
-        // CREATE_BREAKAWAY_FROM_JOB: escape a service job object that would
-        // otherwise kill the host when the server is stopped.
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
-    }
+    cmd.creation_flags(DETACHED | NEW_GROUP | BREAKAWAY_FROM_JOB);
 
     let spawned = cmd.spawn();
     #[cfg(windows)]
@@ -381,11 +382,8 @@ fn spawn_detached(spec: &HostSpec) -> AppResult<u32> {
         // A job object that forbids breakaway rejects the flag outright; without
         // it the host dies with the service, which is still better than no host.
         Err(e) => {
-            use std::os::windows::process::CommandExt;
-            const DETACHED_PROCESS: u32 = 0x0000_0008;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
             tracing::warn!(error = %e, "spawn with job breakaway failed; retrying without it");
-            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+            cmd.creation_flags(DETACHED | NEW_GROUP);
             cmd.spawn()
         }
         ok => ok,
@@ -403,7 +401,9 @@ fn spawn_detached(spec: &HostSpec) -> AppResult<u32> {
     // `child` is dropped here on purpose: the host must outlive us.
 }
 
-#[cfg(test)]
+// These drive a real host process with `sh -c`, so they are unix-only; the
+// protocol itself is covered platform-independently in `proto`.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::host::runner;
@@ -448,7 +448,6 @@ mod tests {
     /// server is attached, and a *second* link — standing in for the process that
     /// comes up after an upgrade — resumes the byte stream exactly where the
     /// first one stopped acknowledging, with nothing lost and nothing doubled.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_second_link_resumes_the_stream_without_loss_or_duplication() {
         let dir = tempfile::tempdir().unwrap();
@@ -498,7 +497,6 @@ mod tests {
 
     /// Output produced while no server is attached must be waiting when one
     /// arrives, not dropped.
-    #[cfg(unix)]
     #[tokio::test]
     async fn output_produced_while_detached_is_replayed_on_attach() {
         let dir = tempfile::tempdir().unwrap();
