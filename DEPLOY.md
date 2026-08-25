@@ -128,6 +128,29 @@ app — copy both files to the Windows machine and run the `.exe`. Three caveats
   than shipping a browser engine. Windows 11 and current Windows 10 include it;
   older installs need Microsoft's Evergreen bootstrapper once.
 
+#### "Could not find the WebView2 Runtime"
+The DLL is not what's missing. `WebView2Loader.dll` is only a lookup shim — were
+it absent the process would die at load time ("code execution cannot proceed"),
+not show a dialog. This dialog means the loader ran and found no **runtime**: a
+separate ~150 MB Edge install under `C:\Program Files (x86)\Microsoft\EdgeWebView\`.
+Common on Windows Server, LTSC, and N editions. Check it:
+```powershell
+Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -Name pv -EA 0
+Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -Name pv -EA 0
+```
+A missing key, or `pv = 0.0.0.0` (leftover from a broken uninstall), both trigger
+it. Fix with the Evergreen bootstrapper from
+https://developer.microsoft.com/en-us/microsoft-edge/webview2:
+`MicrosoftEdgeWebview2Setup.exe /silent /install` — as admin for machine-wide,
+otherwise per-user (which also works). A portable `.exe` can never self-install
+the runtime; `webviewInstallMode` only applies to the NSIS/MSI bundlers we skip.
+
+For a fully self-contained drop, use the **Fixed Version** runtime instead:
+download the CAB from that page, extract it beside `Switchboard.exe`, and set
+`WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` to the extracted folder — the loader honors
+that variable when the app passes a null browser folder, which is what wry does.
+Costs ~180 MB and you own the patch cadence.
+
 ## Installing on a server host
 
 The server is a single self-contained binary; only the binary and its state
