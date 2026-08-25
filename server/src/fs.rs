@@ -9,6 +9,78 @@ use switchboard_shared::{FsEntry, FsListing, FsStat};
 
 use crate::error::{AppError, AppResult};
 
+/// [`std::fs::canonicalize`], but without the Windows extended-length (`\\?\`)
+/// prefix the OS resolver adds. The result is shown in the client (and stored as
+/// a workspace's working directory), so it should read the way a user would type
+/// it: `C:\Users`, not `\\?\C:\Users`.
+pub fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize().map(simplify)
+}
+
+/// Drop a verbatim prefix when the shorter spelling still names the same file.
+/// A no-op on non-Windows hosts, where paths never carry one.
+fn simplify(path: PathBuf) -> PathBuf {
+    if cfg!(windows) {
+        if let Some(plain) = path.to_str().and_then(strip_verbatim) {
+            return PathBuf::from(plain);
+        }
+    }
+    path
+}
+
+/// Rewrite an extended-length Windows path into its plain form, or `None` when
+/// there is no prefix to drop — or when dropping it would change which file the
+/// path names. Deliberately plain string work: `std::path`'s prefix parsing
+/// exists only on Windows, and this keeps the rules testable on every host.
+fn strip_verbatim(text: &str) -> Option<String> {
+    /// Longest path the ordinary Win32 APIs accept, excluding the trailing NUL.
+    /// Past it, only the verbatim spelling resolves at all.
+    const MAX_PATH: usize = 259;
+
+    // `\\?\UNC\server\share` is a network share — `\\server\share` when plain.
+    // `\\?\C:\dir` is a local disk, where the prefix is pure noise.
+    let plain = if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{share}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        let mut chars = rest.chars();
+        // Anything that isn't `<letter>:` is some other verbatim device.
+        if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) || chars.next() != Some(':') {
+            return None;
+        }
+        rest.to_owned()
+    } else {
+        return None;
+    };
+    if plain.len() > MAX_PATH {
+        return None;
+    }
+    // The Win32 path layer trims trailing dots and spaces and reroutes reserved
+    // device names, so a path containing one only survives verbatim.
+    if plain.split('\\').any(|c| !is_literal_component(c)) {
+        return None;
+    }
+    Some(plain)
+}
+
+/// Whether a path component means itself to the Win32 path layer.
+fn is_literal_component(name: &str) -> bool {
+    if name.ends_with('.') || name.ends_with(' ') {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$") {
+        return false;
+    }
+    // COM1-COM9 and LPT1-LPT9 are serial/parallel ports, not files.
+    match stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+    {
+        Some(port) => !matches!(port, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"),
+        None => true,
+    }
+}
+
 /// List the immediate children of `path` (or the server user's home directory,
 /// then `/`, when `None`). Directories are returned before files; within each
 /// group entries are sorted case-insensitively by name. Unreadable entries are
@@ -19,8 +91,7 @@ pub fn list_dir(path: Option<&str>) -> AppResult<FsListing> {
         _ => default_dir(),
     };
 
-    let canonical = base
-        .canonicalize()
+    let canonical = canonicalize(&base)
         .map_err(|e| AppError::BadRequest(format!("cannot open '{}': {e}", base.display())))?;
     if !canonical.is_dir() {
         return Err(AppError::BadRequest(format!(
@@ -61,9 +132,17 @@ pub fn list_dir(path: Option<&str>) -> AppResult<FsListing> {
 /// Where the picker opens when no path is given: the server user's home, else
 /// the filesystem root.
 fn default_dir() -> PathBuf {
+    home_dir().unwrap_or_else(|| Path::new("/").to_path_buf())
+}
+
+/// The server user's home directory, or `None` when the host tells us nothing.
+/// Windows sets `USERPROFILE` rather than `HOME`, and a service host may set
+/// neither.
+pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new("/").to_path_buf())
 }
 
 /// Modification time of `meta` as unix millis, `0` when the platform can't
@@ -132,8 +211,7 @@ fn validate_name(name: &str) -> AppResult<()> {
 /// Rename a file or directory to a sibling `new_name` in the same parent.
 pub fn rename(path: &str, new_name: &str) -> AppResult<()> {
     validate_name(new_name)?;
-    let canonical = PathBuf::from(path)
-        .canonicalize()
+    let canonical = canonicalize(Path::new(path))
         .map_err(|e| AppError::BadRequest(format!("cannot open '{path}': {e}")))?;
     let parent = canonical
         .parent()
@@ -152,8 +230,7 @@ pub fn rename(path: &str, new_name: &str) -> AppResult<()> {
 /// silently clobbers an entry.
 pub fn create(dir: &str, name: &str, is_dir: bool) -> AppResult<()> {
     validate_name(name)?;
-    let canonical = PathBuf::from(dir)
-        .canonicalize()
+    let canonical = canonicalize(Path::new(dir))
         .map_err(|e| AppError::BadRequest(format!("cannot open '{dir}': {e}")))?;
     if !canonical.is_dir() {
         return Err(AppError::BadRequest(format!("not a directory: {dir}")));
@@ -173,8 +250,7 @@ pub fn create(dir: &str, name: &str, is_dir: bool) -> AppResult<()> {
 
 /// Delete a file, or a directory and all its contents.
 pub fn delete(path: &str) -> AppResult<()> {
-    let canonical = PathBuf::from(path)
-        .canonicalize()
+    let canonical = canonicalize(Path::new(path))
         .map_err(|e| AppError::BadRequest(format!("cannot open '{path}': {e}")))?;
     let result = if canonical.is_dir() {
         std::fs::remove_dir_all(&canonical)
@@ -189,8 +265,7 @@ pub fn delete(path: &str) -> AppResult<()> {
 /// existing target so an upload never silently clobbers a file.
 pub fn upload(dir: &str, name: &str, bytes: &[u8]) -> AppResult<()> {
     validate_name(name)?;
-    let canonical = PathBuf::from(dir)
-        .canonicalize()
+    let canonical = canonicalize(Path::new(dir))
         .map_err(|e| AppError::BadRequest(format!("cannot open '{dir}': {e}")))?;
     if !canonical.is_dir() {
         return Err(AppError::BadRequest(format!("not a directory: {dir}")));
@@ -210,8 +285,7 @@ pub fn read_bytes(path: &str) -> AppResult<(String, Vec<u8>)> {
     if path.trim().is_empty() {
         return Err(AppError::BadRequest("missing file path".into()));
     }
-    let canonical = PathBuf::from(path)
-        .canonicalize()
+    let canonical = canonicalize(Path::new(path))
         .map_err(|e| AppError::BadRequest(format!("cannot open '{path}': {e}")))?;
     if canonical.is_dir() {
         return Err(AppError::BadRequest(format!(
@@ -232,6 +306,39 @@ pub fn read_bytes(path: &str) -> AppResult<(String, Vec<u8>)> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn strips_windows_verbatim_prefix() {
+        // The picker used to show `\\?\C:\Users` for what users call `C:\Users`.
+        assert_eq!(strip_verbatim(r"\\?\C:\Users").unwrap(), r"C:\Users");
+        assert_eq!(strip_verbatim(r"\\?\C:\").unwrap(), r"C:\");
+        assert_eq!(strip_verbatim(r"\\?\d:\srv\repo").unwrap(), r"d:\srv\repo");
+        // Network shares keep their UNC spelling.
+        assert_eq!(
+            strip_verbatim(r"\\?\UNC\build01\share\repo").unwrap(),
+            r"\\build01\share\repo"
+        );
+        // Nothing to strip.
+        assert!(strip_verbatim(r"C:\Users").is_none());
+        assert!(strip_verbatim("/home/dev").is_none());
+        // Other verbatim devices are left alone rather than mangled.
+        assert!(strip_verbatim(r"\\?\Volume{7f2a}\data").is_none());
+    }
+
+    #[test]
+    fn keeps_verbatim_prefix_when_it_is_load_bearing() {
+        // Only the verbatim form resolves past MAX_PATH.
+        let deep = format!(r"\\?\C:\{}", vec!["segment"; 40].join(r"\"));
+        assert!(strip_verbatim(&deep).is_none());
+        // Win32 would trim the trailing dot/space, or reroute a device name.
+        assert!(strip_verbatim(r"\\?\C:\odd.\file").is_none());
+        assert!(strip_verbatim(r"\\?\C:\odd \file").is_none());
+        assert!(strip_verbatim(r"\\?\C:\logs\nul.txt").is_none());
+        assert!(strip_verbatim(r"\\?\C:\logs\COM1").is_none());
+        // ...but names that merely start like one are ordinary files.
+        assert!(strip_verbatim(r"\\?\C:\logs\console.txt").is_some());
+        assert!(strip_verbatim(r"\\?\C:\logs\COM10").is_some());
+    }
 
     #[test]
     fn lists_dirs_first_then_files_sorted() {

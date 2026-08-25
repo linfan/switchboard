@@ -14,12 +14,12 @@ pub use git::{
     git_worktree_remove,
 };
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use switchboard_shared::FileContent;
 
 use crate::error::{AppError, AppResult};
-use crate::fs::mtime_millis;
+use crate::fs::{canonicalize, mtime_millis};
 
 /// Largest file the editor will read into memory (2 MiB). Beyond this we return
 /// an empty, `truncated` payload so the client shows a notice instead of hanging.
@@ -31,8 +31,7 @@ pub async fn read_file(path: &str) -> AppResult<FileContent> {
     if path.trim().is_empty() {
         return Err(AppError::BadRequest("missing file path".into()));
     }
-    let canonical = PathBuf::from(path)
-        .canonicalize()
+    let canonical = canonicalize(Path::new(path))
         .map_err(|e| AppError::BadRequest(format!("cannot open '{path}': {e}")))?;
 
     let meta = tokio::fs::metadata(&canonical)
@@ -83,8 +82,7 @@ pub async fn write_file(path: &str, content: &str) -> AppResult<i64> {
     if path.trim().is_empty() {
         return Err(AppError::BadRequest("missing file path".into()));
     }
-    let canonical = PathBuf::from(path)
-        .canonicalize()
+    let canonical = canonicalize(Path::new(path))
         .map_err(|e| AppError::BadRequest(format!("cannot open '{path}': {e}")))?;
     if canonical.is_dir() {
         return Err(AppError::BadRequest(format!(

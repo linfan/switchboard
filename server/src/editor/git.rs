@@ -333,9 +333,8 @@ pub async fn git_worktree_add(
     };
 
     // Resolve $HOME/.switchboard/worktree/<workspace_name>/<worktree_name>.
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| AppError::BadRequest("HOME is not set on the host".into()))?;
+    let home = crate::fs::home_dir()
+        .ok_or_else(|| AppError::BadRequest("no home directory on the host".into()))?;
     let dest = home
         .join(".switchboard")
         .join("worktree")
