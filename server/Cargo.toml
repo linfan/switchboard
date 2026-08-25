@@ -43,10 +43,12 @@ libc = "0.2"
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "__rustls-tls"] }
 http-body-util = "0.1"
 
-# Process liveness/termination by pid: the Windows counterpart to `libc::kill`.
+# Process liveness/termination by pid (the Windows counterpart to `libc::kill`)
+# and the console mode probe that decides whether logs may use ANSI color.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_System_Console",
   "Win32_System_Threading",
 ] }
 

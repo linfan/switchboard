@@ -3,6 +3,7 @@
 mod agent;
 mod auth;
 mod config;
+mod console;
 mod editor;
 mod error;
 mod fs;
@@ -42,7 +43,8 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env();
 
     // Route logs to a size-based rolling file when `SWITCHBOARD_LOG` is set;
-    // otherwise keep the default stdout subscriber (with ANSI colors).
+    // otherwise keep the stdout subscriber, colorized only where the escapes
+    // actually render (see `console::ansi_stdout`).
     let env_filter =
         || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     match &config.log_file {
@@ -63,7 +65,10 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         None => {
-            tracing_subscriber::fmt().with_env_filter(env_filter()).init();
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter())
+                .with_ansi(console::ansi_stdout())
+                .init();
         }
     }
 
