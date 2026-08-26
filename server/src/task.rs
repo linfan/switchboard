@@ -281,6 +281,7 @@ impl TaskManager {
 
             let offset = link.attach_offset();
             let agent_pid = link.pid();
+            let host_pid = link.host_pid().map(|p| p as i64);
             self.running
                 .lock()
                 .unwrap()
@@ -291,10 +292,12 @@ impl TaskManager {
                 .insert(row.task_id.clone(), emu);
             // Record where this attach actually resumed: the host may have been
             // able to replay less than we asked for, and the offset the *next*
-            // server resumes from has to match what we are about to store.
+            // server resumes from has to match what we are about to store. The
+            // host pid comes from the HELLO when the host reports it (Windows
+            // hosts are spawned through a shim, so that is the only source).
             let _ = self
                 .store
-                .set_host(&row.task_id, &row.endpoint, row.host_pid, offset)
+                .set_host(&row.task_id, &row.endpoint, host_pid, offset)
                 .await;
             if let Some(pid) = agent_pid {
                 let _ = self.store.set_pid(&row.task_id, pid as i64).await;

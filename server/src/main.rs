@@ -48,6 +48,12 @@ async fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some(host::HOST_ARG) {
         return run_pty_host().await;
     }
+    // The shim launches a pty-host outside our process tree and exits; on
+    // Windows this is what keeps tasks alive across a service restart.
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some(host::SHIM_ARG) {
+        std::process::exit(host::shim::run());
+    }
 
     let config = Config::from_env();
 

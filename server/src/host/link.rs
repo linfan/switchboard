@@ -18,36 +18,35 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
 use super::proto::{self, Ack, Attach, FromHost, Resize, ToHost, PROTO_VERSION};
-use super::runner::{HostSpec, SPEC_ENV};
-use super::HOST_ARG;
+use super::runner::HostSpec;
+#[cfg(unix)]
+use super::runner::SPEC_ENV;
 use crate::{
     error::{AppError, AppResult},
     ipc,
     pty_proc::{PtyOutput, OUTPUT_DEPTH},
 };
 
-/// No console at all — the host logs to a file.
-#[cfg(windows)]
-const DETACHED: u32 = 0x0000_0008;
-/// Console signals (Ctrl-C in the server's window) stop at our boundary.
-#[cfg(windows)]
-const NEW_GROUP: u32 = 0x0000_0200;
-/// Escape the service job object that would otherwise kill the host when the
-/// server is stopped — the whole point is outliving the server.
-#[cfg(windows)]
-const BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-
 /// Cap on the HELLO/ATTACH exchange. A host that is reachable but wedged must not
 /// hang us: `reattach_hosts` runs this during startup, so an unbounded wait here
 /// would keep the whole server from coming up.
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How many times [`HostLink::attach`] retries after a failed exchange, and how
+/// long it waits between attempts. A host that is merely still closing out its
+/// previous server's session — the expected state right after an upgrade — gets
+/// this many second chances before the task is reconciled away.
+const ATTACH_ATTEMPTS: u32 = 3;
+const ATTACH_RETRY_GAP: std::time::Duration = std::time::Duration::from_millis(750);
+
 /// A connected pty-host, as seen from the server.
 pub struct HostLink {
     task_id: String,
     endpoint: String,
-    /// The host process we spawned, when we are the server that spawned it. `None`
-    /// after a re-attach, where the pid comes from the store instead.
+    /// The host process's pid: reported by the host in its HELLO when it knows
+    /// to (and it always does for current builds), else the child we spawned —
+    /// `None` after a re-attach to a host from an older build that never
+    /// reported one.
     host_pid: Option<u32>,
     /// The agent's pid, as reported by the host.
     agent_pid: Option<u32>,
@@ -96,20 +95,54 @@ impl HostLink {
             rows,
         };
 
-        let host_pid = spawn_detached(&spec)?;
-        tracing::info!(task = %task_id, host_pid, %endpoint, "pty-host spawned");
-        Self::dial(task_id, &endpoint, 0, Some(host_pid)).await
+        // On unix the host is our direct (setsid-detached) child, so its pid is
+        // known here. On windows it is launched through a short-lived shim so
+        // that it is nobody's descendant — which is what lets it survive
+        // supervisors that kill the process tree on service exit — and its pid
+        // arrives with the HELLO instead.
+        #[cfg(unix)]
+        let spawned_pid: Option<u32> = Some(spawn_detached(&spec)?);
+        #[cfg(windows)]
+        let spawned_pid: Option<u32> = {
+            super::shim::spawn_via_shim(&spec)?;
+            None
+        };
+        tracing::info!(task = %task_id, host_pid = ?spawned_pid, %endpoint, "pty-host spawned");
+        match Self::dial(task_id, &endpoint, 0, spawned_pid).await {
+            Ok(pair) => Ok(pair),
+            Err(e) => Err(e.into_error()),
+        }
     }
 
     /// Re-attach to a host that survived a server restart, resuming after the
     /// last byte offset the server persisted.
+    ///
+    /// The host is typically still tearing down its session with the server that
+    /// just exited, so a failed exchange (as opposed to an unreachable endpoint)
+    /// is retried a few times before giving up.
     pub async fn attach(
         task_id: &str,
         endpoint: &str,
         after: u64,
         host_pid: Option<u32>,
     ) -> AppResult<(Self, mpsc::Receiver<PtyOutput>)> {
-        Self::dial(task_id, endpoint, after, host_pid).await
+        for attempt in 1..=ATTACH_ATTEMPTS {
+            match Self::dial(task_id, endpoint, after, host_pid).await {
+                Ok(pair) => return Ok(pair),
+                Err(DialFailure::Unreachable(e)) => return Err(e),
+                Err(DialFailure::Exchange(e)) if attempt == ATTACH_ATTEMPTS => return Err(e),
+                Err(DialFailure::Exchange(e)) => {
+                    tracing::warn!(
+                        task = %task_id,
+                        attempt,
+                        error = %e,
+                        "pty-host did not complete the handshake; retrying"
+                    );
+                    tokio::time::sleep(ATTACH_RETRY_GAP).await;
+                }
+            }
+        }
+        unreachable!("the loop returns on its final iteration")
     }
 
     async fn dial(
@@ -117,28 +150,33 @@ impl HostLink {
         endpoint: &str,
         after: u64,
         host_pid: Option<u32>,
-    ) -> AppResult<(Self, mpsc::Receiver<PtyOutput>)> {
-        let stream = ipc::connect(endpoint).await?;
+    ) -> Result<(Self, mpsc::Receiver<PtyOutput>), DialFailure> {
+        let stream = ipc::connect(endpoint)
+            .await
+            .map_err(DialFailure::Unreachable)?;
         let (mut reader, mut writer) = tokio::io::split(stream);
 
-        let hello = match handshake(&mut reader).await? {
+        let hello = match handshake(&mut reader)
+            .await
+            .map_err(DialFailure::Exchange)?
+        {
             Some(FromHost::Hello(h)) => h,
             Some(other) => {
-                return Err(AppError::Other(anyhow::anyhow!(
+                return Err(DialFailure::Exchange(AppError::Other(anyhow::anyhow!(
                     "host sent {other:?} before HELLO"
-                )))
+                ))))
             }
             None => {
-                return Err(AppError::Other(anyhow::anyhow!(
+                return Err(DialFailure::Exchange(AppError::Other(anyhow::anyhow!(
                     "host closed before sending HELLO"
-                )))
+                ))))
             }
         };
         if hello.proto != PROTO_VERSION {
-            return Err(AppError::Other(anyhow::anyhow!(
+            return Err(DialFailure::Exchange(AppError::Other(anyhow::anyhow!(
                 "host speaks protocol v{}, this server speaks v{PROTO_VERSION}",
                 hello.proto
-            )));
+            ))));
         }
 
         // Ask only for what the host can still replay. Below `retained_from` means
@@ -163,7 +201,8 @@ impl HostLink {
             })
             .encode(),
         )
-        .await?;
+        .await
+        .map_err(DialFailure::Exchange)?;
         tracing::info!(
             task = %task_id,
             agent_pid = ?hello.agent_pid,
@@ -182,7 +221,7 @@ impl HostLink {
             Self {
                 task_id: task_id.to_string(),
                 endpoint: endpoint.to_string(),
-                host_pid,
+                host_pid: hello.host_pid.or(host_pid),
                 agent_pid: hello.agent_pid,
                 attach_offset: resume,
                 size: (hello.cols, hello.rows),
@@ -346,8 +385,34 @@ async fn read_host<R: AsyncRead + Unpin>(
     }
 }
 
+/// Why a dial failed, split by whether an immediate retry can ever help.
+enum DialFailure {
+    /// Nothing is listening at the endpoint. A reattach target listens for its
+    /// entire life, so this means the host is gone — retrying would only delay
+    /// the orphan reconciliation that must follow.
+    Unreachable(AppError),
+    /// The connection was made but the HELLO/ATTACH exchange failed. The host is
+    /// alive but not ready for us yet — typically still serving the session of a
+    /// server that just exited — so a retry is cheap and can win.
+    Exchange(AppError),
+}
+
+impl DialFailure {
+    fn into_error(self) -> AppError {
+        match self {
+            DialFailure::Unreachable(e) | DialFailure::Exchange(e) => e,
+        }
+    }
+}
+
 /// Start this executable as a pty-host, detached from our console and process
 /// group so it survives us. Returns the host's pid.
+///
+/// Unix-only: the host is our direct child, which is safe because replacing this
+/// process (`execve` on upgrade) never kills children. Windows supervisors kill
+/// process *trees*, so there the host is launched through [`super::shim`] to
+/// sever the parent chain instead.
+#[cfg(unix)]
 fn spawn_detached(spec: &HostSpec) -> AppResult<u32> {
     let exe = std::env::current_exe()
         .map_err(|e| AppError::Other(anyhow::anyhow!("cannot locate our own binary: {e}")))?;
@@ -355,7 +420,7 @@ fn spawn_detached(spec: &HostSpec) -> AppResult<u32> {
         .map_err(|e| AppError::Other(anyhow::anyhow!("cannot encode host spec: {e}")))?;
 
     let mut cmd = tokio::process::Command::new(&exe);
-    cmd.arg(HOST_ARG)
+    cmd.arg(super::HOST_ARG)
         .env(SPEC_ENV, payload)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -363,7 +428,6 @@ fn spawn_detached(spec: &HostSpec) -> AppResult<u32> {
 
     // Leave the child running when the server exits, and let tokio's orphan
     // reaper collect it on unix so an exited host never lingers as a zombie.
-    #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
             // A new session detaches the host from our controlling terminal, so a
@@ -373,23 +437,8 @@ fn spawn_detached(spec: &HostSpec) -> AppResult<u32> {
             Ok(())
         });
     }
-    #[cfg(windows)]
-    cmd.creation_flags(DETACHED | NEW_GROUP | BREAKAWAY_FROM_JOB);
 
-    let spawned = cmd.spawn();
-    #[cfg(windows)]
-    let spawned = match spawned {
-        // A job object that forbids breakaway rejects the flag outright; without
-        // it the host dies with the service, which is still better than no host.
-        Err(e) => {
-            tracing::warn!(error = %e, "spawn with job breakaway failed; retrying without it");
-            cmd.creation_flags(DETACHED | NEW_GROUP);
-            cmd.spawn()
-        }
-        ok => ok,
-    };
-
-    let child = spawned.map_err(|e| {
+    let child = cmd.spawn().map_err(|e| {
         AppError::Other(anyhow::anyhow!(
             "cannot spawn pty-host {}: {e}",
             exe.display()
@@ -514,5 +563,92 @@ mod tests {
         wait_for(&mut rx, "EARLY").await;
         link.terminate();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(10), host).await;
+    }
+
+    /// A host that accepts the connection but dies before completing the
+    /// handshake is the "still tearing down the previous server's session"
+    /// state right after an upgrade: the attach must be retried, not treated
+    /// as a dead host. The retried attach also proves that `host_pid` is taken
+    /// from the HELLO rather than from whatever the caller guessed.
+    #[tokio::test]
+    async fn attach_retries_a_failed_handshake_and_takes_host_pid_from_hello() {
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let db = dir
+            .path()
+            .join("switchboard.db")
+            .to_string_lossy()
+            .into_owned();
+        let endpoint = ipc::endpoint_for(&db, &task_id);
+
+        let ep = endpoint.clone();
+        let host = tokio::spawn(async move {
+            let mut listener = ipc::listen(&ep).unwrap();
+            // First connection: hang up without a word.
+            let first = listener.accept().await.unwrap();
+            drop(first);
+            // Second connection: complete the handshake.
+            let stream = listener.accept().await.unwrap();
+            let (mut r, mut w) = tokio::io::split(stream);
+            proto::write_msg(
+                &mut w,
+                &FromHost::Hello(proto::Hello {
+                    proto: PROTO_VERSION,
+                    agent_pid: Some(11),
+                    host_pid: Some(999),
+                    cols: 80,
+                    rows: 24,
+                    produced: 0,
+                    retained_from: 0,
+                })
+                .encode(),
+            )
+            .await
+            .unwrap();
+            let Some(ToHost::Attach(a)) = proto::read_to_host(&mut r).await.unwrap() else {
+                panic!("server never sent ATTACH");
+            };
+            assert_eq!(a.after, 0);
+        });
+
+        let (link, _rx) = HostLink::attach(&task_id, &endpoint, 0, None)
+            .await
+            .expect("attach must succeed after the failed first attempt");
+        assert_eq!(link.host_pid(), Some(999), "host pid comes from the HELLO");
+        drop(link);
+        drop(_rx);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), host).await;
+    }
+
+    /// An endpoint nobody listens on is a *dead* host, not a busy one: the
+    /// attach must fail after the dial timeout alone, without burning the
+    /// exchange retries on top (those would add another gap+timeout per round).
+    #[tokio::test]
+    async fn attach_to_a_dead_endpoint_fails_without_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let db = dir
+            .path()
+            .join("switchboard.db")
+            .to_string_lossy()
+            .into_owned();
+        let endpoint = ipc::endpoint_for(&db, &task_id);
+
+        let started = std::time::Instant::now();
+        let err = match HostLink::attach(&task_id, &endpoint, 0, None).await {
+            Ok(_) => panic!("nothing is listening; attach must fail"),
+            Err(e) => e,
+        };
+        // One CONNECT_TIMEOUT (5s) with headroom; a retried unreachable dial
+        // would take ~2x that.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(7),
+            "must not retry an unreachable endpoint (took {:?})",
+            started.elapsed()
+        );
+        assert!(
+            err.to_string().contains("cannot connect"),
+            "unexpected error: {err}"
+        );
     }
 }

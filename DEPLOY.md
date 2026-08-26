@@ -286,6 +286,12 @@ Notes:
   Windows has no `execve`, so the server swaps its own `.exe` and exits, leaving
   nssm to start the new one; drop that setting and the service stays down after
   an upgrade.
+- nssm terminates the **entire process tree** when the service application exits
+  (its default behavior), and a self-upgrade is exactly such an exit. Tasks used
+  to die with it — every running task came back `Exited` after an upgrade. The
+  server now launches each `pty-host` through a one-shot `pty-host-shim`
+  process, so a host is never a descendant of the server by the time it exits
+  and no tree walk can reach it. No nssm setting is required.
 
 Remove the service with:
 
@@ -362,7 +368,11 @@ sudo launchctl bootout system/com.switchboard.server        # unload
   old one had persisted. An upgrade costs a moment of buffered output, not a
   task. While no server is attached the host keeps buffering; if the gap runs
   long enough to exhaust its retention (4 MiB unacknowledged) it stops draining
-  the PTY, which pauses the agent rather than losing its output.
+  the PTY, which pauses the agent rather than losing its output. On Windows the
+  host is additionally spawned through a short-lived `pty-host-shim` so it is
+  not the server's descendant — service managers there kill process trees on
+  exit, and the shim's immediate death hides the host from that walk (see the
+  nssm note above).
 - Self-upgrade is exposed as `POST /api/admin/upgrade/upload` (raw binary body)
   and `POST /api/admin/upgrade/url` (`{"url", "sha256"}`); both accept an
   optional SHA-256 and reject a binary built for another OS or CPU before

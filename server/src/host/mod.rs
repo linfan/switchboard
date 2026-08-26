@@ -16,13 +16,27 @@
 //!   acknowledges it durably, and applies input/resize/terminate.
 //! * [`HostLink`] — server side. Spawns or re-attaches a host and exposes the
 //!   same surface as an in-process PTY handle, so the task pump is unchanged.
+//! * [`shim`] (Windows only) — one-shot launcher that puts a host outside the
+//!   server's process tree, where the service manager's tree kill cannot
+//!   reach it. Unix detaches with `setsid` instead: `execve` never kills
+//!   children, so no shim is needed there.
 
 pub mod link;
 pub mod proto;
 pub mod runner;
+/// Windows-only launcher that puts a pty-host outside the server's process
+/// tree, so supervisors that kill trees on service exit cannot reach it.
+#[cfg(windows)]
+pub mod shim;
 
 pub use link::HostLink;
 pub use runner::{run, HostSpec};
 
 /// Argument that makes this executable run as a pty-host instead of a server.
 pub const HOST_ARG: &str = "pty-host";
+
+/// Argument that makes this executable run as the one-shot pty-host launcher
+/// shim (Windows only). Re-exported so `main` can dispatch on it without
+/// knowing the module layout.
+#[cfg(windows)]
+pub use shim::SHIM_ARG;

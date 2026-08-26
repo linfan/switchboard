@@ -227,6 +227,12 @@ overwrite a running image either, so the server renames its own `.exe` aside
 service manager starts it. That requires nssm's `AppExit Default Restart`; see
 [DEPLOY.md](DEPLOY.md#upgrading).
 
+Because a Windows service manager kills the whole process *tree* when the
+application exits, a pty-host there is spawned through a one-shot
+`pty-host-shim` process that exits immediately — by the time the server exits,
+the host is nobody's descendant, so the tree kill cannot reach it. Unix needs no
+such trick: `execve` never kills children.
+
 ## Quick start & deployment
 
 See [DEPLOY.md](DEPLOY.md) for prerequisites, the quick start (local, remote,

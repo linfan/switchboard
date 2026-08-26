@@ -44,6 +44,11 @@ pub struct Hello {
     pub proto: u16,
     /// OS pid of the agent process the host supervises, when known.
     pub agent_pid: Option<u32>,
+    /// OS pid of the host process itself. Optional because hosts from before
+    /// this field existed do not send it — JSON plus `serde(default)` keeps them
+    /// adoptable, which is the whole point of the protocol's compat rules.
+    #[serde(default)]
+    pub host_pid: Option<u32>,
     /// Terminal size the host currently has applied.
     pub cols: u16,
     pub rows: u16,
@@ -271,6 +276,7 @@ mod tests {
         Hello {
             proto: PROTO_VERSION,
             agent_pid: Some(4242),
+            host_pid: Some(1717),
             cols: 120,
             rows: 40,
             produced: 9000,
@@ -378,5 +384,18 @@ mod tests {
         assert!(read_from_host(&mut cursor).await.unwrap().is_none());
         let mut partial = std::io::Cursor::new(vec![KIND_HELLO, 0x01]);
         assert!(read_from_host(&mut partial).await.is_err());
+    }
+
+    /// A host from a build before `host_pid` existed sends a HELLO without it.
+    /// It must decode — with the field defaulting to `None` — so an upgrade
+    /// never strands the tasks those hosts are keeping alive.
+    #[test]
+    fn hello_without_host_pid_decodes() {
+        let legacy =
+            br#"{"proto":1,"agent_pid":4242,"cols":80,"rows":24,"produced":10,"retained_from":0}"#;
+        let h: Hello = serde_json::from_slice(legacy).unwrap();
+        assert_eq!(h.host_pid, None);
+        assert_eq!(h.agent_pid, Some(4242));
+        assert_eq!(h.produced, 10);
     }
 }

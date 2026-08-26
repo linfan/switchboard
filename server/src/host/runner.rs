@@ -275,6 +275,7 @@ where
         &FromHost::Hello(Hello {
             proto: PROTO_VERSION,
             agent_pid: handle.pid(),
+            host_pid: Some(std::process::id()),
             cols,
             rows,
             produced,

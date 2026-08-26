@@ -120,9 +120,9 @@ run-repeater-client: ## Run a worker that dials out to a repeater (no client-fac
 	$(CARGO) run -p switchboard-server
 
 # ---------------------------------------------------------------- test
-.PHONY: test test-all test-shared test-server test-client test-e2e test-web test-live
+.PHONY: test test-all test-shared test-server test-client test-e2e test-upgrade test-web test-live
 test: test-shared test-server test-client ## Run all fast (non-live, non-e2e) tests
-test-all: test test-e2e test-web ## Run everything incl. end-to-end + browser tests
+test-all: test test-e2e test-upgrade test-web ## Run everything incl. end-to-end + browser tests
 test-shared: ## Test shared protocol crate (also regenerates TS bindings)
 	TS_RS_EXPORT_DIR="$(CURDIR)" $(CARGO) test -p switchboard-shared
 test-server: ## Test hosting service
@@ -132,6 +132,9 @@ test-client: ## Test client (vitest)
 test-e2e: ## End-to-end: real server binary + WS clients + fake PTY agent (gap-free reconnect)
 	$(CARGO) build -p switchboard-server
 	cd e2e && $(NPM) install --silent && $(NPM) test
+test-upgrade: ## End-to-end: real self-upgrades (upload + re-exec) with a live WS client
+	$(CARGO) build -p switchboard-server
+	cd e2e && $(NPM) install --silent && $(NPM) run test:upgrade
 test-web: ## Browser E2E (Playwright): live server + Vite + xterm terminal render/type/reconnect
 	cd client && $(NPM) install --silent && $(NPM) exec -- playwright install chromium && $(NPM) run test:e2e
 test-live: ## Run live agent-CLI tests (needs claude/qodercli auth)
