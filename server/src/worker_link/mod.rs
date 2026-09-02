@@ -42,6 +42,9 @@ use crate::ws::{run_session, WsIn, WsOut};
 mod tls_pin;
 use tls_pin::{leaf_der_fingerprint, pinned_client_config};
 
+#[cfg(test)]
+mod test;
+
 /// Outbound tunnel channel depth (encoded frames awaiting the socket writer).
 /// Bounded so a slow repeater applies backpressure instead of unbounded growth.
 const MUX_BUF: usize = 512;
@@ -49,8 +52,16 @@ const MUX_BUF: usize = 512;
 const IN_BUF: usize = 64;
 const OUT_BUF: usize = 512;
 
+/// Tear the tunnel down when no frame arrives from the repeater for this long.
+/// The repeater heartbeats every 15s, so silence this long means a half-open
+/// socket the OS hasn't reported dead (dropped NAT entry, a host that slept
+/// through the repeater's FIN) — `read` would otherwise park on it forever and
+/// the worker would never redial. Mirrors the repeater's own 45s idle teardown.
+const TUNNEL_IDLE: Duration = Duration::from_secs(45);
+
 /// Dial the repeater and serve the tunnel forever, reconnecting with capped
-/// exponential backoff when the link drops.
+/// exponential backoff when the link drops — including when the link only
+/// *silently* dies (no Close, no error, no frames for [`TUNNEL_IDLE`]).
 pub async fn run(state: SharedState) -> Result<()> {
     let repeater_addr = state
         .config
@@ -76,7 +87,9 @@ pub async fn run(state: SharedState) -> Result<()> {
     let mut backoff = Duration::from_millis(500);
     let max_backoff = Duration::from_secs(30);
     loop {
-        match serve_once(&state, &repeater_addr, token.as_bytes(), &pin, tls.clone()).await {
+        match serve_once(&state, &repeater_addr, token.as_bytes(), &pin, tls.clone(), TUNNEL_IDLE)
+            .await
+        {
             Ok(Outcome::Dropped) => {
                 tracing::info!("repeater tunnel closed; reconnecting");
                 backoff = Duration::from_millis(500);
@@ -109,14 +122,15 @@ enum Outcome {
     Shutdown,
 }
 
-/// One tunnel lifetime: dial, authenticate, then demux until the socket closes
-/// or a graceful shutdown is requested.
+/// One tunnel lifetime: dial, authenticate, then demux until the socket closes,
+/// goes silent for `idle_timeout`, or a graceful shutdown is requested.
 async fn serve_once(
     state: &SharedState,
     repeater_addr: &str,
     token: &[u8],
     cb: &[u8],
     tls: Arc<ClientConfig>,
+    idle_timeout: Duration,
 ) -> Result<Outcome> {
     let url = format!("wss://{repeater_addr}/repeater");
     let connector = Connector::Rustls(tls);
@@ -154,7 +168,7 @@ async fn serve_once(
     // raised while we're between connections is simply missed (the re-exec still
     // proceeds; the repeater's last-writer-wins eviction covers that case).
     let outcome = tokio::select! {
-        r = demux(&mut stream, &mux_tx, &app, state, &mut streams) => Demux::Ended(r),
+        r = demux(&mut stream, &mux_tx, &app, state, &mut streams, idle_timeout) => Demux::Ended(r),
         _ = state.tunnel_shutdown.notified() => Demux::Shutdown,
     };
 
@@ -208,6 +222,9 @@ impl Stream {
 }
 
 /// Read tunnel frames and route them by `stream_id` until the socket ends.
+/// `idle_timeout` bounds how long the socket may go without delivering *any*
+/// frame: the repeater heartbeats on a fixed cadence, so total silence means
+/// the link is dead even though the OS still reports it open.
 async fn demux(
     stream: &mut (impl StreamExt<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>>
               + Unpin),
@@ -215,8 +232,18 @@ async fn demux(
     app: &axum::Router,
     state: &SharedState,
     streams: &mut HashMap<u64, Stream>,
+    idle_timeout: Duration,
 ) -> Result<()> {
-    while let Some(msg) = stream.next().await {
+    loop {
+        let msg = match tokio::time::timeout(idle_timeout, stream.next()).await {
+            Ok(Some(msg)) => msg,
+            Ok(None) => break,
+            Err(_) => {
+                return Err(anyhow!(
+                    "no frame from the repeater in {idle_timeout:?}; tunnel is silently dead"
+                ))
+            }
+        };
         let bytes = match msg? {
             WsMessage::Binary(b) => b,
             WsMessage::Close(_) => break,

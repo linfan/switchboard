@@ -366,6 +366,7 @@ async fn bridge_client_ws(socket: WebSocket, st: Shared) {
     }
 
     let Some(tunnel) = wait_for_tunnel(&st).await else {
+        tracing::warn!("no worker paired within grace; closing the client socket");
         let _ = sink.send(Message::Close(None)).await;
         return;
     };
