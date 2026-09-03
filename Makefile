@@ -180,8 +180,9 @@ package-server-windows: build-server-windows ## Produce a Windows server release
 	@mkdir -p dist
 	cp target/$(WINDOWS_TARGET)/release/$(SERVER_BIN).exe dist/$(SERVER_BIN).exe
 	@echo "Windows server binary staged in ./dist/$(SERVER_BIN).exe"
-package-client: build-client ## Package the desktop client (Tauri bundles)
+package-client: build-client ## Package the desktop client as a DMG
 	cd client && $(NPM) run tauri build
+	find client/src-tauri/target/release/bundle/macos -maxdepth 1 -type d -name '*.app' -exec rm -rf {} +
 package-client-windows: build-client-windows ## Produce a portable Windows client artifact
 	@mkdir -p dist
 	cp client/src-tauri/target/$(WINDOWS_TARGET)/release/$(CLIENT_WINDOWS_BIN) dist/Switchboard.exe
