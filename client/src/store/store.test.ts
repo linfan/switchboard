@@ -24,7 +24,7 @@ beforeEach(() => {
     recentTools: {},
     selectedKey: undefined,
     selectedWorkspaceId: undefined,
-    selectedPortForwardServiceId: undefined,
+    selectedServiceId: undefined,
     editorState: {},
     createError: undefined,
     transfers: [],
@@ -280,7 +280,7 @@ describe("removeService", () => {
       status: "active",
       activeConnections: 2,
     });
-    st.selectPortForwards("s1");
+    st.selectService("s1");
     seedTask("s1", "t1");
     st.setTaskTitle("s1", "t1", "renamed");
 
@@ -290,7 +290,7 @@ describe("removeService", () => {
     expect(s.workspaces).toHaveLength(0);
     expect(s.portForwards).toEqual([]);
     expect(s.portForwardRuntime[forward]).toBeUndefined();
-    expect(s.selectedPortForwardServiceId).toBeUndefined();
+    expect(s.selectedServiceId).toBeUndefined();
     expect(s.taskWorkspace[convKey("s1", "t1")]).toBeUndefined();
     expect(s.titles[convKey("s1", "t1")]).toBeUndefined();
     expect(s.pendingWorkspace["s1"]).toBeUndefined();
@@ -405,14 +405,14 @@ describe("port forwards", () => {
     expect(useStore.getState().portForwardRuntime[id]).toBeUndefined();
   });
 
-  it("selectPortForwards clears task and workspace selections", () => {
+  it("selectService clears task and workspace selections", () => {
     const st = useStore.getState();
     st.select(convKey("s1", "t1"));
     st.selectWorkspace("w1");
-    st.selectPortForwards("s1");
+    st.selectService("s1");
 
     const s = useStore.getState();
-    expect(s.selectedPortForwardServiceId).toBe("s1");
+    expect(s.selectedServiceId).toBe("s1");
     expect(s.selectedKey).toBeUndefined();
     expect(s.selectedWorkspaceId).toBeUndefined();
   });

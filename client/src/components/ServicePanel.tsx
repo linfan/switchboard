@@ -1,8 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { isTauri } from "../net/tauri";
 import { useStore } from "../store/store";
-import type { PortForward, PortForwardRuntime, Service } from "../store/types";
+import type {
+  ConnStatus,
+  PortForward,
+  PortForwardRuntime,
+  Service,
+} from "../store/types";
 import { ConfirmButton } from "./ConfirmButton";
 import { PortForwardDialog } from "./PortForwardDialog";
 
@@ -95,10 +100,32 @@ function ForwardRow({
   );
 }
 
-export function PortForwardsPanel({ service }: { service: Service }) {
+const CONNECTION_LABEL: Record<ConnStatus, string> = {
+  online: "Online",
+  connecting: "Connecting…",
+  reconnecting: "Reconnecting",
+  offline: "Offline",
+};
+
+/** Re-render once a second while `active`, so countdowns stay live. */
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active]);
+  return now;
+}
+
+export function ServicePanel({ service }: { service: Service }) {
+  const rt = useStore((s) => s.runtime[service.id]);
   const portForwards = useStore((s) => s.portForwards);
   const runtimes = useStore((s) => s.portForwardRuntime);
   const [editing, setEditing] = useState<PortForward | null | undefined>(undefined);
+  const status = rt?.status ?? "offline";
+  const now = useNow(status === "reconnecting");
+
   const forwards = portForwards.filter((forward) => forward.serviceId === service.id);
   const listening = forwards.filter(
     (forward) => runtimes[forward.id]?.status === "active",
@@ -107,14 +134,18 @@ export function PortForwardsPanel({ service }: { service: Service }) {
     (total, forward) => total + (runtimes[forward.id]?.activeConnections ?? 0),
     0,
   );
+  const tools = rt?.info?.tools.filter((tool) => tool.available) ?? [];
+  const retryIn = rt?.nextRetryAt
+    ? Math.max(0, Math.round((rt.nextRetryAt - now) / 1000))
+    : undefined;
 
   return (
-    <main className="panel forwards-panel">
-      <header className="panel__header forwards-panel__header">
-        <span className="forwards-panel__icon"><ForwardIcon /></span>
+    <main className="panel service-panel">
+      <header className="panel__header service-panel__header">
+        <span className={`dot dot--${status}`} title={status} />
         <div>
-          <span className="panel__title">Port forwards</span>
-          <span className="forwards-panel__service">{service.name}</span>
+          <span className="panel__title">{service.name}</span>
+          <span className="service-panel__url">{service.url}</span>
         </div>
         <span className="panel__spacer" />
         <button type="button" className="btn btn--primary" onClick={() => setEditing(null)}>
@@ -122,13 +153,62 @@ export function PortForwardsPanel({ service }: { service: Service }) {
         </button>
       </header>
 
-      <section className="forwards-panel__body">
-        <div className="forwards-panel__summary">
+      <section className="service-panel__body">
+        <div className="service-panel__card">
+          <dl>
+            <div className="service-panel__row">
+              <dt>Connection</dt>
+              <dd className={`service-panel__conn service-panel__conn--${status}`}>
+                <span className={`dot dot--${status}`} />
+                {CONNECTION_LABEL[status]}
+              </dd>
+            </div>
+            <div className="service-panel__row">
+              <dt>Endpoint</dt>
+              <dd>{service.url}</dd>
+            </div>
+            {rt?.info && (
+              <div className="service-panel__row">
+                <dt>Host</dt>
+                <dd>
+                  {rt.info.name} · v{rt.info.version}
+                </dd>
+              </div>
+            )}
+            {rt?.info && (
+              <div className="service-panel__row">
+                <dt>Agent tools</dt>
+                <dd>
+                  {tools.length > 0
+                    ? tools.map((tool) => tool.display_name).join(", ")
+                    : "none available"}
+                </dd>
+              </div>
+            )}
+            {status === "reconnecting" && (
+              <div className="service-panel__row">
+                <dt>Retry</dt>
+                <dd>
+                  {rt?.attempt ? `attempt ${rt.attempt} · ` : ""}
+                  {retryIn !== undefined ? `in ${retryIn}s` : "pending…"}
+                </dd>
+              </div>
+            )}
+            {rt?.lastError && (
+              <div className="service-panel__row service-panel__row--error">
+                <dt>Last error</dt>
+                <dd>{rt.lastError}</dd>
+              </div>
+            )}
+          </dl>
+        </div>
+
+        <div className="service-panel__summary">
           <div>
-            <span className="forwards-panel__eyebrow">LOOPBACK PATCH PANEL</span>
+            <span className="service-panel__eyebrow">PORT FORWARDING</span>
             <p>Expose a port on this computer to a loopback-only port on {service.name}.</p>
           </div>
-          <dl className="forwards-panel__metrics">
+          <dl className="service-panel__metrics">
             <div><dt>Rules</dt><dd>{forwards.length}</dd></div>
             <div><dt>Listening</dt><dd>{listening}</dd></div>
             <div><dt>Live links</dt><dd>{connections}</dd></div>
@@ -136,13 +216,13 @@ export function PortForwardsPanel({ service }: { service: Service }) {
         </div>
 
         {!isTauri && (
-          <p className="forwards-panel__notice">
+          <p className="service-panel__notice">
             Forwarding is available in the desktop app. Rules can still be configured here.
           </p>
         )}
 
         {forwards.length === 0 ? (
-          <div className="forwards-panel__empty">
+          <div className="service-panel__empty">
             <ForwardIcon />
             <div>
               <strong>No port forwards</strong>

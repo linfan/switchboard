@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 
 import { ConversationPanel } from "./components/ConversationPanel";
-import { PortForwardsPanel } from "./components/PortForwardsPanel";
+import { ServicePanel } from "./components/ServicePanel";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceEditor } from "./components/WorkspaceEditor";
@@ -22,16 +22,17 @@ export default function App() {
   const zoomFont = useStore((s) => s.zoomFont);
   const settingsOpen = useStore((s) => s.settingsOpen);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
-  // A selected workspace routes the right pane to its file editor; otherwise the
-  // selected task's terminal shows (the original behavior).
+  // A selected workspace routes the right pane to its file editor; a selected
+  // service shows its status page; otherwise the selected task's terminal shows
+  // (the original behavior).
   const workspace = useStore((s) =>
     s.selectedWorkspaceId
       ? s.workspaces.find((w) => w.id === s.selectedWorkspaceId)
       : undefined,
   );
-  const portForwardService = useStore((s) =>
-    s.selectedPortForwardServiceId
-      ? s.services.find((service) => service.id === s.selectedPortForwardServiceId)
+  const selectedService = useStore((s) =>
+    s.selectedServiceId
+      ? s.services.find((service) => service.id === s.selectedServiceId)
       : undefined,
   );
 
@@ -151,8 +152,8 @@ export default function App() {
       )}
       {workspace ? (
         <WorkspaceEditor key={workspace.id} workspace={workspace} />
-      ) : portForwardService ? (
-        <PortForwardsPanel service={portForwardService} />
+      ) : selectedService ? (
+        <ServicePanel key={selectedService.id} service={selectedService} />
       ) : (
         <ConversationPanel />
       )}

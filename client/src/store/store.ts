@@ -84,8 +84,8 @@ export interface AppState {
    * exclusive with `selectedKey`. Persisted so the editor restores on restart.
    */
   selectedWorkspaceId?: string;
-  /** Service whose port-forward console fills the main pane (in-memory). */
-  selectedPortForwardServiceId?: string;
+  /** Service whose status page fills the main pane (in-memory). */
+  selectedServiceId?: string;
   /** Per-workspace file-editor UI state, keyed by workspace id (persisted). */
   editorState: Record<string, WorkspaceEditorState>;
   /** Last task-creation error surfaced by the server (in-memory, transient). */
@@ -157,8 +157,8 @@ export interface AppState {
   select: (key: string | undefined) => void;
   /** Focus a workspace (file editor); clears any conversation selection. */
   selectWorkspace: (id: string | undefined) => void;
-  /** Focus one service's port-forward console; clears terminal and editor selections. */
-  selectPortForwards: (serviceId: string | undefined) => void;
+  /** Focus a service's status page; clears terminal and editor selections. */
+  selectService: (serviceId: string | undefined) => void;
   /** Merge a patch into a workspace's persisted editor UI state. */
   patchEditorState: (
     workspaceId: string,
@@ -223,7 +223,7 @@ export const useStore = create<AppState>()(
       recentTools: {},
       selectedKey: undefined,
       selectedWorkspaceId: undefined,
-      selectedPortForwardServiceId: undefined,
+      selectedServiceId: undefined,
       editorState: {},
       createError: undefined,
       transfers: [],
@@ -282,10 +282,10 @@ export const useStore = create<AppState>()(
             s.selectedWorkspaceId && removedWsIds.has(s.selectedWorkspaceId)
               ? undefined
               : s.selectedWorkspaceId;
-          const selectedPortForwardServiceId =
-            s.selectedPortForwardServiceId === id
+          const selectedServiceId =
+            s.selectedServiceId === id
               ? undefined
-              : s.selectedPortForwardServiceId;
+              : s.selectedServiceId;
           return {
             services,
             workspaces,
@@ -300,7 +300,7 @@ export const useStore = create<AppState>()(
             selectedKey,
             editorState,
             selectedWorkspaceId,
-            selectedPortForwardServiceId,
+            selectedServiceId,
           };
         }),
 
@@ -473,19 +473,19 @@ export const useStore = create<AppState>()(
         set({
           selectedKey: key,
           selectedWorkspaceId: undefined,
-          selectedPortForwardServiceId: undefined,
+          selectedServiceId: undefined,
         }),
 
       selectWorkspace: (id) =>
         set({
           selectedWorkspaceId: id,
           selectedKey: undefined,
-          selectedPortForwardServiceId: undefined,
+          selectedServiceId: undefined,
         }),
 
-      selectPortForwards: (serviceId) =>
+      selectService: (serviceId) =>
         set({
-          selectedPortForwardServiceId: serviceId,
+          selectedServiceId: serviceId,
           selectedKey: undefined,
           selectedWorkspaceId: undefined,
         }),
