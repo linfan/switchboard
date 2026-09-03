@@ -7,6 +7,7 @@ const KEY = "switchboard";
 
 function persisted(): {
   services: unknown[];
+  portForwards?: unknown[];
   cursors?: unknown;
   editorState?: Record<string, unknown>;
   selectedWorkspaceId?: string;
@@ -18,7 +19,15 @@ function persisted(): {
 describe("persist round-trip through localStorage", () => {
   beforeEach(() => {
     localStorage.clear();
-    useStore.setState({ services: [], runtime: {}, conversations: {}, cursors: {}, selectedKey: undefined });
+    useStore.setState({
+      services: [],
+      portForwards: [],
+      portForwardRuntime: {},
+      runtime: {},
+      conversations: {},
+      cursors: {},
+      selectedKey: undefined,
+    });
   });
 
   it("writes an added service and removes it on delete", () => {
@@ -51,5 +60,31 @@ describe("persist round-trip through localStorage", () => {
       openTabs: [{ path: "/w/a.ts", mode: "edit" }],
       activeTab: "edit::/w/a.ts",
     });
+  });
+
+  it("persists only port-forward mapping specs", () => {
+    const st = useStore.getState();
+    st.addPortForward({
+      id: "f1",
+      serviceId: "s1",
+      localPort: 15432,
+      remotePort: 5432,
+      enabled: true,
+    });
+    st.setPortForwardRuntime("f1", {
+      status: "active",
+      activeConnections: 4,
+    });
+
+    expect(persisted().portForwards).toEqual([
+      {
+        id: "f1",
+        serviceId: "s1",
+        localPort: 15432,
+        remotePort: 5432,
+        enabled: true,
+      },
+    ]);
+    expect(JSON.stringify(persisted())).not.toContain("activeConnections");
   });
 });

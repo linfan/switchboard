@@ -1,11 +1,13 @@
 import { useEffect } from "react";
 
 import { ConversationPanel } from "./components/ConversationPanel";
+import { PortForwardsPanel } from "./components/PortForwardsPanel";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceEditor } from "./components/WorkspaceEditor";
 import * as editors from "./net/editors";
 import { pool } from "./net/pool";
+import { portForwards } from "./net/portForwards";
 import { listen } from "./net/tauri";
 import * as terminals from "./net/terminals";
 import { useStore } from "./store/store";
@@ -27,11 +29,21 @@ export default function App() {
       ? s.workspaces.find((w) => w.id === s.selectedWorkspaceId)
       : undefined,
   );
+  const portForwardService = useStore((s) =>
+    s.selectedPortForwardServiceId
+      ? s.services.find((service) => service.id === s.selectedPortForwardServiceId)
+      : undefined,
+  );
 
   // Own the connection pool for the app's lifetime.
   useEffect(() => {
     pool.start();
     return () => pool.stop();
+  }, []);
+
+  useEffect(() => {
+    portForwards.start();
+    return () => portForwards.stop();
   }, []);
 
   // Push the persisted terminal font size into the (React-external) registry.
@@ -139,6 +151,8 @@ export default function App() {
       )}
       {workspace ? (
         <WorkspaceEditor key={workspace.id} workspace={workspace} />
+      ) : portForwardService ? (
+        <PortForwardsPanel service={portForwardService} />
       ) : (
         <ConversationPanel />
       )}

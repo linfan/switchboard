@@ -12,6 +12,8 @@ beforeEach(() => {
   useStore.setState({
     services: [],
     workspaces: [],
+    portForwards: [],
+    portForwardRuntime: {},
     taskWorkspace: {},
     titles: {},
     pendingWorkspace: {},
@@ -22,6 +24,7 @@ beforeEach(() => {
     recentTools: {},
     selectedKey: undefined,
     selectedWorkspaceId: undefined,
+    selectedPortForwardServiceId: undefined,
     editorState: {},
     createError: undefined,
     transfers: [],
@@ -261,11 +264,23 @@ describe("removeService", () => {
     expect(useStore.getState().selectedKey).toBe(convKey("s2", "t2"));
   });
 
-  it("removeService also drops that service's workspaces and mappings", () => {
+  it("removeService also drops that service's workspaces, forwards, and mappings", () => {
     const st = useStore.getState();
     st.addService({ id: "s1", name: "S1", url: "http://a", token: "t" });
     const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
     st.enqueuePendingWorkspace("s1", ws);
+    const forward = st.addPortForward({
+      id: "f1",
+      serviceId: "s1",
+      localPort: 3001,
+      remotePort: 3000,
+      enabled: true,
+    });
+    st.setPortForwardRuntime(forward, {
+      status: "active",
+      activeConnections: 2,
+    });
+    st.selectPortForwards("s1");
     seedTask("s1", "t1");
     st.setTaskTitle("s1", "t1", "renamed");
 
@@ -273,6 +288,9 @@ describe("removeService", () => {
 
     const s = useStore.getState();
     expect(s.workspaces).toHaveLength(0);
+    expect(s.portForwards).toEqual([]);
+    expect(s.portForwardRuntime[forward]).toBeUndefined();
+    expect(s.selectedPortForwardServiceId).toBeUndefined();
     expect(s.taskWorkspace[convKey("s1", "t1")]).toBeUndefined();
     expect(s.titles[convKey("s1", "t1")]).toBeUndefined();
     expect(s.pendingWorkspace["s1"]).toBeUndefined();
@@ -356,6 +374,47 @@ describe("workspaces", () => {
     const s = useStore.getState();
     expect(s.taskWorkspace[convKey("s1", "t1")]).toBeUndefined();
     expect(s.titles[convKey("s1", "t1")]).toBeUndefined();
+  });
+});
+
+describe("port forwards", () => {
+  it("adds, updates, and removes a forward with its runtime state", () => {
+    const st = useStore.getState();
+    const id = st.addPortForward({
+      id: "f1",
+      serviceId: "s1",
+      localPort: 5433,
+      remotePort: 5432,
+      enabled: true,
+    });
+    st.setPortForwardRuntime(id, { status: "active", activeConnections: 1 });
+    st.updatePortForward(id, { localPort: 6433, enabled: false });
+
+    expect(useStore.getState().portForwards).toEqual([
+      {
+        id: "f1",
+        serviceId: "s1",
+        localPort: 6433,
+        remotePort: 5432,
+        enabled: false,
+      },
+    ]);
+
+    st.removePortForward(id);
+    expect(useStore.getState().portForwards).toEqual([]);
+    expect(useStore.getState().portForwardRuntime[id]).toBeUndefined();
+  });
+
+  it("selectPortForwards clears task and workspace selections", () => {
+    const st = useStore.getState();
+    st.select(convKey("s1", "t1"));
+    st.selectWorkspace("w1");
+    st.selectPortForwards("s1");
+
+    const s = useStore.getState();
+    expect(s.selectedPortForwardServiceId).toBe("s1");
+    expect(s.selectedKey).toBeUndefined();
+    expect(s.selectedWorkspaceId).toBeUndefined();
   });
 });
 

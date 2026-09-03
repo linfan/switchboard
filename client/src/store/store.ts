@@ -17,6 +17,8 @@ import {
   tabKey,
   type Conversation,
   type OpenFile,
+  type PortForward,
+  type PortForwardRuntime,
   type Service,
   type ServiceRuntime,
   type Transfer,
@@ -29,6 +31,10 @@ export interface AppState {
   services: Service[];
   /** Work folders grouped under services (persisted). */
   workspaces: Workspace[];
+  /** Local-to-remote port mapping specs (persisted; no service credentials copied). */
+  portForwards: PortForward[];
+  /** Live native listener state by forward id (in-memory). */
+  portForwardRuntime: Record<string, PortForwardRuntime>;
   /** Which workspace a task belongs to, keyed by `serviceId::taskId` (persisted). */
   taskWorkspace: Record<string, string>;
   /** Local task-title overrides, keyed by `serviceId::taskId` (persisted). */
@@ -78,6 +84,8 @@ export interface AppState {
    * exclusive with `selectedKey`. Persisted so the editor restores on restart.
    */
   selectedWorkspaceId?: string;
+  /** Service whose port-forward console fills the main pane (in-memory). */
+  selectedPortForwardServiceId?: string;
   /** Per-workspace file-editor UI state, keyed by workspace id (persisted). */
   editorState: Record<string, WorkspaceEditorState>;
   /** Last task-creation error surfaced by the server (in-memory, transient). */
@@ -117,6 +125,12 @@ export interface AppState {
   /** Set (or clear, when blank) a local title override for a task. */
   setTaskTitle: (serviceId: string, taskId: string, title: string) => void;
 
+  // --- port forwarding -----------------------------------------------------
+  addPortForward: (forward: Omit<PortForward, "id"> & { id?: string }) => string;
+  updatePortForward: (id: string, patch: Partial<Omit<PortForward, "id">>) => void;
+  removePortForward: (id: string) => void;
+  setPortForwardRuntime: (id: string, runtime: PortForwardRuntime) => void;
+
   // --- layout --------------------------------------------------------------
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebar: () => void;
@@ -143,6 +157,8 @@ export interface AppState {
   select: (key: string | undefined) => void;
   /** Focus a workspace (file editor); clears any conversation selection. */
   selectWorkspace: (id: string | undefined) => void;
+  /** Focus one service's port-forward console; clears terminal and editor selections. */
+  selectPortForwards: (serviceId: string | undefined) => void;
   /** Merge a patch into a workspace's persisted editor UI state. */
   patchEditorState: (
     workspaceId: string,
@@ -190,6 +206,8 @@ export const useStore = create<AppState>()(
     (set, get) => ({
       services: [],
       workspaces: [],
+      portForwards: [],
+      portForwardRuntime: {},
       taskWorkspace: {},
       titles: {},
       pendingWorkspace: {},
@@ -205,6 +223,7 @@ export const useStore = create<AppState>()(
       recentTools: {},
       selectedKey: undefined,
       selectedWorkspaceId: undefined,
+      selectedPortForwardServiceId: undefined,
       editorState: {},
       createError: undefined,
       transfers: [],
@@ -232,6 +251,12 @@ export const useStore = create<AppState>()(
             s.workspaces.filter((w) => w.serviceId === id).map((w) => w.id),
           );
           const workspaces = s.workspaces.filter((w) => w.serviceId !== id);
+          const removedForwardIds = new Set(
+            s.portForwards.filter((forward) => forward.serviceId === id).map((forward) => forward.id),
+          );
+          const portForwards = s.portForwards.filter((forward) => forward.serviceId !== id);
+          const portForwardRuntime = { ...s.portForwardRuntime };
+          for (const forwardId of removedForwardIds) delete portForwardRuntime[forwardId];
           const runtime = { ...s.runtime };
           delete runtime[id];
           const prefix = `${id}::`;
@@ -257,9 +282,15 @@ export const useStore = create<AppState>()(
             s.selectedWorkspaceId && removedWsIds.has(s.selectedWorkspaceId)
               ? undefined
               : s.selectedWorkspaceId;
+          const selectedPortForwardServiceId =
+            s.selectedPortForwardServiceId === id
+              ? undefined
+              : s.selectedPortForwardServiceId;
           return {
             services,
             workspaces,
+            portForwards,
+            portForwardRuntime,
             runtime,
             conversations,
             cursors,
@@ -269,6 +300,7 @@ export const useStore = create<AppState>()(
             selectedKey,
             editorState,
             selectedWorkspaceId,
+            selectedPortForwardServiceId,
           };
         }),
 
@@ -363,6 +395,34 @@ export const useStore = create<AppState>()(
           return { titles };
         }),
 
+      addPortForward: (forward) => {
+        const id = forward.id ?? newId();
+        set((s) => ({ portForwards: [...s.portForwards, { ...forward, id }] }));
+        return id;
+      },
+
+      updatePortForward: (id, patch) =>
+        set((s) => ({
+          portForwards: s.portForwards.map((forward) =>
+            forward.id === id ? { ...forward, ...patch } : forward,
+          ),
+        })),
+
+      removePortForward: (id) =>
+        set((s) => {
+          const portForwardRuntime = { ...s.portForwardRuntime };
+          delete portForwardRuntime[id];
+          return {
+            portForwards: s.portForwards.filter((forward) => forward.id !== id),
+            portForwardRuntime,
+          };
+        }),
+
+      setPortForwardRuntime: (id, runtime) =>
+        set((s) => ({
+          portForwardRuntime: { ...s.portForwardRuntime, [id]: runtime },
+        })),
+
       setSidebarCollapsed: (collapsed) =>
         set({ sidebarCollapsed: collapsed }),
 
@@ -410,10 +470,25 @@ export const useStore = create<AppState>()(
         }),
 
       select: (key) =>
-        set({ selectedKey: key, selectedWorkspaceId: undefined }),
+        set({
+          selectedKey: key,
+          selectedWorkspaceId: undefined,
+          selectedPortForwardServiceId: undefined,
+        }),
 
       selectWorkspace: (id) =>
-        set({ selectedWorkspaceId: id, selectedKey: undefined }),
+        set({
+          selectedWorkspaceId: id,
+          selectedKey: undefined,
+          selectedPortForwardServiceId: undefined,
+        }),
+
+      selectPortForwards: (serviceId) =>
+        set({
+          selectedPortForwardServiceId: serviceId,
+          selectedKey: undefined,
+          selectedWorkspaceId: undefined,
+        }),
 
       patchEditorState: (workspaceId, patch) =>
         set((s) => {
@@ -594,6 +669,7 @@ export const useStore = create<AppState>()(
       partialize: (s) => ({
         services: s.services,
         workspaces: s.workspaces,
+        portForwards: s.portForwards,
         taskWorkspace: s.taskWorkspace,
         titles: s.titles,
         recentTools: s.recentTools,

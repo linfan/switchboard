@@ -49,6 +49,34 @@ export interface Workspace {
   worktree?: boolean;
 }
 
+/** A local loopback listener mapped to a loopback port on one hosting service. */
+export interface PortForward {
+  /** Stable client-generated id. */
+  id: string;
+  /** Hosting service whose worker owns the remote loopback target. */
+  serviceId: string;
+  /** Port bound as 127.0.0.1:<localPort> on this machine. */
+  localPort: number;
+  /** Port dialed as 127.0.0.1:<remotePort> on the hosting worker. */
+  remotePort: number;
+  /** Whether the native listener should be running. */
+  enabled: boolean;
+}
+
+export type PortForwardStatus =
+  | "starting"
+  | "active"
+  | "stopped"
+  | "error"
+  | "unavailable";
+
+/** Native listener state, refreshed at runtime and never persisted. */
+export interface PortForwardRuntime {
+  status: PortForwardStatus;
+  activeConnections: number;
+  error?: string;
+}
+
 /** Live connection state for a service (not persisted). */
 export interface ServiceRuntime {
   status: ConnStatus;

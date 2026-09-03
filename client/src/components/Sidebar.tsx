@@ -81,6 +81,42 @@ function GearIcon() {
   );
 }
 
+function ForwardIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path d="M3.25 6.25h7.5M11 3.5l2.75 2.75L11 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M16.75 13.75h-7.5M9 11l-2.75 2.75L9 16.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ForwardNavigation({ serviceId }: { serviceId: string }) {
+  const portForwards = useStore((s) => s.portForwards);
+  const runtime = useStore((s) => s.portForwardRuntime);
+  const selectPortForwards = useStore((s) => s.selectPortForwards);
+  const selected = useStore((s) => s.selectedPortForwardServiceId === serviceId);
+  const forwards = portForwards.filter((forward) => forward.serviceId === serviceId);
+  const connections = forwards.reduce(
+    (total, forward) => total + (runtime[forward.id]?.activeConnections ?? 0),
+    0,
+  );
+
+  return (
+    <button
+      type="button"
+      className={`forward-nav ${selected ? "forward-nav--active" : ""}`}
+      title="Manage port forwards"
+      onClick={() => selectPortForwards(serviceId)}
+    >
+      <span className="forward-nav__icon"><ForwardIcon /></span>
+      <span>Forwards</span>
+      <span className="forward-nav__spacer" />
+      {connections > 0 && <span className="forward-nav__live">{connections}</span>}
+      <span className="forward-nav__count">{forwards.length}</span>
+    </button>
+  );
+}
+
 export function Sidebar() {
   const services = useStore((s) => s.services);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
@@ -206,29 +242,33 @@ function ServiceGroup({ service }: { service: Service }) {
         </div>
       )}
 
-      {!collapsed &&
-        (serviceWorkspaces.length === 0 && ungrouped.length === 0 ? (
-          <p className="empty empty--sm">
-            No workspaces. Add one from this service's <b>⋯</b> menu.
-          </p>
-        ) : (
-          <>
-            {serviceWorkspaces.map((ws) => (
-              <WorkspaceGroup
-                key={ws.id}
-                workspace={ws}
-                online={status === "online"}
-                conversations={convs.filter(
-                  (c) =>
-                    taskWorkspace[convKey(service.id, c.task.id)] === ws.id,
-                )}
-              />
-            ))}
-            {ungrouped.length > 0 && (
-              <UngroupedGroup serviceId={service.id} conversations={ungrouped} />
-            )}
-          </>
-        ))}
+      {!collapsed && (
+        <>
+          <ForwardNavigation serviceId={service.id} />
+          {serviceWorkspaces.length === 0 && ungrouped.length === 0 ? (
+            <p className="empty empty--sm">
+              No workspaces. Add one from this service's <b>⋯</b> menu.
+            </p>
+          ) : (
+            <>
+              {serviceWorkspaces.map((ws) => (
+                <WorkspaceGroup
+                  key={ws.id}
+                  workspace={ws}
+                  online={status === "online"}
+                  conversations={convs.filter(
+                    (c) =>
+                      taskWorkspace[convKey(service.id, c.task.id)] === ws.id,
+                  )}
+                />
+              ))}
+              {ungrouped.length > 0 && (
+                <UngroupedGroup serviceId={service.id} conversations={ungrouped} />
+              )}
+            </>
+          )}
+        </>
+      )}
 
       {editing && (
         <AddServiceDialog service={service} onClose={() => setEditing(false)} />
