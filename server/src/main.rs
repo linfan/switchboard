@@ -11,6 +11,7 @@ mod host;
 mod http;
 mod ipc;
 mod log_file;
+mod port_forward;
 mod pty_proc;
 mod repeater;
 #[cfg(test)]

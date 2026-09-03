@@ -24,9 +24,13 @@ use switchboard_shared::{
         NONCE_LEN,
     },
     frame::Frame,
+    port_forward::PortForwardFrame,
     now_millis, ClientMsg, ServerMsg, ServiceInfo, TaskInfo, TaskStatus,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
 use tokio_tungstenite::{
     connect_async_tls_with_config, tungstenite::Message as WsMessage, Connector,
 };
@@ -277,7 +281,15 @@ type WsStream =
 /// Open a client WS through the repeater and complete the SWB-WS-v1 handshake
 /// (channel-bound to the repeater's cert `cb`).
 async fn connect_ws(addr: &str, cb: &[u8]) -> WsStream {
-    let url = format!("wss://{addr}/ws");
+    connect_endpoint(addr, cb, "/ws").await
+}
+
+async fn connect_forward(addr: &str, cb: &[u8]) -> WsStream {
+    connect_endpoint(addr, cb, "/forward").await
+}
+
+async fn connect_endpoint(addr: &str, cb: &[u8], path: &str) -> WsStream {
+    let url = format!("wss://{addr}{path}");
     let connector = Connector::Rustls(client_tls());
     let (mut ws, _) = connect_async_tls_with_config(&url, None, false, Some(connector))
         .await
@@ -406,6 +418,19 @@ async fn next_rx(ws: &mut WsStream) -> Rx {
     }
 }
 
+async fn next_forward_frame(ws: &mut WsStream) -> PortForwardFrame {
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
+            .await
+            .expect("timed out")
+            .expect("stream ended")
+            .expect("ws error");
+        if let WsMessage::Binary(bytes) = frame {
+            return PortForwardFrame::decode(&bytes).unwrap();
+        }
+    }
+}
+
 async fn read_through_replay(ws: &mut WsStream, task_id: &str) -> Vec<Frame> {
     let mut frames = Vec::new();
     loop {
@@ -437,6 +462,66 @@ async fn next_output(ws: &mut WsStream) -> (u64, Vec<u8>) {
 }
 
 // ---- tests ------------------------------------------------------------------
+
+#[tokio::test]
+async fn tcp_forwarding_through_repeater() {
+    let h = boot().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let echo = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.unwrap();
+        stream.write_all(&bytes).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+
+    let stream_id = 17;
+    let mut ws = connect_forward(&h.client_addr, &h.cb).await;
+    ws.send(WsMessage::Binary(
+        PortForwardFrame::Open {
+            stream_id,
+            remote_port: port,
+        }
+        .encode()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        next_forward_frame(&mut ws).await,
+        PortForwardFrame::OpenOk { stream_id }
+    );
+
+    ws.send(WsMessage::Binary(
+        PortForwardFrame::Data {
+            stream_id,
+            data: b"through-repeater".to_vec(),
+        }
+        .encode()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(WsMessage::Binary(
+        PortForwardFrame::Fin { stream_id }.encode().into(),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        next_forward_frame(&mut ws).await,
+        PortForwardFrame::Data {
+            stream_id,
+            data: b"through-repeater".to_vec(),
+        }
+    );
+    assert_eq!(
+        next_forward_frame(&mut ws).await,
+        PortForwardFrame::Fin { stream_id }
+    );
+    echo.await.unwrap();
+}
 
 #[tokio::test]
 async fn welcome_and_byte_replay_through_repeater() {

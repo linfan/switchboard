@@ -11,6 +11,7 @@ use ts_rs::TS;
 
 pub mod auth;
 pub mod frame;
+pub mod port_forward;
 pub mod tunnel;
 
 /// Identifier for an agent CLI tool a hosting service can run (e.g. `claude`).

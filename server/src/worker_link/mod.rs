@@ -36,6 +36,7 @@ use tokio_tungstenite::{
     connect_async_tls_with_config, tungstenite::protocol::Message as WsMessage, Connector,
 };
 
+use crate::port_forward;
 use crate::state::SharedState;
 use crate::ws::{run_session, WsIn, WsOut};
 
@@ -206,6 +207,11 @@ enum Stream {
         session: JoinHandle<()>,
         drain: JoinHandle<()>,
     },
+    Forward {
+        in_tx: mpsc::Sender<Vec<u8>>,
+        session: JoinHandle<()>,
+        drain: JoinHandle<()>,
+    },
 }
 
 impl Stream {
@@ -213,7 +219,7 @@ impl Stream {
         match self {
             Stream::ReqBuffering { .. } => {}
             Stream::ReqInFlight { handle } => handle.abort(),
-            Stream::Ws { session, drain, .. } => {
+            Stream::Ws { session, drain, .. } | Stream::Forward { session, drain, .. } => {
                 session.abort();
                 drain.abort();
             }
@@ -295,9 +301,20 @@ async fn dispatch(
         }
 
         KIND_WS_OPEN => match serde_json::from_slice::<WsOpen>(&frame.payload) {
-            Ok(_open) => {
-                let entry = open_ws_session(id, state.clone(), mux_tx.clone());
-                streams.insert(id, entry);
+            Ok(open) => {
+                let entry = match open.uri.as_str() {
+                    "/ws" => Some(open_ws_session(id, state.clone(), mux_tx.clone())),
+                    "/forward" => Some(open_forward_session(id, mux_tx.clone())),
+                    uri => {
+                        tracing::warn!(stream = id, %uri, "unsupported tunneled websocket endpoint");
+                        None
+                    }
+                };
+                if let Some(entry) = entry {
+                    streams.insert(id, entry);
+                } else {
+                    let _ = mux_tx.send(TunnelFrame::control(KIND_WS_CLOSE, id).encode()).await;
+                }
             }
             Err(e) => tracing::warn!(stream = id, error = %e, "bad WS_OPEN"),
         },
@@ -308,16 +325,19 @@ async fn dispatch(
                 }
             }
         }
-        KIND_WS_BIN => {
-            if let Some(Stream::Ws { in_tx, .. }) = streams.get(&id) {
+        KIND_WS_BIN => match streams.get(&id) {
+            Some(Stream::Ws { in_tx, .. }) => {
                 let _ = in_tx.send(WsIn::Binary(frame.payload)).await;
             }
-        }
+            Some(Stream::Forward { in_tx, .. }) => {
+                let _ = in_tx.send(frame.payload).await;
+            }
+            _ => {}
+        },
         KIND_WS_CLOSE => {
             if let Some(Stream::Ws { in_tx, .. }) = streams.get(&id) {
                 let _ = in_tx.send(WsIn::Close).await;
             }
-            // Dropping the entry closes `in_tx`, ending the session cleanly.
             if let Some(s) = streams.remove(&id) {
                 s.abort();
             }
@@ -422,6 +442,27 @@ fn open_ws_session(id: u64, state: SharedState, mux_tx: mpsc::Sender<Vec<u8>>) -
     });
 
     Stream::Ws { in_tx, session, drain }
+}
+
+fn open_forward_session(id: u64, mux_tx: mpsc::Sender<Vec<u8>>) -> Stream {
+    let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(IN_BUF);
+    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUT_BUF);
+
+    let session = tokio::spawn(port_forward::run_session(in_rx, out_tx));
+    let drain = tokio::spawn(async move {
+        while let Some(bytes) = out_rx.recv().await {
+            if mux_tx
+                .send(TunnelFrame::new(KIND_WS_BIN, id, bytes).encode())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        let _ = mux_tx.send(TunnelFrame::control(KIND_WS_CLOSE, id).encode()).await;
+    });
+
+    Stream::Forward { in_tx, session, drain }
 }
 
 /// Client side of the `SWB-WS-v1` handshake over the tunnel socket.

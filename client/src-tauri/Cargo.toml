@@ -28,7 +28,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync", "rt", "macros", "fs"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "fs", "net", "time", "io-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "http2", "stream"] }
 tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

@@ -66,6 +66,7 @@ pub fn router(state: SharedState, require_auth: bool) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/ws", get(ws::ws_handler))
+        .route("/forward", get(crate::port_forward::handler))
         .nest("/api", api)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

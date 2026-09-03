@@ -4,6 +4,7 @@
 
 mod log_file;
 mod net;
+mod port_forward;
 
 use std::path::PathBuf;
 
@@ -237,6 +238,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(net::new_state())
         .manage(net::new_transfer_state())
+        .manage(port_forward::new_state())
         .invoke_handler(tauri::generate_handler![
             net::http_request,
             net::hash_file,
@@ -248,6 +250,9 @@ pub fn run() {
             net::cancel_transfer,
             net::cache_media,
             net::drop_cached_media,
+            port_forward::start_port_forward,
+            port_forward::stop_port_forward,
+            port_forward::list_port_forwards,
             frontend_log
         ])
         // Media previews are cached on disk and released when their tab closes;

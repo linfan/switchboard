@@ -189,6 +189,7 @@ pub(crate) async fn serve(
     let client_app = Router::new()
         .route("/health", get(health))
         .route("/ws", get(client_ws))
+        .route("/forward", get(client_forward))
         .fallback(client_rest)
         .with_state(state.clone());
     let worker_app = Router::new()
@@ -356,10 +357,14 @@ fn build_response(head: RespHead, body: Vec<u8>) -> Response {
 /// Client-facing `/ws`: authenticate with the client token, then bridge the
 /// client socket to a tunneled WS session on the worker.
 async fn client_ws(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| bridge_client_ws(socket, st))
+    ws.on_upgrade(move |socket| bridge_client_ws(socket, st, "/ws"))
 }
 
-async fn bridge_client_ws(socket: WebSocket, st: Shared) {
+async fn client_forward(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| bridge_client_ws(socket, st, "/forward"))
+}
+
+async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
     let (mut sink, mut stream) = socket.split();
     if !ws::ws_handshake(&mut sink, &mut stream, st.config.token.as_deref(), &st.cert_fp).await {
         return;
@@ -374,7 +379,7 @@ async fn bridge_client_ws(socket: WebSocket, st: Shared) {
     let mut rx = tunnel.register(id);
     let guard = StreamGuard { tunnel: tunnel.clone(), id, armed: true };
 
-    let open = serde_json::to_vec(&WsOpen { uri: "/ws".into() }).unwrap_or_default();
+    let open = serde_json::to_vec(&WsOpen { uri: uri.into() }).unwrap_or_default();
     if !tunnel.send(TunnelFrame::new(KIND_WS_OPEN, id, open)).await {
         return;
     }

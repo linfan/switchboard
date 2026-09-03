@@ -248,6 +248,10 @@ fn pinned_config(pin: Option<String>) -> Result<(Arc<ClientConfig>, Arc<PinnedVe
     Ok((Arc::new(config), verifier))
 }
 
+pub(crate) fn forwarding_tls_config(pin: Option<String>) -> Result<Arc<ClientConfig>, String> {
+    pinned_config(pin).map(|(config, _)| config)
+}
+
 fn reqwest_client(pin: Option<String>) -> Result<(reqwest::Client, Arc<PinnedVerifier>), String> {
     let (config, verifier) = pinned_config(pin)?;
     let client = reqwest::Client::builder()
