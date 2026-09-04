@@ -604,7 +604,13 @@ function FileTree({
       label: "Upload file\u2026",
       onClick: () => onUpload(entry),
     };
-    if (isRoot) return [newFile, newFolder, upload];
+    const copyPath: MenuItem = {
+      label: entry.is_dir ? "Copy folder path" : "Copy file path",
+      onClick: () => {
+        navigator.clipboard.writeText(entry.path).catch(() => {});
+      },
+    };
+    if (isRoot) return [newFile, newFolder, upload, copyPath];
     const rename: MenuItem = {
       label: "Rename",
       onClick: () => setRenamingPath(entry.path),
@@ -616,8 +622,8 @@ function FileTree({
       onClick: () => onDelete(entry),
     };
     return entry.is_dir
-      ? [newFile, newFolder, rename, upload, del]
-      : [rename, { label: "Download", onClick: () => onDownload(entry) }, del];
+      ? [newFile, newFolder, rename, upload, copyPath, del]
+      : [rename, { label: "Download", onClick: () => onDownload(entry) }, copyPath, del];
   };
 
   return (
