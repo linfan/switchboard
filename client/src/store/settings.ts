@@ -72,6 +72,14 @@ export const DEFAULT_SETTINGS: Settings = {
 export const DEFAULT_FONT_SIZE = 13;
 export const FONT_SIZE_BOUNDS = { min: 8, max: 28 };
 
+/**
+ * Default long-line wrap for file-editor tabs, likewise a separate top-level
+ * store key: it seeds each tab when its view is built, and the tab's own Text
+ * Wrap button then owns that tab. Off by default, matching the horizontal
+ * scrolling the editor always had.
+ */
+export const DEFAULT_EDITOR_WRAP = false;
+
 const MB = 1024 * 1024;
 
 /**

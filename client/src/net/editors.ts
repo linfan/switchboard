@@ -11,8 +11,14 @@
 //! tab's DOM into the visible pane; inactive tabs' views stay alive (detached) so
 //! returning to them is instant and lossless. Closing a tab (or removing the
 //! workspace) destroys the corresponding view(s).
+//!
+//! The registry also owns each tab's long-line wrap choice, so flipping it
+//! reconfigures the live view in place instead of rebuilding it (which would cost
+//! the tab its edits, scroll, and undo) and so the choice survives a workspace
+//! switch the same way the view does.
 
-import type { EditorView } from "@codemirror/view";
+import { Compartment, type Extension } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 
 import type { DiffLayout } from "../store/types";
 
@@ -237,6 +243,54 @@ export function isChangedOnDisk(workspaceId: string, tabKey: string): boolean {
 }
 
 /**
+ * Long-line wrap. One compartment instance is shared by every view: each editor
+ * state holds its own value for it, and `reconfigure` only ever reaches the state
+ * it is dispatched to, so a single shared instance is what lets one toggle flip a
+ * split diff's two panes together.
+ */
+const wrapCompartment = new Compartment();
+
+/** The wrap extension to build a view with, so it starts in the tab's state. */
+export function wrapExtension(wrap: boolean): Extension {
+  return wrapCompartment.of(wrap ? EditorView.lineWrapping : []);
+}
+
+/**
+ * Each tab's wrap choice, keyed like {@link entries} but kept apart from it: a
+ * tab can have a choice before it has a view (the toggle works while a build is
+ * still in flight), so reading one must not depend on an entry existing.
+ * Destroying a tab's view forgets its choice, which is what makes a file closed
+ * and reopened later start from the global default again.
+ */
+const wraps = new Map<string, boolean>();
+
+/** The tab's wrap choice, or `undefined` if it hasn't been seeded yet. */
+export function getWrap(
+  workspaceId: string,
+  tabKey: string,
+): boolean | undefined {
+  return wraps.get(mapKey(workspaceId, tabKey));
+}
+
+/**
+ * Set a tab's wrap choice and apply it to its live views. Called before the view
+ * exists (a tab seeded from the global default, or one whose build is still in
+ * flight) it only records the choice, which the build then picks up.
+ */
+export function setWrap(
+  workspaceId: string,
+  tabKey: string,
+  wrap: boolean,
+): void {
+  const k = mapKey(workspaceId, tabKey);
+  wraps.set(k, wrap);
+  const effect = wrapCompartment.reconfigure(
+    wrap ? EditorView.lineWrapping : [],
+  );
+  entries.get(k)?.views.forEach((v) => v.dispatch({ effects: effect }));
+}
+
+/**
  * Ask every live view to re-measure. Font size is applied via a CSS variable on
  * the host, so the DOM restyles on its own; CodeMirror, however, caches line
  * heights and must be told to recompute after the cell size changes.
@@ -249,6 +303,7 @@ export function remeasureAll(): void {
 }
 
 function destroy(key: string): void {
+  wraps.delete(key);
   const e = entries.get(key);
   if (!e) return;
   if (e.dom.parentElement) {

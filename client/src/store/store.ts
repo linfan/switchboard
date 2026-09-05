@@ -5,6 +5,7 @@ import type { ServerMsg } from "../protocol";
 import { applyMsg, DEFAULT_RUNTIME } from "./reducer";
 import {
   clampSettings,
+  DEFAULT_EDITOR_WRAP,
   DEFAULT_FONT_SIZE,
   DEFAULT_SETTINGS,
   FONT_SIZE_BOUNDS,
@@ -53,6 +54,12 @@ export interface AppState {
   terminalFontSize: number;
   /** File-editor font size in px, adjustable via zoom shortcuts (persisted). */
   editorFontSize: number;
+  /**
+   * Long-line wrap a file-editor tab is seeded with when its view is built
+   * (persisted). A tab whose view already exists keeps its own state — its Text
+   * Wrap button owns it from then on.
+   */
+  editorWrapDefault: boolean;
   /** Configurable limits and timings from the settings panel (persisted). */
   settings: Settings;
   /**
@@ -145,6 +152,8 @@ export interface AppState {
   zoomFont: (target: "terminal" | "editor", delta: number) => void;
   /** Set a pane type's font size directly (clamped); used by the settings panel. */
   setFontSize: (target: "terminal" | "editor", px: number) => void;
+  /** Set the wrap state a file-editor tab is seeded with when built. */
+  setEditorWrapDefault: (wrap: boolean) => void;
 
   // --- settings ------------------------------------------------------------
   /** Merge a patch into the persisted settings, clamped to their valid ranges. */
@@ -220,6 +229,7 @@ export const useStore = create<AppState>()(
       sidebarWidth: 260,
       terminalFontSize: DEFAULT_FONT_SIZE,
       editorFontSize: DEFAULT_FONT_SIZE,
+      editorWrapDefault: DEFAULT_EDITOR_WRAP,
       settings: DEFAULT_SETTINGS,
       settingsOpen: false,
       runtime: {},
@@ -460,6 +470,8 @@ export const useStore = create<AppState>()(
             : { editorFontSize: clampFontSize(px) },
         ),
 
+      setEditorWrapDefault: (wrap) => set({ editorWrapDefault: wrap }),
+
       setSettings: (patch) =>
         set((s) => ({ settings: { ...s.settings, ...clampSettings(patch) } })),
 
@@ -687,6 +699,7 @@ export const useStore = create<AppState>()(
         sidebarWidth: s.sidebarWidth,
         terminalFontSize: s.terminalFontSize,
         editorFontSize: s.editorFontSize,
+        editorWrapDefault: s.editorWrapDefault,
         settings: s.settings,
         selectedWorkspaceId: s.selectedWorkspaceId,
         editorState: s.editorState,

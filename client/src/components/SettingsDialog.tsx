@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import {
+  DEFAULT_EDITOR_WRAP,
   DEFAULT_FONT_SIZE,
   DEFAULT_SETTINGS,
   FONT_SIZE_BOUNDS,
@@ -150,12 +151,16 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const settings = useStore((s) => s.settings);
   const terminalFontSize = useStore((s) => s.terminalFontSize);
   const editorFontSize = useStore((s) => s.editorFontSize);
+  const editorWrapDefault = useStore((s) => s.editorWrapDefault);
   const setSettings = useStore((s) => s.setSettings);
   const setFontSize = useStore((s) => s.setFontSize);
+  const setEditorWrapDefault = useStore((s) => s.setEditorWrapDefault);
 
   const [draft, setDraft] = useState(() =>
     toDraft({ ...settings, terminalFontSize, editorFontSize }),
   );
+  // The wrap default is a boolean, so it can't join the numeric draft above.
+  const [wrapDraft, setWrapDraft] = useState(editorWrapDefault);
   const [tab, setTab] = useState<Tab>("General");
 
   // Parse every field once per render: `values` feeds Save, `invalid` drives the
@@ -214,12 +219,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       }
     }
     setSettings(patch as Partial<Settings>);
+    setEditorWrapDefault(wrapDraft);
     onClose();
   };
 
   // Load the shipped values into the form but don't commit them — the user can
   // still review them, or cancel out.
-  const restoreDefaults = () =>
+  const restoreDefaults = () => {
     setDraft(
       toDraft({
         ...DEFAULT_SETTINGS,
@@ -227,6 +233,8 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         editorFontSize: DEFAULT_FONT_SIZE,
       }),
     );
+    setWrapDraft(DEFAULT_EDITOR_WRAP);
+  };
 
   return (
     <Modal
@@ -283,31 +291,50 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           </tbody>
         </table>
       ) : (
-        GROUPS.map((group) => (
-          <div className="settings__group" key={group.legend}>
-            <div className="settings__legend">{group.legend}</div>
-            {group.fields.map((f) => {
-              const { min, max } = boundsFor(f);
-              return (
-                <div className="settings__row" key={f.key}>
-                  <label htmlFor={`setting-${f.key}`}>{f.label}</label>
-                  <input
-                    id={`setting-${f.key}`}
-                    value={draft[f.key]}
-                    inputMode="numeric"
-                    title={`${min}–${max}${f.unit ? ` ${f.unit}` : ""}`}
-                    aria-invalid={invalid.has(f.key)}
-                    onChange={(e) =>
-                      setDraft((d) => ({ ...d, [f.key]: e.target.value }))
-                    }
-                  />
-                  <span className="settings__unit">{f.unit}</span>
-                </div>
-              );
-            })}
-            {group.hint && <p className="hint hint--muted">{group.hint}</p>}
+        <>
+          {GROUPS.map((group) => (
+            <div className="settings__group" key={group.legend}>
+              <div className="settings__legend">{group.legend}</div>
+              {group.fields.map((f) => {
+                const { min, max } = boundsFor(f);
+                return (
+                  <div className="settings__row" key={f.key}>
+                    <label htmlFor={`setting-${f.key}`}>{f.label}</label>
+                    <input
+                      id={`setting-${f.key}`}
+                      value={draft[f.key]}
+                      inputMode="numeric"
+                      title={`${min}–${max}${f.unit ? ` ${f.unit}` : ""}`}
+                      aria-invalid={invalid.has(f.key)}
+                      onChange={(e) =>
+                        setDraft((d) => ({ ...d, [f.key]: e.target.value }))
+                      }
+                    />
+                    <span className="settings__unit">{f.unit}</span>
+                  </div>
+                );
+              })}
+              {group.hint && <p className="hint hint--muted">{group.hint}</p>}
+            </div>
+          ))}
+          {/* A boolean, so it can't join the numeric groups above. */}
+          <div className="settings__group">
+            <div className="settings__legend">File editor</div>
+            <div className="settings__row settings__row--check">
+              <label htmlFor="setting-editorWrapDefault">Text wrap</label>
+              <input
+                id="setting-editorWrapDefault"
+                type="checkbox"
+                checked={wrapDraft}
+                onChange={(e) => setWrapDraft(e.target.checked)}
+              />
+            </div>
+            <p className="hint hint--muted">
+              Default for file editor tabs opened from now on. Each tab's Text
+              Wrap button overrides it, and open tabs keep their state.
+            </p>
           </div>
-        ))
+        </>
       )}
       {/* Kept outside the tab switch so a disabled Save is always explained,
           even while the Hotkeys tab hides the offending field. */}

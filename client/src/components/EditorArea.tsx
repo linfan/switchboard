@@ -96,7 +96,8 @@ function mediaElement(kind: MediaKind, src: string): HTMLElement {
  * read-only and rendered with a real diff editor — inline (unified) or
  * side-by-side, switchable via the tab-bar toggle. Each tab's live view lives in
  * the `editors` registry so switching tabs — or workspaces — preserves unsaved
- * edits, scroll, and undo.
+ * edits, scroll, and undo. Long lines wrap or scroll sideways per tab, chosen by
+ * the Text Wrap button and seeded from the settings default at build time.
  */
 export function EditorArea({
   workspaceId,
@@ -140,6 +141,10 @@ export function EditorArea({
   // Per-tab "changed on disk" flags, mirrored from the registry so the notice
   // banner re-renders. The registry copy survives workspace switches.
   const [changed, setChanged] = useState<Record<string, boolean>>({});
+  // Per-tab wrap choices, mirrored from the registry for the same reason.
+  const [wraps, setWraps] = useState<Record<string, boolean>>({});
+  // Fallback for a tab with no choice of its own yet — its view isn't built.
+  const defaultWrap = useStore((s) => s.editorWrapDefault);
   // Drag-to-reorder state: the tab key being dragged, and the one hovered over.
   // A ref mirrors the source key so drag handlers read it synchronously,
   // without waiting for the state update from dragstart to flush.
@@ -249,7 +254,22 @@ export function EditorArea({
       });
     };
 
-    const buildEditView = (content: string): EditorView =>
+    /**
+     * This tab's wrap choice, seeded from the global default the first time its
+     * view is built and recorded so the tab keeps that value from then on. The
+     * default is read through `getState` rather than subscribed to, keeping it
+     * out of this effect's deps: a new default belongs to views built after it,
+     * and must not tear down (or silently re-wrap) the ones on screen.
+     */
+    const wrapForTab = (): boolean => {
+      const own = editors.getWrap(workspaceId, key);
+      if (own !== undefined) return own;
+      const seeded = useStore.getState().editorWrapDefault;
+      editors.setWrap(workspaceId, key, seeded);
+      return seeded;
+    };
+
+    const buildEditView = (content: string, wrap: boolean): EditorView =>
       new EditorView({
         state: EditorState.create({
           doc: content,
@@ -257,6 +277,7 @@ export function EditorArea({
             basicSetup,
             oneDark,
             langForPath(path),
+            editors.wrapExtension(wrap),
             keymap.of([
               {
                 key: "Mod-s",
@@ -276,6 +297,7 @@ export function EditorArea({
       oldText: string,
       newText: string,
       layout: DiffLayout,
+      wrap: boolean,
     ): BuiltDiff => {
       const readOnly = [
         EditorState.readOnly.of(true),
@@ -288,11 +310,23 @@ export function EditorArea({
         const mv = new MergeView({
           a: {
             doc: oldText,
-            extensions: [basicSetup, oneDark, lang, ...readOnly],
+            extensions: [
+              basicSetup,
+              oneDark,
+              lang,
+              editors.wrapExtension(wrap),
+              ...readOnly,
+            ],
           },
           b: {
             doc: newText,
-            extensions: [basicSetup, oneDark, lang, ...readOnly],
+            extensions: [
+              basicSetup,
+              oneDark,
+              lang,
+              editors.wrapExtension(wrap),
+              ...readOnly,
+            ],
           },
           gutter: true,
           highlightChanges: true,
@@ -316,6 +350,7 @@ export function EditorArea({
             basicSetup,
             oneDark,
             lang,
+            editors.wrapExtension(wrap),
             ...readOnly,
             unifiedMergeView({
               original: oldText,
@@ -356,10 +391,13 @@ export function EditorArea({
         setStatus("ready");
         attach(existing.dom, existing.measure);
       } else if (existing?.diff) {
-        // Layout toggled — rebuild from the cached sides (no refetch).
+        // Layout toggled — rebuild from the cached sides (no refetch). Disposing
+        // the view forgets the tab's wrap choice, so hold it across the rebuild.
         const { oldText, newText } = existing.diff;
+        const wrap = wrapForTab();
         editors.disposeTab(workspaceId, key);
-        const built = buildDiffView(oldText, newText, diffLayout);
+        editors.setWrap(workspaceId, key, wrap);
+        const built = buildDiffView(oldText, newText, diffLayout, wrap);
         registerDiff(built, { oldText, newText });
         attach(built.dom, built.measure);
         setStatus("ready");
@@ -374,7 +412,12 @@ export function EditorArea({
             return;
           }
           const diff = { oldText: fd.old_text, newText: fd.new_text };
-          const built = buildDiffView(diff.oldText, diff.newText, diffLayout);
+          const built = buildDiffView(
+            diff.oldText,
+            diff.newText,
+            diffLayout,
+            wrapForTab(),
+          );
           registerDiff(built, diff);
           attach(built.dom, built.measure);
           setStatus("ready");
@@ -451,7 +494,7 @@ export function EditorArea({
           setStatus("binary");
           return;
         }
-        const view = buildEditView(fc.content);
+        const view = buildEditView(fc.content, wrapForTab());
         editors.setView(workspaceId, key, view, fc.mtime);
         attach(view.dom, () => view.requestMeasure(), view);
         setStatus("ready");
@@ -544,6 +587,11 @@ export function EditorArea({
       keys.forEach((k) => delete next[k]);
       return next;
     });
+    setWraps((m) => {
+      const next = { ...m };
+      keys.forEach((k) => delete next[k]);
+      return next;
+    });
   };
 
   const closeTab = (k: string) => {
@@ -581,6 +629,19 @@ export function EditorArea({
   const isDirty = (k: string) => dirty[k] ?? editors.isDirty(workspaceId, k);
   const isChanged = (k: string) =>
     changed[k] ?? editors.isChangedOnDisk(workspaceId, k);
+  const isWrapped = (k: string) =>
+    wraps[k] ?? editors.getWrap(workspaceId, k) ?? defaultWrap;
+
+  /** Flip this tab between wrapped lines and horizontal scrolling. */
+  const toggleWrap = (k: string) => {
+    const next = !isWrapped(k);
+    // The registry reconfigures the live view(s) in place — no rebuild, so the
+    // tab keeps its edits, scroll position, and undo history.
+    editors.setWrap(workspaceId, k, next);
+    setWraps((m) => ({ ...m, [k]: next }));
+  };
+
+  const wrapped = !!key && isWrapped(key);
 
   return (
     <div className="weditor__area">
@@ -680,6 +741,16 @@ export function EditorArea({
             );
           })}
         </div>
+        {key && !media && (
+          <button
+            className={`btn weditor__wrap ${wrapped ? "is-active" : ""}`}
+            aria-pressed={wrapped}
+            title="Wrap long lines to the editor width instead of scrolling sideways"
+            onClick={() => toggleWrap(key)}
+          >
+            Text Wrap
+          </button>
+        )}
         {mode === "diff" && (
           <div
             className="weditor__difftoggle"

@@ -7,5 +7,9 @@ src/protocol/
 dist/
 src-tauri/
 
+# Playwright run artifacts, written by `make test-web` (git ignores them too).
+test-results/
+playwright-report/
+
 # npm owns this file's formatting.
 package-lock.json

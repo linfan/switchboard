@@ -614,6 +614,17 @@ body {
   font-size: 12px;
   color: var(--fg-dim);
 }
+/* The panel's one boolean: no unit column, and the shared input padding would
+   stretch a checkbox. */
+.settings__row--check {
+  grid-template-columns: 1fr auto;
+}
+.settings__row--check input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  accent-color: var(--accent);
+}
 
 .field {
   display: flex;
@@ -1155,6 +1166,18 @@ body {
 .weditor__tab-close:hover {
   background: rgba(255, 255, 255, 0.1);
   color: var(--fg);
+}
+/* Long-line wrap toggle: a per-tab choice seeded from the settings default. */
+.weditor__wrap {
+  flex: none;
+  align-self: center;
+  margin: 0 0 0 8px;
+  white-space: nowrap;
+}
+.weditor__wrap.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
 }
 .weditor__save {
   flex: none;

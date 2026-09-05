@@ -199,7 +199,8 @@ package-client: build-client ## Package the desktop client as a DMG
 	@# Tauri pass --skip-jenkins, skipping that step. tauri.conf.json sets no DMG
 	@# background, window size or icon positions, so nothing is lost.
 	cd client && CI=true $(NPM) run tauri build
-	find client/src-tauri/target/release/bundle/macos -maxdepth 1 -type d -name '*.app' -exec rm -rf {} +
+	@rm -fr find client/src-tauri/target/release/bundle/macos/*.app
+	@mkdir -p ./dist && mv client/src-tauri/target/release/bundle/dmg/*.dmg ./dist/
 package-client-windows: build-client-windows ## Produce a portable Windows client artifact
 	@mkdir -p dist
 	cp client/src-tauri/target/$(WINDOWS_TARGET)/release/$(CLIENT_WINDOWS_BIN) dist/Switchboard.exe
