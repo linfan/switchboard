@@ -209,14 +209,26 @@ describe("handshake", () => {
     mgr.stop();
   });
 
-  it("sends raw bytes over the socket via sendBytes", () => {
+  it("sends raw bytes over the socket via sendBytes", async () => {
+    const { mgr } = mkManager();
+    mgr.start();
+    const s = FakeSocket.last();
+    await driveHandshake(s);
+    expect(mgr.sendBytes(new Uint8Array([9, 8, 7]))).toBe(true);
+    expect(s.sentBinary).toHaveLength(1);
+    expect(Array.from(s.sentBinary[0])).toEqual([9, 8, 7]);
+    mgr.stop();
+  });
+
+  it("refuses data-plane frames on an open but unauthenticated socket", () => {
+    // The server discards binary frames until Hello completes, so writing here
+    // would lose the keystrokes silently rather than deliver them early.
     const { mgr } = mkManager();
     mgr.start();
     const s = FakeSocket.last();
     s.emitOpen();
-    expect(mgr.sendBytes(new Uint8Array([9, 8, 7]))).toBe(true);
-    expect(s.sentBinary).toHaveLength(1);
-    expect(Array.from(s.sentBinary[0])).toEqual([9, 8, 7]);
+    expect(mgr.sendBytes(new Uint8Array([9, 8, 7]))).toBe(false);
+    expect(s.sentBinary).toHaveLength(0);
     mgr.stop();
   });
 });

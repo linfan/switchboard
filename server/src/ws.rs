@@ -243,6 +243,13 @@ pub(crate) async fn ws_handshake(
                 Err(_) => continue,
             },
             Some(Ok(Message::Close(_))) | None => return false,
+            // A keystroke typed before the handshake completes cannot be applied
+            // (there is no session yet), but dropping it silently made an entire
+            // class of "missing characters" reports undiagnosable.
+            Some(Ok(Message::Binary(_))) => {
+                tracing::warn!("discarding a data-plane frame sent before authentication");
+                continue;
+            }
             Some(Ok(_)) => continue,
             Some(Err(_)) => return false,
         }
@@ -308,7 +315,12 @@ async fn read_hello(
                 }
             }
             WsIn::Close => return None,
-            _ => {}
+            // Keystrokes cannot be applied before the session exists, but the
+            // client gates its data plane on `authed` precisely so this stays
+            // unreachable — if it fires, that gate has a hole.
+            WsIn::Binary(_) => {
+                tracing::warn!("discarding a data-plane frame sent before hello");
+            }
         }
     }
     None

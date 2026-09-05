@@ -702,7 +702,36 @@ pub async fn ws_connect(
     Ok(id)
 }
 
-/// Send a frame on connection `id`. Exactly one of `text`/`binary_b64` is set.
+/// Queue a frame on connection `id`. Exactly one of `text`/`binary_b64` is set.
+///
+/// An unknown `id` is an error, not a silent no-op. The reader task removes the
+/// connection as soon as the socket dies, but the frontend's `readyState` stays
+/// OPEN until that close notification round-trips to it — so a frame discarded
+/// here would otherwise be reported to the caller as delivered.
+async fn send_frame(
+    state: &WsInner,
+    id: u64,
+    text: Option<String>,
+    binary_b64: Option<String>,
+) -> Result<(), String> {
+    let msg = if let Some(t) = text {
+        Message::Text(t.into())
+    } else if let Some(b) = binary_b64 {
+        Message::Binary(b64().decode(b).map_err(|e| e.to_string())?.into())
+    } else {
+        return Ok(());
+    };
+    let tx = state
+        .conns
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("connection {id} is closed"))?;
+    tx.send(msg).map_err(|_| "connection closed".to_string())
+}
+
+/// Tauri command wrapper around [`send_frame`], which holds the contract.
 #[tauri::command]
 pub async fn ws_send(
     state: State<'_, WsState>,
@@ -710,23 +739,7 @@ pub async fn ws_send(
     text: Option<String>,
     binary_b64: Option<String>,
 ) -> Result<(), String> {
-    log_err(
-        "ws_send",
-        async {
-            let msg = if let Some(t) = text {
-                Message::Text(t.into())
-            } else if let Some(b) = binary_b64 {
-                Message::Binary(b64().decode(b).map_err(|e| e.to_string())?.into())
-            } else {
-                return Ok(());
-            };
-            if let Some(tx) = state.conns.lock().await.get(&id) {
-                tx.send(msg).map_err(|_| "connection closed".to_string())?;
-            }
-            Ok(())
-        }
-        .await,
-    )
+    log_err("ws_send", send_frame(&state, id, text, binary_b64).await)
 }
 
 /// Close connection `id` (sends a Close frame; the reader task then cleans up).
@@ -736,4 +749,72 @@ pub async fn ws_close(state: State<'_, WsState>, id: u64) -> Result<(), String> 
         let _ = tx.send(Message::Close(None));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frontend cannot tell a dead socket from a live one until the reader
+    /// task's close notification reaches it, so `send_frame` must report the drop
+    /// rather than swallow it.
+    #[tokio::test]
+    async fn send_frame_rejects_an_unknown_connection() {
+        let state = WsInner::default();
+        let err = send_frame(&state, 7, Some("keystroke".into()), None)
+            .await
+            .expect_err("an unknown connection must not report success");
+        assert!(err.contains("closed"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn send_frame_delivers_text() {
+        let state = WsInner::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        state.conns.lock().await.insert(3, tx);
+
+        send_frame(&state, 3, Some("resize".into()), None)
+            .await
+            .expect("live connection");
+
+        match rx.recv().await.expect("a queued frame") {
+            Message::Text(t) => assert_eq!(t.as_str(), "resize"),
+            other => panic!("expected a text frame, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_frame_decodes_binary() {
+        let state = WsInner::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        state.conns.lock().await.insert(4, tx);
+
+        let payload = [0x10u8, 0xaa, 0x68, 0x69];
+        send_frame(&state, 4, None, Some(b64().encode(payload)))
+            .await
+            .expect("live connection");
+
+        match rx.recv().await.expect("a queued frame") {
+            Message::Binary(b) => assert_eq!(&b[..], &payload),
+            other => panic!("expected a binary frame, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_frame_rejects_invalid_base64() {
+        let state = WsInner::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state.conns.lock().await.insert(5, tx);
+        assert!(send_frame(&state, 5, None, Some("not base64!!".into()))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn send_frame_without_a_payload_is_a_no_op() {
+        let state = WsInner::default();
+        send_frame(&state, 1, None, None)
+            .await
+            .expect("no payload means nothing to send");
+    }
 }

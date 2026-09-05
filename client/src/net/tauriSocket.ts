@@ -12,6 +12,7 @@
 
 import { bytesToBase64 } from "./b64";
 import type { WebSocketFactory, WebSocketLike } from "./connection";
+import { logToBackend } from "./log";
 import { invoke } from "./tauri";
 
 /** Outer framing tags on the raw Channel bytes (mirror `net.rs`). */
@@ -120,18 +121,29 @@ class TauriWebSocket implements WebSocketLike {
   }
 
   send(data: string | ArrayBufferLike | ArrayBufferView): void {
-    if (this.id === null) return;
-    if (typeof data === "string") {
-      void invoke("ws_send", { id: this.id, text: data, binaryB64: null });
-    } else {
-      // Client->server frames are tiny keystrokes/resizes, so base64 here is
-      // negligible; the volume (and the perf win of raw bytes) is all inbound.
-      void invoke("ws_send", {
-        id: this.id,
-        text: null,
-        binaryB64: bytesToBase64(data),
-      });
-    }
+    if (this.closed || this.id === null) return;
+    // Client->server frames are tiny keystrokes/resizes, so base64 here is
+    // negligible; the volume (and the perf win of raw bytes) is all inbound.
+    const args =
+      typeof data === "string"
+        ? { id: this.id, text: data, binaryB64: null }
+        : { id: this.id, text: null, binaryB64: bytesToBase64(data) };
+    void invoke("ws_send", args).catch((e: unknown) => this.onSendFailed(e));
+  }
+
+  /**
+   * Rust drops the connection id the instant the socket dies, but our
+   * `readyState` stays OPEN until that close notification round-trips back. A
+   * rejected send is therefore the earliest reliable signal that the socket is
+   * gone, so report it as a close and let `ConnectionManager` reconnect. Firing
+   * `onclose` twice is safe: `closeSocket` detaches the handler before the real
+   * close frame arrives.
+   */
+  private onSendFailed(e: unknown): void {
+    logToBackend("warn", `ws_send failed: ${String(e)}`);
+    if (this.closed) return;
+    this.readyState = CLOSED;
+    this.onclose?.();
   }
 
   close(): void {

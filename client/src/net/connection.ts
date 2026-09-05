@@ -195,22 +195,27 @@ export class ConnectionManager {
     this.open();
   }
 
-  /** Send a client message if the socket is open. Returns whether it was sent. */
+  /**
+   * Whether app traffic may flow. An OPEN socket is not enough: the server
+   * discards every data-plane frame until Hello completes, and on the desktop
+   * bridge `readyState` flips to OPEN a full handshake earlier than that.
+   */
+  private canSend(): boolean {
+    return !!this.ws && this.ws.readyState === WS_OPEN && this.authed;
+  }
+
+  /** Send a client message if the connection is live. Returns whether it went. */
   send(msg: ClientMsg): boolean {
-    if (this.ws && this.ws.readyState === WS_OPEN) {
-      this.ws.send(JSON.stringify(msg));
-      return true;
-    }
-    return false;
+    if (!this.canSend()) return false;
+    this.ws!.send(JSON.stringify(msg));
+    return true;
   }
 
   /** Send a raw binary data-plane frame (e.g. an INPUT keystroke frame). */
   sendBytes(bytes: Uint8Array): boolean {
-    if (this.ws && this.ws.readyState === WS_OPEN) {
-      this.ws.send(bytes);
-      return true;
-    }
-    return false;
+    if (!this.canSend()) return false;
+    this.ws!.send(bytes);
+    return true;
   }
 
   /** Wire this to the browser `online` event. */
