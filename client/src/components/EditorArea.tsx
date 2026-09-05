@@ -97,7 +97,7 @@ function mediaElement(kind: MediaKind, src: string): HTMLElement {
  * side-by-side, switchable via the tab-bar toggle. Each tab's live view lives in
  * the `editors` registry so switching tabs — or workspaces — preserves unsaved
  * edits, scroll, and undo. Long lines wrap or scroll sideways per tab, chosen by
- * the Text Wrap button and seeded from the settings default at build time.
+ * the Wrap Text button and seeded from the settings default at build time.
  */
 export function EditorArea({
   workspaceId,
@@ -748,7 +748,7 @@ export function EditorArea({
             title="Wrap long lines to the editor width instead of scrolling sideways"
             onClick={() => toggleWrap(key)}
           >
-            Text Wrap
+            Wrap Text
           </button>
         )}
         {mode === "diff" && (

@@ -7,7 +7,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { HTTP, TOKEN } from "./constants";
 
-// Long-line wrap belongs to a tab, not to the app: the Text Wrap button flips
+// Long-line wrap belongs to a tab, not to the app: the Wrap Text button flips
 // the live view in place, a tab starts from the persisted default, closing a tab
 // forgets its choice, and read-only diff tabs (including a layout switch, which
 // rebuilds the view) honour it too.

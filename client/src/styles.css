@@ -1167,12 +1167,16 @@ body {
   background: rgba(255, 255, 255, 0.1);
   color: var(--fg);
 }
-/* Long-line wrap toggle: a per-tab choice seeded from the settings default. */
+/* Long-line wrap toggle: a per-tab choice seeded from the settings default.
+   Compact padding/font-size so its height matches the segmented diff-layout
+   toggle beside it (which carries a 1px border like .btn does). */
 .weditor__wrap {
   flex: none;
   align-self: center;
   margin: 0 0 0 8px;
   white-space: nowrap;
+  padding: 3px 8px;
+  font-size: 11px;
 }
 .weditor__wrap.is-active {
   background: var(--accent);
