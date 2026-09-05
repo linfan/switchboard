@@ -131,8 +131,7 @@ test-client: ## Test client (vitest)
 	cd client && $(NPM) test --silent
 test-client-native: ## Test desktop bridge (cargo)
 	@# src-tauri is its own workspace, so test-server and lint never reach it.
-	@# --lib --tests skips examples/, where bridge_check.rs does not compile.
-	cd client/src-tauri && $(CARGO) test --lib --tests
+	cd client/src-tauri && $(CARGO) test
 test-e2e: ## End-to-end: real server binary + WS clients + fake PTY agent (gap-free reconnect)
 	$(CARGO) build -p switchboard-server
 	cd e2e && $(NPM) install --silent && $(NPM) test
