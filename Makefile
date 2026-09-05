@@ -120,8 +120,8 @@ run-repeater-client: ## Run a worker that dials out to a repeater (no client-fac
 	$(CARGO) run -p switchboard-server
 
 # ---------------------------------------------------------------- test
-.PHONY: test test-all test-shared test-server test-client test-e2e test-upgrade test-web test-live
-test: test-shared test-server test-client ## Run all fast (non-live, non-e2e) tests
+.PHONY: test test-all test-shared test-server test-client test-client-native test-e2e test-upgrade test-web test-live
+test: test-shared test-server test-client test-client-native ## Run all fast (non-live, non-e2e) tests
 test-all: test test-e2e test-upgrade test-web ## Run everything incl. end-to-end + browser tests
 test-shared: ## Test shared protocol crate (also regenerates TS bindings)
 	TS_RS_EXPORT_DIR="$(CURDIR)" $(CARGO) test -p switchboard-shared
@@ -129,6 +129,10 @@ test-server: ## Test hosting service
 	$(CARGO) test -p switchboard-server
 test-client: ## Test client (vitest)
 	cd client && $(NPM) test --silent
+test-client-native: ## Test desktop bridge (cargo)
+	@# src-tauri is its own workspace, so test-server and lint never reach it.
+	@# --lib --tests skips examples/, where bridge_check.rs does not compile.
+	cd client/src-tauri && $(CARGO) test --lib --tests
 test-e2e: ## End-to-end: real server binary + WS clients + fake PTY agent (gap-free reconnect)
 	$(CARGO) build -p switchboard-server
 	cd e2e && $(NPM) install --silent && $(NPM) test

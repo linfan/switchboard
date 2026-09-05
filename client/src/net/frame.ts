@@ -9,6 +9,11 @@
 // `seq` is a per-task chunk counter; it stays well below 2^53, so we carry it as
 // a JS `number` (matching the control plane) and encode it as two 32-bit halves
 // to avoid BigInt.
+//
+// INPUT has no seq: ordering is assumed, and on the wire that assumption holds.
+// It does NOT hold across the desktop bridge, where each frame is a separate
+// concurrent `fetch` and a separate spawned Tauri task — `tauriSocket.ts`
+// serializes sends to keep this codec's contract true end to end.
 
 export const KIND_OUTPUT = 0x01;
 export const KIND_SNAPSHOT = 0x02;

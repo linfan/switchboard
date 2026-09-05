@@ -143,16 +143,41 @@ pub async fn run_session(
     let (direct_tx, mut direct_rx) = mpsc::unbounded_channel::<ServerMsg>();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
-    // 3. Reader task: handle inbound client messages until the channel closes.
+    // 3. Inbound handling, split in two. `handle_client_msg` is awaited, and
+    //    `create_task` reaches `HostLink::spawn` — a 5s host handshake plus
+    //    attach retrying 3x750ms — so running it inline stalled every keystroke
+    //    queued behind it for up to ~6.5s. A dispatcher now applies input inline
+    //    (`send_input` is a non-blocking push) and hands control messages to a
+    //    separate task. Mirrors `host/runner.rs`, which already separates inbound
+    //    control from the PTY pumps for the same reason.
     {
+        // Unbounded on purpose: a bounded queue would make the dispatcher await
+        // here and put the head-of-line block straight back.
+        let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<ClientMsg>();
+
+        // Serialized, so create/terminate/delete for one task never interleave.
+        let ctl = {
+            let state = state.clone();
+            let client_id = client_id.clone();
+            let direct_tx = direct_tx.clone();
+            tokio::spawn(async move {
+                while let Some(cm) = ctl_rx.recv().await {
+                    handle_client_msg(cm, &state, &client_id, &direct_tx).await;
+                }
+            })
+        };
+
         let state = state.clone();
         let client_id = client_id.clone();
-        let direct_tx = direct_tx.clone();
         tokio::spawn(async move {
             while let Some(win) = rx.recv().await {
                 match win {
                     WsIn::Text(t) => match serde_json::from_str::<ClientMsg>(&t) {
-                        Ok(cm) => handle_client_msg(cm, &state, &client_id, &direct_tx).await,
+                        Ok(cm) => {
+                            if ctl_tx.send(cm).is_err() {
+                                break;
+                            }
+                        }
                         Err(e) => tracing::warn!(%client_id, error=%e, "bad client message"),
                     },
                     WsIn::Binary(b) => match Frame::decode(&b) {
@@ -167,6 +192,11 @@ pub async fn run_session(
                     WsIn::Close => break,
                 }
             }
+            // Closing the queue lets the control task finish what is already
+            // queued; awaiting it keeps a command sent just before a clean
+            // disconnect able to reply, as it could before this split.
+            drop(ctl_tx);
+            let _ = ctl.await;
             let _ = shutdown_tx.send(());
         });
     }

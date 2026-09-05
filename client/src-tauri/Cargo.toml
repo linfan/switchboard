@@ -35,3 +35,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 switchboard-shared = { path = "../../shared" }
 futures-util = "0.3"
 base64 = "0.22"
+
+[dev-dependencies]
+# `rt-multi-thread` otherwise reaches us only transitively via tauri, so a tauri
+# feature change could silently break the ordering tests in tests/.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }

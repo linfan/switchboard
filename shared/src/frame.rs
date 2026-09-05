@@ -19,6 +19,14 @@
 //! `INPUT` carries no seq: WebSocket/TCP preserves order and the server writes
 //! keystroke bytes to the PTY in arrival order.
 //!
+//! That guarantee covers the wire only. The desktop client runs its socket in
+//! Rust, so a keystroke first crosses the webview IPC — one concurrent `fetch`
+//! per frame, no dispatch-order guarantee — and Tauri then runs each command
+//! invocation as its own spawned task. Fire-and-forget sends were measured
+//! arriving badly scrambled (2505 of 4000 frames out of order), which is why
+//! `client/src/net/tauriSocket.ts` serializes them. Do not make that path
+//! fire-and-forget again: nothing downstream can detect the damage.
+//!
 //! This codec is hand-mirrored in TypeScript at `client/src/net/frame.ts`; the
 //! two must stay byte-for-byte compatible (both are round-trip tested).
 

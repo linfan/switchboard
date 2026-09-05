@@ -10,6 +10,8 @@
 
 import type { ClientMsg, ServerMsg } from "../protocol";
 import type { ConnStatus } from "../store/types";
+import { encodeInput } from "./frame";
+import { logToBackend } from "./log";
 import {
   cbFromPin,
   fromHex,
@@ -120,6 +122,23 @@ const DEFAULT_WAKE: WakeOptions = { checkMs: 2000, driftMs: 5000 };
 const WS_OPEN = 1;
 
 /**
+ * Bounds on keystrokes buffered across a reconnect. The size cap keeps memory
+ * flat; the age cap is what makes replaying safe at all — `notifyOffline` clears
+ * the retry timer and waits for an `online` event that may never arrive, so
+ * without a TTL we could replay a minutes-old command into a shell that has
+ * since moved on.
+ */
+export const INPUT_BUF_BYTES = 4096;
+export const INPUT_BUF_TTL_MS = 2000;
+
+/** One keystroke batch held while the connection was down. */
+interface QueuedInput {
+  taskId: string;
+  bytes: Uint8Array;
+  at: number;
+}
+
+/**
  * Convert an http(s) base URL into the service's ws(s) endpoint. No credential
  * is carried in the URL — the token is proven via the SWB-WS-v1 handshake.
  */
@@ -147,6 +166,15 @@ export class ConnectionManager {
   private authed = false;
   /** True while the browser reports the network as down. */
   private networkDown = false;
+
+  /**
+   * Keystrokes typed while the connection was down, replayed from `onAuthed`.
+   * Deliberately outlives `closeSocket` — surviving the teardown is the entire
+   * point — and is only discarded by `stop()` or by the bounds in `pruneInput`.
+   */
+  private inputBuf: QueuedInput[] = [];
+  private inputBufBytes = 0;
+  private droppedInputBytes = 0;
 
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -183,6 +211,7 @@ export class ConnectionManager {
     this.stopHeartbeat();
     this.stopWakeWatchdog();
     this.closeSocket();
+    this.discardInput();
     this.setStatus("offline");
   }
 
@@ -216,6 +245,17 @@ export class ConnectionManager {
     if (!this.canSend()) return false;
     this.ws!.send(bytes);
     return true;
+  }
+
+  /**
+   * Send keystrokes to a task's PTY, buffering them if the connection is down.
+   * Returns whether they went out immediately; buffered bytes are replayed by
+   * `flushInput` once the socket re-authenticates.
+   */
+  sendInput(taskId: string, bytes: Uint8Array): boolean {
+    if (this.sendBytes(encodeInput(taskId, bytes))) return true;
+    this.queueInput(taskId, bytes);
+    return false;
   }
 
   /** Wire this to the browser `online` event. */
@@ -364,6 +404,10 @@ export class ConnectionManager {
     // Let the app re-assert per-task state that must survive a drop (e.g. the
     // terminal geometry, in case the window was resized while offline).
     this.d.onReady?.();
+    // Last, so Hello and the resync are already on the wire: the server drops
+    // data-plane frames until Hello lands, and replaying into that window would
+    // just lose the keystrokes a second time.
+    this.flushInput();
   }
 
   private onClose(reason: string): void {
@@ -550,8 +594,127 @@ export class ConnectionManager {
     }
   }
 
+  // --- buffered input -----------------------------------------------------
+
+  private queueInput(taskId: string, bytes: Uint8Array): void {
+    this.inputBuf.push({ taskId, bytes, at: this.now() });
+    this.inputBufBytes += bytes.length;
+    this.pruneInput();
+  }
+
+  /**
+   * Enforce the buffer's bounds, dropping the oldest entries first: in a
+   * terminal the newest keystrokes are the ones the user just typed and is still
+   * looking at, so those are the ones worth replaying.
+   */
+  private pruneInput(): void {
+    const now = this.now();
+    let dropped = 0;
+    while (this.inputBuf.length > 0) {
+      const oldest = this.inputBuf[0];
+      const stale = now - oldest.at > INPUT_BUF_TTL_MS;
+      if (!stale && this.inputBufBytes <= INPUT_BUF_BYTES) break;
+      this.inputBuf.shift();
+      this.inputBufBytes -= oldest.bytes.length;
+      dropped += oldest.bytes.length;
+    }
+    this.countDroppedInput(dropped);
+  }
+
+  /**
+   * Replay keystrokes buffered while the connection was down.
+   *
+   * Bytes for one task are concatenated, which is byte-identical to sending them
+   * separately: an INPUT frame is `[kind][task_id][data]` with no framing inside
+   * `data`, and the server writes it to the PTY verbatim. Any trailing newline
+   * is then stripped, so a command typed while offline lands on the prompt for
+   * the user to review rather than a stale Enter executing something they
+   * believe was lost.
+   */
+  private flushInput(): void {
+    if (this.inputBuf.length === 0) return;
+    const queued = this.inputBuf;
+    this.inputBuf = [];
+    this.inputBufBytes = 0;
+
+    const now = this.now();
+    const order: string[] = [];
+    const byTask = new Map<string, Uint8Array[]>();
+    let stale = 0;
+    for (const q of queued) {
+      if (now - q.at > INPUT_BUF_TTL_MS) {
+        stale += q.bytes.length;
+        continue;
+      }
+      let parts = byTask.get(q.taskId);
+      if (!parts) {
+        parts = [];
+        byTask.set(q.taskId, parts);
+        order.push(q.taskId);
+      }
+      parts.push(q.bytes);
+    }
+    this.countDroppedInput(stale);
+
+    let replayed = 0;
+    for (const taskId of order) {
+      const data = stripTrailingNewlines(concatBytes(byTask.get(taskId)!));
+      if (data.length === 0) continue;
+      if (!this.sendBytes(encodeInput(taskId, data))) {
+        this.countDroppedInput(data.length);
+        continue;
+      }
+      replayed += data.length;
+    }
+    if (replayed > 0) {
+      logToBackend(
+        "info",
+        `replayed ${replayed} buffered keystroke byte(s) after reconnect`,
+      );
+    }
+  }
+
+  private discardInput(): void {
+    this.inputBuf = [];
+    this.inputBufBytes = 0;
+  }
+
+  private countDroppedInput(bytes: number): void {
+    if (bytes <= 0) return;
+    this.droppedInputBytes += bytes;
+    logToBackend(
+      "warn",
+      `dropped ${bytes} keystroke byte(s) with no live connection ` +
+        `(${this.droppedInputBytes} total)`,
+    );
+  }
+
+  /** Cumulative keystroke bytes discarded instead of buffered or replayed. */
+  get droppedInputs(): number {
+    return this.droppedInputBytes;
+  }
+
   private setStatus(status: ConnStatus, meta?: StatusMeta): void {
     this.status = status;
     this.d.onStatus(status, meta);
   }
+}
+
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+  if (parts.length === 1) return parts[0];
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
+}
+
+/** Strip trailing CR/LF so a replayed command cannot execute itself. */
+function stripTrailingNewlines(bytes: Uint8Array): Uint8Array {
+  let end = bytes.length;
+  while (end > 0 && (bytes[end - 1] === 0x0d || bytes[end - 1] === 0x0a)) end--;
+  return end === bytes.length ? bytes : bytes.subarray(0, end);
 }

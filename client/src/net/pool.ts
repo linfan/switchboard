@@ -6,7 +6,7 @@ import type { ClientMsg, ServerMsg } from "../protocol";
 import type { Settings } from "../store/settings";
 import { useStore } from "../store/store";
 import { ConnectionManager } from "./connection";
-import { decode, encodeInput } from "./frame";
+import { decode } from "./frame";
 import { isTauri } from "./tauri";
 import { makeTauriWsFactory } from "./tauriSocket";
 import * as terminals from "./terminals";
@@ -262,9 +262,13 @@ export class ConnectionPool {
     });
   }
 
-  /** Send raw keystrokes as an INPUT data-plane frame. */
+  /**
+   * Send raw keystrokes as an INPUT data-plane frame. If the service is down,
+   * they are buffered and replayed on reconnect rather than dropped — unlike
+   * {@link sendResize}, which `onReady` re-asserts from the live terminal.
+   */
   sendInput(serviceId: string, taskId: string, bytes: Uint8Array): boolean {
-    return this.managers.get(serviceId)?.sendBytes(encodeInput(taskId, bytes)) ?? false;
+    return this.managers.get(serviceId)?.sendInput(taskId, bytes) ?? false;
   }
 
   /** Report a terminal geometry change so the server PTY resizes. */

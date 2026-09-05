@@ -4,9 +4,12 @@ import type { ServerMsg } from "../protocol";
 import type { ConnStatus } from "../store/types";
 import {
   ConnectionManager,
+  INPUT_BUF_BYTES,
+  INPUT_BUF_TTL_MS,
   toWsUrl,
   type WebSocketLike,
 } from "./connection";
+import { decode } from "./frame";
 
 // WebCrypto (crypto.subtle) resolves on the libuv threadpool, not a timer or a
 // microtask, so it never settles under vitest fake timers via
@@ -100,6 +103,7 @@ async function driveHandshake(s: FakeSocket): Promise<void> {
 function makeDeps(over: {
   cursors?: Record<string, number>;
   now?: () => number;
+  onReady?: () => void;
   wake?: { checkMs: number; driftMs: number };
   heartbeat?: { intervalMs: number; timeoutMs: number };
 }) {
@@ -115,6 +119,7 @@ function makeDeps(over: {
     onMessage: (m: ServerMsg) => messages.push(m),
     onBinary: (b: Uint8Array) => binaries.push(b),
     onStatus: (s: ConnStatus) => statuses.push(s),
+    onReady: over.onReady,
     wsFactory: (u: string) => new FakeSocket(u) as unknown as WebSocketLike,
     now: over.now ?? (() => 1000),
     reconnect: { baseDelayMs: 1000, factor: 2, jitter: 0, maxDelayMs: 30000 },
@@ -462,6 +467,251 @@ describe("starvation-safe heartbeat", () => {
     vi.advanceTimersByTime(10000); // fire the pong timer at sim-time 25000
     expect(mgr.getStatus()).toBe("online"); // re-probed, not torn down
     expect(ping()).toBe(2);
+    mgr.stop();
+  });
+});
+
+describe("buffered keystrokes across a reconnect", () => {
+  const TASK_A = "11111111-2222-3333-4444-555555555555";
+  const TASK_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const bytes = (s: string): Uint8Array => encoder.encode(s);
+
+  /** Every binary frame the socket was handed, decoded as an INPUT keystroke. */
+  function inputs(s: FakeSocket): Array<{ taskId: string; text: string }> {
+    return s.sentBinary.map((b) => {
+      const f = decode(b);
+      if (f.kind !== "input") throw new Error(`expected INPUT, got ${f.kind}`);
+      return { taskId: f.taskId, text: decoder.decode(f.data) };
+    });
+  }
+
+  /** A manager whose first socket has just dropped, awaiting a backoff retry. */
+  function startDisconnected(over: Parameters<typeof mkManager>[0] = {}) {
+    const made = mkManager(over);
+    made.mgr.start();
+    FakeSocket.last().emitClose();
+    return made;
+  }
+
+  /** Let the backoff fire and drive the fresh socket through the handshake. */
+  async function reconnect(): Promise<FakeSocket> {
+    const before = FakeSocket.last();
+    vi.advanceTimersByTime(1000); // baseDelayMs, jitter 0
+    const s = FakeSocket.last();
+    expect(s).not.toBe(before);
+    await driveHandshake(s);
+    return s;
+  }
+
+  it("sends keystrokes straight through while the connection is live", async () => {
+    const { mgr } = mkManager();
+    mgr.start();
+    const s = FakeSocket.last();
+    await driveHandshake(s);
+
+    expect(mgr.sendInput(TASK_A, bytes("ls -la\r"))).toBe(true);
+    // Only a *replay* has to be made safe; live input is never rewritten.
+    expect(inputs(s)).toEqual([{ taskId: TASK_A, text: "ls -la\r" }]);
+    mgr.stop();
+  });
+
+  it("buffers keystrokes typed while down and replays them after re-auth", async () => {
+    const { mgr } = startDisconnected();
+
+    expect(mgr.sendInput(TASK_A, bytes("ls -la"))).toBe(false);
+    const s = await reconnect();
+
+    expect(inputs(s)).toEqual([{ taskId: TASK_A, text: "ls -la" }]);
+    expect(mgr.droppedInputs).toBe(0);
+    mgr.stop();
+  });
+
+  it("holds the replay until the socket has re-authenticated", async () => {
+    const { mgr } = startDisconnected();
+    mgr.sendInput(TASK_A, bytes("ls -la"));
+
+    vi.advanceTimersByTime(1000);
+    const s = FakeSocket.last();
+    s.emitOpen();
+    // OPEN is not enough: the server discards data-plane frames until Hello lands,
+    // so writing here would lose the keystrokes a second time.
+    expect(s.sentBinary).toHaveLength(0);
+
+    s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
+    await settleCrypto(s);
+    expect(s.sentBinary).toHaveLength(0);
+
+    s.emitMessage({ type: "auth_ok" });
+    expect(inputs(s)).toEqual([{ taskId: TASK_A, text: "ls -la" }]);
+    mgr.stop();
+  });
+
+  it("replays after hello and the onReady resync, not before", async () => {
+    let binariesAtReady = -1;
+    const { mgr } = startDisconnected({
+      onReady: () => {
+        binariesAtReady = FakeSocket.last().sentBinary.length;
+      },
+    });
+    mgr.sendInput(TASK_A, bytes("ls -la"));
+
+    const s = await reconnect();
+
+    expect(s.find("hello")).toBeDefined();
+    expect(binariesAtReady).toBe(0);
+    expect(inputs(s)).toHaveLength(1);
+    mgr.stop();
+  });
+
+  it("strips a trailing Enter so a replayed command cannot execute itself", async () => {
+    const { mgr } = startDisconnected();
+    mgr.sendInput(TASK_A, bytes("ls -la\r"));
+
+    const s = await reconnect();
+
+    // The text lands on the prompt for the user to review; a stale Enter must not
+    // run a command they believe was lost.
+    expect(inputs(s)).toEqual([{ taskId: TASK_A, text: "ls -la" }]);
+    mgr.stop();
+  });
+
+  it("strips every trailing newline, not just one", async () => {
+    const { mgr } = startDisconnected();
+    mgr.sendInput(TASK_A, bytes("ls\r\n\r"));
+
+    const s = await reconnect();
+
+    expect(inputs(s)).toEqual([{ taskId: TASK_A, text: "ls" }]);
+    mgr.stop();
+  });
+
+  it("replays input with no trailing newline verbatim", async () => {
+    const { mgr } = startDisconnected();
+    mgr.sendInput(TASK_A, bytes("git status"));
+
+    const s = await reconnect();
+
+    expect(inputs(s)).toEqual([{ taskId: TASK_A, text: "git status" }]);
+    mgr.stop();
+  });
+
+  it("drops a buffered batch that was nothing but newlines", async () => {
+    const { mgr } = startDisconnected();
+    mgr.sendInput(TASK_A, bytes("\r"));
+
+    const s = await reconnect();
+
+    expect(s.sentBinary).toHaveLength(0);
+    // Withholding an Enter is not losing a keystroke, so it is not counted.
+    expect(mgr.droppedInputs).toBe(0);
+    mgr.stop();
+  });
+
+  it("concatenates per task and keeps first-appearance order across tasks", async () => {
+    const { mgr } = startDisconnected();
+    mgr.sendInput(TASK_A, bytes("git "));
+    mgr.sendInput(TASK_B, bytes("make "));
+    mgr.sendInput(TASK_A, bytes("status\r"));
+
+    const s = await reconnect();
+
+    expect(inputs(s)).toEqual([
+      { taskId: TASK_A, text: "git status" },
+      { taskId: TASK_B, text: "make " },
+    ]);
+    mgr.stop();
+  });
+
+  it("drops the oldest keystrokes past the size cap and counts them", async () => {
+    const { mgr } = startDisconnected();
+    const chunk = 1024;
+    // 6 KiB typed into a 4 KiB buffer: the two oldest chunks must go, since the
+    // newest ones are what the user just typed and is still looking at.
+    for (let i = 0; i < 6; i++) {
+      mgr.sendInput(TASK_A, new Uint8Array(chunk).fill(0x30 + i));
+    }
+    expect(mgr.droppedInputs).toBe(2 * chunk);
+
+    const s = await reconnect();
+    expect(s.sentBinary).toHaveLength(1);
+    const f = decode(s.sentBinary[0]);
+    if (f.kind !== "input") throw new Error(`expected INPUT, got ${f.kind}`);
+    expect(f.data).toHaveLength(INPUT_BUF_BYTES);
+    expect(f.data[0]).toBe(0x32);
+    expect(f.data[chunk]).toBe(0x33);
+    expect(f.data[2 * chunk]).toBe(0x34);
+    expect(f.data[3 * chunk]).toBe(0x35);
+    mgr.stop();
+  });
+
+  it("drops keystrokes older than the TTL when new ones arrive", async () => {
+    let t = 1000;
+    const { mgr } = startDisconnected({ now: () => t });
+    mgr.sendInput(TASK_A, bytes("old"));
+
+    t += INPUT_BUF_TTL_MS + 1;
+    mgr.sendInput(TASK_A, bytes("new"));
+    expect(mgr.droppedInputs).toBe(3);
+
+    const s = await reconnect();
+    expect(inputs(s)).toEqual([{ taskId: TASK_A, text: "new" }]);
+    mgr.stop();
+  });
+
+  it("re-checks staleness at flush time", async () => {
+    let t = 1000;
+    const { mgr } = startDisconnected({ now: () => t });
+    mgr.sendInput(TASK_A, bytes("stale"));
+
+    // The connection stayed down past the TTL with no further keystroke to
+    // trigger a prune, so the flush itself has to notice.
+    t += INPUT_BUF_TTL_MS + 1;
+    const s = await reconnect();
+
+    expect(s.sentBinary).toHaveLength(0);
+    expect(mgr.droppedInputs).toBe(5);
+    mgr.stop();
+  });
+
+  it("survives repeated socket teardowns, which is the point of buffering", async () => {
+    const { mgr } = startDisconnected();
+    mgr.sendInput(TASK_A, bytes("ls -la"));
+
+    vi.advanceTimersByTime(1000); // retry #1
+    FakeSocket.last().emitClose(); // it drops too
+    vi.advanceTimersByTime(2000); // retry #2, backed off
+    const s = FakeSocket.last();
+    await driveHandshake(s);
+
+    expect(inputs(s)).toEqual([{ taskId: TASK_A, text: "ls -la" }]);
+    mgr.stop();
+  });
+
+  it("keeps the buffer while the network is reported offline", async () => {
+    const { mgr } = startDisconnected();
+    mgr.notifyOffline();
+    mgr.sendInput(TASK_A, bytes("ls -la"));
+
+    mgr.notifyOnline();
+    const s = FakeSocket.last();
+    await driveHandshake(s);
+
+    expect(inputs(s)).toEqual([{ taskId: TASK_A, text: "ls -la" }]);
+    mgr.stop();
+  });
+
+  it("discards the buffer on stop()", async () => {
+    const { mgr } = startDisconnected();
+    mgr.sendInput(TASK_A, bytes("ls -la"));
+
+    mgr.stop();
+    mgr.start();
+    const s = FakeSocket.last();
+    await driveHandshake(s);
+
+    expect(s.sentBinary).toHaveLength(0);
     mgr.stop();
   });
 });

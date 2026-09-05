@@ -9,6 +9,12 @@
 //! close. The Channel preserves ordering, so interleaved control (text) and
 //! data-plane (binary) frames are delivered in the exact order the server sent
 //! them.
+//!
+//! Outbound needs the same treatment and does not get it for free: Tauri runs
+//! each `ws_send` invocation as an independent task, and the webview issues each
+//! one as an independent `fetch`, so fire-and-forget sends reach the socket
+//! scrambled. {@link TauriWebSocket.send} therefore chains them, holding one in
+//! flight at a time. See `chain`.
 
 import { bytesToBase64 } from "./b64";
 import type { WebSocketFactory, WebSocketLike } from "./connection";
@@ -48,6 +54,23 @@ class TauriWebSocket implements WebSocketLike {
    * open, in order, rather than delivering it ahead of `onopen`.
    */
   private pending: WsEvt[] = [];
+
+  /**
+   * Serializes outbound IPC. Tauri spawns every async command invocation as its
+   * own task on a multi-threaded runtime, and the webview reaches it over
+   * concurrent `fetch` calls with no dispatch-order guarantee — so fire-and-forget
+   * invokes arrive at the socket scrambled. Measured over 4000 ordered keystroke
+   * frames: 2505 reached the writer out of order, and removing the `await` in
+   * Rust did not help (3675), because the race is in task scheduling. Holding one
+   * `ws_send` in flight at a time removes both races without putting a sequence
+   * number in the protocol.
+   *
+   * The cost is burst-drain latency: after the main thread unblocks, queued key
+   * events drain at one IPC round trip each (~50ms for 50 characters) instead of
+   * all at once. That is well inside the heartbeat and handshake watchdogs, and
+   * it keeps control messages ordered against keystrokes on the same socket.
+   */
+  private chain: Promise<void> = Promise.resolve();
 
   constructor(url: string, pin?: string) {
     void this.connect(url, pin);
@@ -122,13 +145,21 @@ class TauriWebSocket implements WebSocketLike {
 
   send(data: string | ArrayBufferLike | ArrayBufferView): void {
     if (this.closed || this.id === null) return;
+    const id = this.id;
     // Client->server frames are tiny keystrokes/resizes, so base64 here is
     // negligible; the volume (and the perf win of raw bytes) is all inbound.
     const args =
       typeof data === "string"
-        ? { id: this.id, text: data, binaryB64: null }
-        : { id: this.id, text: null, binaryB64: bytesToBase64(data) };
-    void invoke("ws_send", args).catch((e: unknown) => this.onSendFailed(e));
+        ? { id, text: data, binaryB64: null }
+        : { id, text: null, binaryB64: bytesToBase64(data) };
+    // The handler MUST sit inside the link: a rejection that escapes poisons
+    // `chain`, and every keystroke after it would silently no-op forever.
+    this.chain = this.chain.then(() =>
+      invoke("ws_send", args).then(
+        () => undefined,
+        (e: unknown) => this.onSendFailed(e),
+      ),
+    );
   }
 
   /**
