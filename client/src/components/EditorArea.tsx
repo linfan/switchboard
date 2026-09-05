@@ -4,6 +4,7 @@ import { EditorState, type Extension } from "@codemirror/state";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { EditorView, keymap } from "@codemirror/view";
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { javascript } from "@codemirror/lang-javascript";
 import { json } from "@codemirror/lang-json";
@@ -94,7 +95,7 @@ function mediaElement(kind: MediaKind, src: string): HTMLElement {
  * The right-hand editor pane: a tab bar over the open files plus the active
  * file's editor. Tree files are editable (Cmd/Ctrl+S saves). Diff files are
  * read-only and rendered with a real diff editor — inline (unified) or
- * side-by-side, switchable via the tab-bar toggle. Each tab's live view lives in
+ * side-by-side, switchable via the title-bar toggle. Each tab's live view lives in
  * the `editors` registry so switching tabs — or workspaces — preserves unsaved
  * edits, scroll, and undo. Long lines wrap or scroll sideways per tab, chosen by
  * the Wrap Text button and seeded from the settings default at build time.
@@ -106,6 +107,7 @@ export function EditorArea({
   tabs,
   activeKey,
   diffLayout,
+  actionsSlot,
   onActivate,
   onClose,
   onReorder,
@@ -121,6 +123,8 @@ export function EditorArea({
   tabs: OpenFile[];
   activeKey?: string;
   diffLayout: DiffLayout;
+  /** Header element (in WorkspaceEditor's title bar) the tab actions render into. */
+  actionsSlot: HTMLElement | null;
   onActivate: (key: string) => void;
   onClose: (key: string) => void;
   onReorder: (fromKey: string, toKey: string) => void;
@@ -741,61 +745,69 @@ export function EditorArea({
             );
           })}
         </div>
-        {key && !media && (
-          <button
-            className={`btn weditor__wrap ${wrapped ? "is-active" : ""}`}
-            aria-pressed={wrapped}
-            title="Wrap long lines to the editor width instead of scrolling sideways"
-            onClick={() => toggleWrap(key)}
-          >
-            Wrap Text
-          </button>
-        )}
-        {mode === "diff" && (
-          <div
-            className="weditor__difftoggle"
-            role="radiogroup"
-            aria-label="Diff layout"
-          >
-            <button
-              role="radio"
-              aria-checked={diffLayout === "inline"}
-              className={`weditor__difftoggle-opt ${diffLayout === "inline" ? "is-active" : ""}`}
-              onClick={() => onDiffLayout("inline")}
-            >
-              Inline
-            </button>
-            <button
-              role="radio"
-              aria-checked={diffLayout === "split"}
-              className={`weditor__difftoggle-opt ${diffLayout === "split" ? "is-active" : ""}`}
-              onClick={() => onDiffLayout("split")}
-            >
-              Side-by-side
-            </button>
-          </div>
-        )}
-        {mode === "diff" && path && (
-          <button
-            className="btn weditor__openeditor"
-            title="Open this file for editing in a new tab"
-            onClick={() => onOpenInEditor(`${cwd.replace(/\/+$/, "")}/${path}`)}
-          >
-            Open in editor
-          </button>
-        )}
-        {mode === "edit" && key && !media && (
-          <button
-            className="btn weditor__save"
-            disabled={!isDirty(key)}
-            onClick={() => {
-              const view = editors.getView(workspaceId, key);
-              if (view) save(key, path!, view);
-            }}
-          >
-            Save
-          </button>
-        )}
+        {/* Tab actions live in the workspace title bar (portal), not beside the
+            tabs, so they never compete with tabs for width. */}
+        {actionsSlot &&
+          createPortal(
+            <>
+              {key && !media && (
+                <button
+                  className={`btn weditor__wrap ${wrapped ? "is-active" : ""}`}
+                  aria-pressed={wrapped}
+                  title="Wrap long lines to the editor width instead of scrolling sideways"
+                  onClick={() => toggleWrap(key)}
+                >
+                  Wrap Text
+                </button>
+              )}
+              {mode === "diff" && (
+                <div
+                  className="weditor__difftoggle"
+                  role="radiogroup"
+                  aria-label="Diff layout"
+                >
+                  <button
+                    role="radio"
+                    aria-checked={diffLayout === "inline"}
+                    className={`weditor__difftoggle-opt ${diffLayout === "inline" ? "is-active" : ""}`}
+                    onClick={() => onDiffLayout("inline")}
+                  >
+                    Inline
+                  </button>
+                  <button
+                    role="radio"
+                    aria-checked={diffLayout === "split"}
+                    className={`weditor__difftoggle-opt ${diffLayout === "split" ? "is-active" : ""}`}
+                    onClick={() => onDiffLayout("split")}
+                  >
+                    Side-by-side
+                  </button>
+                </div>
+              )}
+              {mode === "diff" && path && (
+                <button
+                  className="btn weditor__openeditor"
+                  title="Open this file for editing in a new tab"
+                  onClick={() => onOpenInEditor(`${cwd.replace(/\/+$/, "")}/${path}`)}
+                >
+                  Open in editor
+                </button>
+              )}
+              {mode === "edit" && key && !media && (
+                <button
+                  className="btn weditor__save"
+                  disabled={!isDirty(key)}
+                  onClick={() => {
+                    const view = editors.getView(workspaceId, key);
+                    if (view) save(key, path!, view);
+                  }}
+                >
+                  Save
+                </button>
+              )}
+            </>,
+            actionsSlot,
+          )}
       </div>
 
       {mode === "edit" && key && isChanged(key) && (

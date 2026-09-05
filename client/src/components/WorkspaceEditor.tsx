@@ -70,6 +70,8 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
 
   // Width of the left panel column, adjustable by dragging the divider.
   const [panelWidth, setPanelWidth] = useState(280);
+  // Header slot the editor's tab actions are portaled into (see EditorArea).
+  const [actionsSlot, setActionsSlot] = useState<HTMLDivElement | null>(null);
   const startDrag = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -241,6 +243,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
         )}
         <span className="panel__spacer" />
         {!online && <span className="weditor__offline">offline</span>}
+        <div ref={setActionsSlot} className="weditor__actions" />
       </header>
 
       <div
@@ -320,6 +323,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
           tabs={openTabs}
           activeKey={activeTab}
           diffLayout={diffLayout}
+          actionsSlot={actionsSlot}
           onActivate={(k) => setActiveTab(workspace.id, k)}
           onClose={(k) => closeTab(workspace.id, k)}
           onReorder={(from, to) => moveTab(workspace.id, from, to)}

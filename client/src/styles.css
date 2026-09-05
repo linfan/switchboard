@@ -1105,6 +1105,12 @@ body {
   border-bottom: 1px solid var(--border);
   background: var(--bg-alt);
 }
+/* Editor actions portalled from EditorArea into the workspace title bar. */
+.weditor__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .weditor__tabs {
   flex: 1;
   min-width: 0;
@@ -1173,7 +1179,6 @@ body {
 .weditor__wrap {
   flex: none;
   align-self: center;
-  margin: 0 0 0 8px;
   white-space: nowrap;
   padding: 3px 8px;
   font-size: 11px;
@@ -1186,12 +1191,10 @@ body {
 .weditor__save {
   flex: none;
   align-self: center;
-  margin: 0 8px;
 }
 .weditor__openeditor {
   flex: none;
   align-self: center;
-  margin: 0 8px 0 0;
   white-space: nowrap;
 }
 /* "File changed on disk" notice: sits between the tab bar and the editor. */
@@ -1219,7 +1222,6 @@ body {
   flex: none;
   align-self: center;
   display: flex;
-  margin: 0 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
