@@ -190,7 +190,13 @@ package-server-windows: build-server-windows ## Produce a Windows server release
 	cp target/$(WINDOWS_TARGET)/release/$(SERVER_BIN).exe dist/$(SERVER_BIN).exe
 	@echo "Windows server binary staged in ./dist/$(SERVER_BIN).exe"
 package-client: build-client ## Package the desktop client as a DMG
-	cd client && $(NPM) run tauri build
+	@# bundle_dmg.sh styles the DMG window with an AppleScript that macOS TCC
+	@# denies outside an authorized terminal (-1743 "not authorized to send
+	@# Apple events to Finder"), and Tauri swallows the script's stderr so the
+	@# target just fails with "error running bundle_dmg.sh". Detecting CI makes
+	@# Tauri pass --skip-jenkins, skipping that step. tauri.conf.json sets no DMG
+	@# background, window size or icon positions, so nothing is lost.
+	cd client && CI=true $(NPM) run tauri build
 	find client/src-tauri/target/release/bundle/macos -maxdepth 1 -type d -name '*.app' -exec rm -rf {} +
 package-client-windows: build-client-windows ## Produce a portable Windows client artifact
 	@mkdir -p dist
