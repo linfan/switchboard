@@ -715,9 +715,9 @@ async fn send_frame(
     binary_b64: Option<String>,
 ) -> Result<(), String> {
     let msg = if let Some(t) = text {
-        Message::Text(t.into())
+        Message::Text(t)
     } else if let Some(b) = binary_b64 {
-        Message::Binary(b64().decode(b).map_err(|e| e.to_string())?.into())
+        Message::Binary(b64().decode(b).map_err(|e| e.to_string())?)
     } else {
         return Ok(());
     };

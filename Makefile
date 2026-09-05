@@ -130,7 +130,7 @@ test-server: ## Test hosting service
 test-client: ## Test client (vitest)
 	cd client && $(NPM) test --silent
 test-client-native: ## Test desktop bridge (cargo)
-	@# src-tauri is its own workspace, so test-server and lint never reach it.
+	@# The root workspace is only shared + server, so test-server never reaches this.
 	cd client/src-tauri && $(CARGO) test
 test-e2e: ## End-to-end: real server binary + WS clients + fake PTY agent (gap-free reconnect)
 	$(CARGO) build -p switchboard-server
@@ -147,9 +147,11 @@ test-live: ## Run live agent-CLI tests (needs claude/qodercli auth)
 .PHONY: fmt lint
 fmt: ## Format Rust + client
 	$(CARGO) fmt
+	cd client/src-tauri && $(CARGO) fmt
 	cd client && $(NPM) run fmt --if-present
 lint: ## Lint Rust (clippy) + client
 	$(CARGO) clippy --all-targets -- -D warnings
+	cd client/src-tauri && $(CARGO) clippy --all-targets -- -D warnings
 	cd client && $(NPM) run lint --if-present
 
 # ---------------------------------------------------------------- release

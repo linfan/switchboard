@@ -483,8 +483,7 @@ async fn tcp_forwarding_through_repeater() {
             stream_id,
             remote_port: port,
         }
-        .encode()
-        .into(),
+        .encode(),
     ))
     .await
     .unwrap();
@@ -498,16 +497,13 @@ async fn tcp_forwarding_through_repeater() {
             stream_id,
             data: b"through-repeater".to_vec(),
         }
-        .encode()
-        .into(),
+        .encode(),
     ))
     .await
     .unwrap();
-    ws.send(WsMessage::Binary(
-        PortForwardFrame::Fin { stream_id }.encode().into(),
-    ))
-    .await
-    .unwrap();
+    ws.send(WsMessage::Binary(PortForwardFrame::Fin { stream_id }.encode()))
+        .await
+        .unwrap();
 
     assert_eq!(
         next_forward_frame(&mut ws).await,

@@ -283,11 +283,7 @@ async fn run_connected(
     let (writer_done_tx, mut writer_done_rx) = oneshot::channel();
     let writer = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
-            if sink
-                .send(Message::Binary(frame.encode().into()))
-                .await
-                .is_err()
-            {
+            if sink.send(Message::Binary(frame.encode())).await.is_err() {
                 break;
             }
         }
@@ -496,9 +492,7 @@ async fn connect_forward(
     };
     socket
         .send(Message::Text(
-            serde_json::to_string(&auth)
-                .map_err(|error| error.to_string())?
-                .into(),
+            serde_json::to_string(&auth).map_err(|error| error.to_string())?,
         ))
         .await
         .map_err(|error| error.to_string())?;

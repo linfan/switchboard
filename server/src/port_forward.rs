@@ -141,7 +141,7 @@ pub async fn run_session(mut rx: mpsc::Receiver<Vec<u8>>, out_tx: mpsc::Sender<V
             }
             event = event_rx.recv() => {
                 let Some(event) = event else { break; };
-                if !streams.get(&event.stream_id()).is_some_and(|entry| entry.generation == event.generation()) {
+                if streams.get(&event.stream_id()).is_none_or(|entry| entry.generation != event.generation()) {
                     continue;
                 }
                 let stream_id = event.stream_id();
