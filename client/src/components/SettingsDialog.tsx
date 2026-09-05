@@ -321,7 +321,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <div className="settings__group">
             <div className="settings__legend">File editor</div>
             <div className="settings__row settings__row--check">
-              <label htmlFor="setting-editorWrapDefault">Text wrap</label>
+              <label htmlFor="setting-editorWrapDefault">Wrap text</label>
               <input
                 id="setting-editorWrapDefault"
                 type="checkbox"
@@ -330,8 +330,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               />
             </div>
             <p className="hint hint--muted">
-              Default for file editor tabs opened from now on. Each tab's Text
-              Wrap button overrides it, and open tabs keep their state.
+              Default for file editor tabs opened from now on. Each tab's
+              Auto-wrap/No-wrap toggle overrides it, and open tabs keep their
+              state.
             </p>
           </div>
         </>

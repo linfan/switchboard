@@ -7,10 +7,10 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { HTTP, TOKEN } from "./constants";
 
-// Long-line wrap belongs to a tab, not to the app: the Wrap Text button flips
-// the live view in place, a tab starts from the persisted default, closing a tab
-// forgets its choice, and read-only diff tabs (including a layout switch, which
-// rebuilds the view) honour it too.
+// Long-line wrap belongs to a tab, not to the app: the Auto-wrap/No-wrap
+// toggle flips the live view in place, a tab starts from the persisted default,
+// closing a tab forgets its choice, and read-only diff tabs (including a layout
+// switch, which rebuilds the view) honour it too.
 let dir: string;
 
 const longLine = (tag: string) => `${tag} ${"word ".repeat(300)}`;
@@ -45,7 +45,8 @@ async function boot(page: Page, state: Record<string, unknown> = {}) {
   await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
 }
 
-const toggle = (page: Page): Locator => page.locator(".weditor__wrap");
+const wrapRadio = (page: Page, name: "Auto-wrap" | "No-wrap"): Locator =>
+  page.getByRole("radio", { name });
 /** The active tab's editor content — only that view is attached to the DOM. */
 const content = (page: Page): Locator =>
   page.locator(".weditor__cm .cm-content");
@@ -75,18 +76,27 @@ test("wraps only the tab it was toggled on", async ({ page }) => {
   await boot(page);
 
   await openFile(page, "alpha.txt");
-  await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
+  await expect(wrapRadio(page, "Auto-wrap")).toHaveAttribute(
+    "aria-checked",
+    "false",
+  );
   await expect(content(page)).not.toHaveClass(/cm-lineWrapping/);
   await expect.poll(() => overflows(page)).toBe(true);
 
-  await toggle(page).click();
-  await expect(toggle(page)).toHaveAttribute("aria-pressed", "true");
+  await wrapRadio(page, "Auto-wrap").click();
+  await expect(wrapRadio(page, "Auto-wrap")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
   await expect(content(page)).toHaveClass(/cm-lineWrapping/);
   await expect.poll(() => overflows(page)).toBe(false);
 
   // beta is seeded from the default, not from alpha's choice.
   await openFile(page, "beta.txt");
-  await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
+  await expect(wrapRadio(page, "Auto-wrap")).toHaveAttribute(
+    "aria-checked",
+    "false",
+  );
   await expect(content(page)).not.toHaveClass(/cm-lineWrapping/);
 
   // alpha kept its choice across the tab switch (its view is re-parented).
@@ -99,7 +109,10 @@ test("wraps only the tab it was toggled on", async ({ page }) => {
     .locator(".weditor__tab-close")
     .click();
   await openFile(page, "alpha.txt");
-  await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
+  await expect(wrapRadio(page, "Auto-wrap")).toHaveAttribute(
+    "aria-checked",
+    "false",
+  );
   await expect(content(page)).not.toHaveClass(/cm-lineWrapping/);
 });
 
@@ -114,7 +127,7 @@ test("the settings default seeds tabs opened after it", async ({ page }) => {
 
   await page.getByRole("button", { name: "Settings" }).click();
   const dialog = page.getByRole("dialog", { name: "Settings" });
-  await dialog.getByLabel("Text wrap", { exact: true }).check();
+  await dialog.getByLabel("Wrap text", { exact: true }).check();
   await dialog.getByRole("button", { name: "Save" }).click();
   await expect(dialog).toHaveCount(0);
 
@@ -122,11 +135,14 @@ test("the settings default seeds tabs opened after it", async ({ page }) => {
   await expect(content(page)).not.toHaveClass(/cm-lineWrapping/);
   // ...while a tab opened now is seeded wrapped.
   await openFile(page, "beta.txt");
-  await expect(toggle(page)).toHaveAttribute("aria-pressed", "true");
+  await expect(wrapRadio(page, "Auto-wrap")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
   await expect(content(page)).toHaveClass(/cm-lineWrapping/);
 
-  // The per-tab button still overrides the default.
-  await toggle(page).click();
+  // The per-tab toggle still overrides the default.
+  await wrapRadio(page, "No-wrap").click();
   await expect(content(page)).not.toHaveClass(/cm-lineWrapping/);
 
   // The default survives a reload (it is persisted).
@@ -158,7 +174,7 @@ test("diff tabs wrap too and keep it across a layout switch", async ({
     .click();
   await expect(content(page)).toBeVisible();
 
-  await toggle(page).click();
+  await wrapRadio(page, "Auto-wrap").click();
   await expect(content(page)).toHaveClass(/cm-lineWrapping/);
 
   // The layout switch rebuilds the view from cache; the choice must come with it.
@@ -167,6 +183,6 @@ test("diff tabs wrap too and keep it across a layout switch", async ({
   await expect(panes).toHaveCount(2);
   await expect(panes).toHaveClass([/cm-lineWrapping/, /cm-lineWrapping/]);
 
-  await toggle(page).click();
+  await wrapRadio(page, "No-wrap").click();
   await expect(panes).not.toHaveClass([/cm-lineWrapping/, /cm-lineWrapping/]);
 });

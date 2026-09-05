@@ -98,7 +98,8 @@ function mediaElement(kind: MediaKind, src: string): HTMLElement {
  * side-by-side, switchable via the title-bar toggle. Each tab's live view lives in
  * the `editors` registry so switching tabs — or workspaces — preserves unsaved
  * edits, scroll, and undo. Long lines wrap or scroll sideways per tab, chosen by
- * the Wrap Text button and seeded from the settings default at build time.
+ * the Auto-wrap/No-wrap toggle and seeded from the settings default at build
+ * time.
  */
 export function EditorArea({
   workspaceId,
@@ -751,25 +752,45 @@ export function EditorArea({
           createPortal(
             <>
               {key && !media && (
-                <button
-                  className={`btn weditor__wrap ${wrapped ? "is-active" : ""}`}
-                  aria-pressed={wrapped}
-                  title="Wrap long lines to the editor width instead of scrolling sideways"
-                  onClick={() => toggleWrap(key)}
+                <div
+                  className="weditor__wrap weditor__seg"
+                  role="radiogroup"
+                  aria-label="Line wrapping"
                 >
-                  Wrap Text
-                </button>
+                  <button
+                    role="radio"
+                    aria-checked={wrapped}
+                    className={`weditor__seg-opt ${wrapped ? "is-active" : ""}`}
+                    title="Wrap long lines to the editor width"
+                    onClick={() => {
+                      if (!wrapped) toggleWrap(key);
+                    }}
+                  >
+                    Auto-wrap
+                  </button>
+                  <button
+                    role="radio"
+                    aria-checked={!wrapped}
+                    className={`weditor__seg-opt ${!wrapped ? "is-active" : ""}`}
+                    title="Keep long lines on one row and scroll sideways"
+                    onClick={() => {
+                      if (wrapped) toggleWrap(key);
+                    }}
+                  >
+                    No-wrap
+                  </button>
+                </div>
               )}
               {mode === "diff" && (
                 <div
-                  className="weditor__difftoggle"
+                  className="weditor__seg"
                   role="radiogroup"
                   aria-label="Diff layout"
                 >
                   <button
                     role="radio"
                     aria-checked={diffLayout === "inline"}
-                    className={`weditor__difftoggle-opt ${diffLayout === "inline" ? "is-active" : ""}`}
+                    className={`weditor__seg-opt ${diffLayout === "inline" ? "is-active" : ""}`}
                     onClick={() => onDiffLayout("inline")}
                   >
                     Inline
@@ -777,7 +798,7 @@ export function EditorArea({
                   <button
                     role="radio"
                     aria-checked={diffLayout === "split"}
-                    className={`weditor__difftoggle-opt ${diffLayout === "split" ? "is-active" : ""}`}
+                    className={`weditor__seg-opt ${diffLayout === "split" ? "is-active" : ""}`}
                     onClick={() => onDiffLayout("split")}
                   >
                     Side-by-side

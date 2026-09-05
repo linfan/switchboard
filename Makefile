@@ -201,6 +201,7 @@ package-client: build-client ## Package the desktop client as a DMG
 	cd client && CI=true $(NPM) run tauri build
 	@rm -fr find client/src-tauri/target/release/bundle/macos/*.app
 	@mkdir -p ./dist && mv client/src-tauri/target/release/bundle/dmg/*.dmg ./dist/
+	@echo "Moved bundle to: $$(ls -t dist/*.dmg | head -1)"
 package-client-windows: build-client-windows ## Produce a portable Windows client artifact
 	@mkdir -p dist
 	cp client/src-tauri/target/$(WINDOWS_TARGET)/release/$(CLIENT_WINDOWS_BIN) dist/Switchboard.exe
