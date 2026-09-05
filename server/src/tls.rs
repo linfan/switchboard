@@ -35,8 +35,8 @@ pub fn ensure_cert(tls: &TlsConfig) -> Result<Vec<String>> {
 
     let (sans, labels) = collect_sans(&tls.extra_sans);
 
-    let mut params = CertificateParams::new(Vec::<String>::new())
-        .context("building certificate params")?;
+    let mut params =
+        CertificateParams::new(Vec::<String>::new()).context("building certificate params")?;
     params.subject_alt_names = sans;
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, "Switchboard");
@@ -45,11 +45,10 @@ pub fn ensure_cert(tls: &TlsConfig) -> Result<Vec<String>> {
 
     let now = OffsetDateTime::now_utc();
     params.not_before = now - Duration::hours(1); // tolerate a little clock skew
-    // Stay under the 398-day cap macOS/Safari enforce for TLS server certs.
+                                                  // Stay under the 398-day cap macOS/Safari enforce for TLS server certs.
     params.not_after = now + Duration::days(397);
 
-    let key_pair =
-        KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).context("generating key pair")?;
+    let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).context("generating key pair")?;
     let cert = params
         .self_signed(&key_pair)
         .context("self-signing certificate")?;

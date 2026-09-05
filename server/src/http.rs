@@ -47,7 +47,10 @@ pub fn router(state: SharedState, require_auth: bool) -> Router {
         .route("/git/changes", get(git_changes))
         .route("/git/diff", get(git_diff))
         .route("/git/filediff", get(git_file_diff))
-        .route("/git/worktree", post(git_worktree).delete(git_worktree_remove))
+        .route(
+            "/git/worktree",
+            post(git_worktree).delete(git_worktree_remove),
+        )
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", axum::routing::delete(terminate_task))
         .route(
@@ -288,9 +291,7 @@ struct WorktreeRemoveQuery {
 }
 
 /// Remove a git worktree (and its directory) created under `.switchboard/worktree`.
-async fn git_worktree_remove(
-    Query(q): Query<WorktreeRemoveQuery>,
-) -> AppResult<Json<Value>> {
+async fn git_worktree_remove(Query(q): Query<WorktreeRemoveQuery>) -> AppResult<Json<Value>> {
     editor::git_worktree_remove(&q.cwd).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -378,7 +379,10 @@ async fn upgrade_from_url(
 /// schedule the in-place re-exec. Returns as soon as the file is swapped; the
 /// re-exec fires shortly after so the HTTP response reaches the client first.
 fn apply_upgrade(state: &SharedState, bytes: &[u8]) -> AppResult<Json<Value>> {
-    tracing::info!(size = bytes.len(), "self-upgrade requested; validating new binary");
+    tracing::info!(
+        size = bytes.len(),
+        "self-upgrade requested; validating new binary"
+    );
     crate::upgrade::validate_binary(bytes)?;
     let exe = crate::upgrade::replace_current_exe(bytes)?;
     tracing::info!(

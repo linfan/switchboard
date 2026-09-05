@@ -300,7 +300,10 @@ async fn delete_unknown_task_is_idempotent() {
     loop {
         match next_rx(&mut ws).await {
             Rx::Ctrl(ServerMsg::TaskDeleted { task_id }) => {
-                assert_eq!(task_id, T1, "delete of an unknown task must confirm removal");
+                assert_eq!(
+                    task_id, T1,
+                    "delete of an unknown task must confirm removal"
+                );
                 break;
             }
             Rx::Ctrl(ServerMsg::Error { code, .. }) => {
@@ -476,7 +479,15 @@ fn signed_request_at(
     nonce_override: Option<[u8; 16]>,
 ) -> Request<Body> {
     let nonce = nonce_override.unwrap_or_else(random_nonce::<16>);
-    let mac = rest_mac(token, method, path_and_query, ts, &nonce, &sha256(body), &[]);
+    let mac = rest_mac(
+        token,
+        method,
+        path_and_query,
+        ts,
+        &nonce,
+        &sha256(body),
+        &[],
+    );
     Request::builder()
         .method(method)
         .uri(path_and_query)
@@ -502,13 +513,24 @@ async fn rest_rejects_tampered_and_replayed() {
 
     // Wrong token.
     let req = signed_request(b"wrong-token", "GET", "/api/info", b"");
-    let resp = crate::http::router(state.clone(), true).oneshot(req).await.unwrap();
+    let resp = crate::http::router(state.clone(), true)
+        .oneshot(req)
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "wrong token");
 
     // Tampered path: signed for /api/info but sent to /api/tasks.
     let ts = now_millis();
     let nonce = random_nonce::<16>();
-    let mac = rest_mac(TOKEN.as_bytes(), "GET", "/api/info", ts, &nonce, &sha256(b""), &[]);
+    let mac = rest_mac(
+        TOKEN.as_bytes(),
+        "GET",
+        "/api/info",
+        ts,
+        &nonce,
+        &sha256(b""),
+        &[],
+    );
     let req = Request::builder()
         .method("GET")
         .uri("/api/tasks")
@@ -517,22 +539,55 @@ async fn rest_rejects_tampered_and_replayed() {
         .header(H_MAC, hex(&mac))
         .body(Body::empty())
         .unwrap();
-    let resp = crate::http::router(state.clone(), true).oneshot(req).await.unwrap();
+    let resp = crate::http::router(state.clone(), true)
+        .oneshot(req)
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "tampered path");
 
     // Stale timestamp (outside the skew window).
-    let req = signed_request_at(TOKEN.as_bytes(), "GET", "/api/info", b"", now_millis() - 60_000, None);
-    let resp = crate::http::router(state.clone(), true).oneshot(req).await.unwrap();
+    let req = signed_request_at(
+        TOKEN.as_bytes(),
+        "GET",
+        "/api/info",
+        b"",
+        now_millis() - 60_000,
+        None,
+    );
+    let resp = crate::http::router(state.clone(), true)
+        .oneshot(req)
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "stale timestamp");
 
     // Replayed nonce: first use passes, second identical request is rejected.
     let fixed_nonce = [9u8; 16];
     let ts = now_millis();
-    let first = signed_request_at(TOKEN.as_bytes(), "GET", "/api/info", b"", ts, Some(fixed_nonce));
-    let resp = crate::http::router(state.clone(), true).oneshot(first).await.unwrap();
+    let first = signed_request_at(
+        TOKEN.as_bytes(),
+        "GET",
+        "/api/info",
+        b"",
+        ts,
+        Some(fixed_nonce),
+    );
+    let resp = crate::http::router(state.clone(), true)
+        .oneshot(first)
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "first use of nonce");
-    let second = signed_request_at(TOKEN.as_bytes(), "GET", "/api/info", b"", ts, Some(fixed_nonce));
-    let resp = crate::http::router(state.clone(), true).oneshot(second).await.unwrap();
+    let second = signed_request_at(
+        TOKEN.as_bytes(),
+        "GET",
+        "/api/info",
+        b"",
+        ts,
+        Some(fixed_nonce),
+    );
+    let resp = crate::http::router(state.clone(), true)
+        .oneshot(second)
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "replayed nonce");
 }
 

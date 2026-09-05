@@ -116,7 +116,8 @@ fn check_format(bytes: &[u8]) -> AppResult<()> {
     }
     // The DOS stub ends with e_lfanew at 0x3C: the offset of the PE signature,
     // followed by the COFF header whose first field is Machine.
-    let e_lfanew = u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
+    let e_lfanew =
+        u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
     let machine_at = e_lfanew + 6;
     if machine_at + 2 > bytes.len() || &bytes[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
         return Err(AppError::BadRequest(

@@ -122,12 +122,20 @@ fn known_kind(kind: u8) -> bool {
 impl TunnelFrame {
     /// Build a frame from a kind, stream id, and payload bytes.
     pub fn new(kind: u8, stream_id: u64, payload: Vec<u8>) -> Self {
-        Self { kind, stream_id, payload }
+        Self {
+            kind,
+            stream_id,
+            payload,
+        }
     }
 
     /// A payloadless control frame (`REQ_END`, `WS_CLOSE`, `RST`, `PING`, …).
     pub fn control(kind: u8, stream_id: u64) -> Self {
-        Self { kind, stream_id, payload: Vec::new() }
+        Self {
+            kind,
+            stream_id,
+            payload: Vec::new(),
+        }
     }
 
     /// Serialize to the wire format.
@@ -231,9 +239,15 @@ mod tests {
         let bytes = serde_json::to_vec(&head).unwrap();
         let f = TunnelFrame::new(KIND_REQ_HEAD, 7, bytes);
         let back = TunnelFrame::decode(&f.encode()).unwrap();
-        assert_eq!(serde_json::from_slice::<ReqHead>(&back.payload).unwrap(), head);
+        assert_eq!(
+            serde_json::from_slice::<ReqHead>(&back.payload).unwrap(),
+            head
+        );
 
-        let resp = RespHead { status: 204, headers: vec![] };
+        let resp = RespHead {
+            status: 204,
+            headers: vec![],
+        };
         assert_eq!(
             serde_json::from_slice::<RespHead>(&serde_json::to_vec(&resp).unwrap()).unwrap(),
             resp

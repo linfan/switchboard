@@ -100,7 +100,11 @@ pub async fn git_branches(cwd: &str) -> AppResult<Vec<String>> {
     };
     let out = match git(
         &root,
-        &["branch", "--sort=-committerdate", "--format=%(refname:short)"],
+        &[
+            "branch",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+        ],
     )
     .await
     {
@@ -159,7 +163,9 @@ pub async fn git_changes(cwd: &str, commit: &str) -> AppResult<Vec<GitChange>> {
     if commit == WORKING {
         // Porcelain v1: "XY <path>" per line; XY is the two-column status.
         let out = git(&root, &["status", "--porcelain"]).await.ok().flatten();
-        let Some(out) = out else { return Ok(Vec::new()) };
+        let Some(out) = out else {
+            return Ok(Vec::new());
+        };
         let changes = out
             .lines()
             .filter(|l| l.len() > 3)
@@ -187,7 +193,9 @@ pub async fn git_changes(cwd: &str, commit: &str) -> AppResult<Vec<GitChange>> {
     .await
     .ok()
     .flatten();
-    let Some(out) = out else { return Ok(Vec::new()) };
+    let Some(out) = out else {
+        return Ok(Vec::new());
+    };
     let changes = out
         .lines()
         .map(str::trim)
@@ -223,7 +231,10 @@ pub async fn git_diff(cwd: &str, commit: &str, path: &str) -> AppResult<GitDiff>
     let diff = if commit == WORKING {
         // Working-tree changes vs HEAD. For an untracked file HEAD has nothing,
         // so fall back to diffing against /dev/null to show it as all-added.
-        let tracked = git(&root, &["diff", "HEAD", "--", path]).await.ok().flatten();
+        let tracked = git(&root, &["diff", "HEAD", "--", path])
+            .await
+            .ok()
+            .flatten();
         match tracked {
             Some(s) if !s.trim().is_empty() => s,
             _ => git(&root, &["diff", "--no-index", "--", "/dev/null", path])
@@ -327,9 +338,7 @@ pub async fn git_worktree_add(
         ));
     }
     let Some(root) = toplevel(cwd).await else {
-        return Err(AppError::BadRequest(format!(
-            "not a git repository: {cwd}"
-        )));
+        return Err(AppError::BadRequest(format!("not a git repository: {cwd}")));
     };
 
     // Resolve $HOME/.switchboard/worktree/<workspace_name>/<worktree_name>.
@@ -411,9 +420,7 @@ pub async fn git_worktree_remove(cwd: &str) -> AppResult<()> {
         ));
     }
     let Some(target) = toplevel(cwd).await else {
-        return Err(AppError::BadRequest(format!(
-            "not a git repository: {cwd}"
-        )));
+        return Err(AppError::BadRequest(format!("not a git repository: {cwd}")));
     };
     let main = worktree_main(cwd).await?;
     if main == target {
@@ -555,7 +562,10 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
         run(dir.path(), &["add", "a.txt"]);
         // Subject + body (two -m args), so we can verify body parsing.
-        run(dir.path(), &["commit", "-q", "-m", "first", "-m", "more detail"]);
+        run(
+            dir.path(),
+            &["commit", "-q", "-m", "first", "-m", "more detail"],
+        );
 
         let info = git_info(cwd).await.unwrap();
         assert!(info.is_repo);

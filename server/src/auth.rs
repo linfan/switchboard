@@ -10,13 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use axum::{
-    body::Body,
-    extract::State,
-    http::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
 use switchboard_shared::{
     auth::{ct_eq, from_hex, rest_mac, sha256, H_MAC, H_NONCE, H_TS, REST_MAX_SKEW_MS},
     now_millis,
@@ -82,7 +76,15 @@ pub fn verify_signed(
         return false;
     }
 
-    let expected = rest_mac(token, method, path_and_query, ts, &nonce, &sha256(body), cert_fp);
+    let expected = rest_mac(
+        token,
+        method,
+        path_and_query,
+        ts,
+        &nonce,
+        &sha256(body),
+        cert_fp,
+    );
     if !ct_eq(&expected, &presented_mac) {
         return false;
     }
@@ -115,7 +117,11 @@ pub async fn require_signed(
 
     // This middleware is only mounted where a client-facing token exists
     // (worker-direct, repeater ingress). Absence means auth is misconfigured.
-    let token = state.config.token.as_deref().ok_or(AppError::Unauthorized)?;
+    let token = state
+        .config
+        .token
+        .as_deref()
+        .ok_or(AppError::Unauthorized)?;
 
     let bytes = axum::body::to_bytes(body, MAX_SIGNED_BODY)
         .await

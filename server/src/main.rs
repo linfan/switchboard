@@ -65,9 +65,8 @@ async fn main() -> anyhow::Result<()> {
         || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     match &config.log_file {
         Some(log_cfg) => {
-            let writer = log_file::RollingWriter::new(log_cfg).map_err(|e| {
-                anyhow::anyhow!("failed to open log file {}: {e}", log_cfg.path)
-            })?;
+            let writer = log_file::RollingWriter::new(log_cfg)
+                .map_err(|e| anyhow::anyhow!("failed to open log file {}: {e}", log_cfg.path))?;
             tracing_subscriber::fmt()
                 .with_env_filter(env_filter())
                 .with_ansi(false)

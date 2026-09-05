@@ -83,7 +83,10 @@ impl Config {
         let repeater_token = env_opt("SWITCHBOARD_REPEATER_TOKEN");
         let repeater_ca = env_opt("SWITCHBOARD_REPEATER_CA");
 
-        let mode = match env("SWITCHBOARD_MODE", "worker").to_ascii_lowercase().as_str() {
+        let mode = match env("SWITCHBOARD_MODE", "worker")
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "repeater" => Mode::Repeater,
             _ => Mode::Worker,
         };
@@ -120,14 +123,14 @@ impl Config {
         // Optional size-based rolling log file. A malformed spec is a
         // configuration mistake worth surfacing, but shouldn't stop startup — warn
         // to stderr (logging isn't wired up yet here) and fall back to stdout.
-        let log_file = env_opt("SWITCHBOARD_LOG").and_then(|spec| match LogFileConfig::parse(&spec)
-        {
-            Ok(cfg) => Some(cfg),
-            Err(e) => {
-                eprintln!("SWITCHBOARD_LOG ignored ({e}); logging to stdout");
-                None
-            }
-        });
+        let log_file =
+            env_opt("SWITCHBOARD_LOG").and_then(|spec| match LogFileConfig::parse(&spec) {
+                Ok(cfg) => Some(cfg),
+                Err(e) => {
+                    eprintln!("SWITCHBOARD_LOG ignored ({e}); logging to stdout");
+                    None
+                }
+            });
         // HTTPS is the default protocol (even on localhost); opt out with
         // `SWITCHBOARD_TLS=0` for a plain-HTTP server.
         let tls = if flag("SWITCHBOARD_TLS", true) {
@@ -176,7 +179,10 @@ fn env_opt(key: &str) -> Option<String> {
 fn flag(key: &str, default: bool) -> bool {
     match std::env::var(key) {
         Ok(v) if !v.trim().is_empty() => {
-            matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
         }
         _ => default,
     }

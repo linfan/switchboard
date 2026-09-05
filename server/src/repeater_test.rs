@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::{ring, verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms};
+use rustls::crypto::{
+    ring, verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms,
+};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use switchboard_shared::{
@@ -24,8 +26,9 @@ use switchboard_shared::{
         NONCE_LEN,
     },
     frame::Frame,
+    now_millis,
     port_forward::PortForwardFrame,
-    now_millis, ClientMsg, ServerMsg, ServiceInfo, TaskInfo, TaskStatus,
+    ClientMsg, ServerMsg, ServiceInfo, TaskInfo, TaskStatus,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -110,7 +113,12 @@ async fn boot_repeater() -> Repeater {
         let _ = crate::repeater::serve(rcfg, client_listener, worker_listener).await;
     });
 
-    Repeater { client_addr, worker_addr, cb, cert_path }
+    Repeater {
+        client_addr,
+        worker_addr,
+        cb,
+        cert_path,
+    }
 }
 
 async fn boot() -> Harness {
@@ -244,7 +252,15 @@ async fn https_request(
     if let Some(cb) = cb {
         let ts = now_millis();
         let nonce = random_nonce::<16>();
-        let mac = rest_mac(TOKEN.as_bytes(), method, path, ts, &nonce, &sha256(body), cb);
+        let mac = rest_mac(
+            TOKEN.as_bytes(),
+            method,
+            path,
+            ts,
+            &nonce,
+            &sha256(body),
+            cb,
+        );
         head.push_str(&format!(
             "{H_TS}: {ts}\r\n{H_NONCE}: {}\r\n{H_MAC}: {}\r\n",
             hex(&nonce),
@@ -501,9 +517,11 @@ async fn tcp_forwarding_through_repeater() {
     ))
     .await
     .unwrap();
-    ws.send(WsMessage::Binary(PortForwardFrame::Fin { stream_id }.encode()))
-        .await
-        .unwrap();
+    ws.send(WsMessage::Binary(
+        PortForwardFrame::Fin { stream_id }.encode(),
+    ))
+    .await
+    .unwrap();
 
     assert_eq!(
         next_forward_frame(&mut ws).await,
@@ -565,7 +583,10 @@ async fn live_streaming_through_repeater() {
 
     let mut ws = connect_ws(&h.client_addr, &h.cb).await;
     hello(&mut ws, HashMap::new()).await;
-    assert_eq!(outputs(&read_through_replay(&mut ws, T1).await), vec![(1, b"a".to_vec())]);
+    assert_eq!(
+        outputs(&read_through_replay(&mut ws, T1).await),
+        vec![(1, b"a".to_vec())]
+    );
 
     // Output produced after the client is live must stream through the tunnel.
     h.worker.tasks.inject_chunk(T1, b"b").await.unwrap();
@@ -608,7 +629,10 @@ async fn ping_pong_through_repeater() {
             break;
         }
     }
-    assert!(got, "control-plane ping/pong must round-trip through the tunnel");
+    assert!(
+        got,
+        "control-plane ping/pong must round-trip through the tunnel"
+    );
 }
 
 #[tokio::test]
@@ -644,7 +668,10 @@ async fn delete_task_through_repeater() {
     hello(&mut ws2, HashMap::new()).await;
     match next_rx(&mut ws2).await {
         Rx::Ctrl(ServerMsg::Welcome { tasks, .. }) => {
-            assert!(tasks.iter().all(|t| t.id != T1), "deleted task must not reappear");
+            assert!(
+                tasks.iter().all(|t| t.id != T1),
+                "deleted task must not reappear"
+            );
         }
         _ => panic!("expected Welcome as the first control frame"),
     }
@@ -659,7 +686,10 @@ async fn rest_info_through_repeater() {
         .unwrap();
     assert_eq!(status, 200);
     let info: ServiceInfo = serde_json::from_slice(&body).unwrap();
-    assert_eq!(info.name, "worker-test", "REST response must come from the worker");
+    assert_eq!(
+        info.name, "worker-test",
+        "REST response must come from the worker"
+    );
 }
 
 #[tokio::test]
@@ -695,18 +725,26 @@ async fn large_upload_chunked_through_repeater() {
 
     // Bigger than several BODY_CHUNK (512 KiB) frames so the request body must be
     // split into REQ_BODY chunks and reassembled on the worker — the chunking path.
-    let payload: Vec<u8> = (0..BODY_CHUNK * 5 + 12_345).map(|i| (i % 251) as u8).collect();
+    let payload: Vec<u8> = (0..BODY_CHUNK * 5 + 12_345)
+        .map(|i| (i % 251) as u8)
+        .collect();
     let path = format!("/api/fs/upload?dir={dir}&name=big.bin");
 
     let (status, _) = https_request(&h.client_addr, "POST", &path, Some(&h.cb), &payload)
         .await
         .unwrap();
-    assert_eq!(status, 204, "chunked upload must succeed through the tunnel");
+    assert_eq!(
+        status, 204,
+        "chunked upload must succeed through the tunnel"
+    );
 
     // The worker wrote the reassembled bytes to its local disk, byte-for-byte.
     let written = std::fs::read(upload_dir.path().join("big.bin")).unwrap();
     assert_eq!(written.len(), payload.len());
-    assert_eq!(written, payload, "reassembled upload must match the original");
+    assert_eq!(
+        written, payload,
+        "reassembled upload must match the original"
+    );
 }
 
 #[tokio::test]
@@ -737,7 +775,10 @@ async fn newer_worker_evicts_incumbent() {
         }
     })
     .await;
-    assert!(evicted.is_ok(), "the incumbent worker must be disconnected when evicted");
+    assert!(
+        evicted.is_ok(),
+        "the incumbent worker must be disconnected when evicted"
+    );
 
     // The repeater stays paired throughout — now served by the second worker.
     wait_paired(&r.client_addr, &r.cb).await;

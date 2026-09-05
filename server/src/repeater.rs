@@ -141,8 +141,8 @@ pub async fn run(config: Config) -> Result<()> {
 
     let client_listener =
         std::net::TcpListener::bind(&config.addr).context("binding SWITCHBOARD_ADDR")?;
-    let worker_listener = std::net::TcpListener::bind(&repeater_addr)
-        .context("binding SWITCHBOARD_REPEATER_ADDR")?;
+    let worker_listener =
+        std::net::TcpListener::bind(&repeater_addr).context("binding SWITCHBOARD_REPEATER_ADDR")?;
     tracing::info!(
         client = %client_listener.local_addr()?,
         worker = %worker_listener.local_addr()?,
@@ -166,7 +166,9 @@ pub(crate) async fn serve(
         .clone()
         .ok_or_else(|| anyhow!("repeater mode requires TLS (the worker leg is HTTPS/WSS only)"))?;
 
-    rustls::crypto::ring::default_provider().install_default().ok();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
     let sans = tls::ensure_cert(&tls_cfg)?;
     tracing::info!(sans = ?sans, "tls certificate ready");
     let cert_fp = tls::leaf_cert_fingerprint(&tls_cfg)?;
@@ -182,9 +184,8 @@ pub(crate) async fn serve(
         slot: StdMutex::new(None),
     });
 
-    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
-        tls::server_config(&tls_cfg)?,
-    ));
+    let rustls_config =
+        axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls::server_config(&tls_cfg)?));
 
     let client_app = Router::new()
         .route("/health", get(health))
@@ -293,21 +294,39 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
     };
     let id = tunnel.alloc_stream();
     let mut rx = tunnel.register(id);
-    let mut guard = StreamGuard { tunnel: tunnel.clone(), id, armed: true };
+    let mut guard = StreamGuard {
+        tunnel: tunnel.clone(),
+        id,
+        armed: true,
+    };
 
     let headers: Vec<(String, String)> = parts
         .headers
         .iter()
         .filter(|(k, _)| !is_stripped_header(k.as_str()))
-        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_string(), s.to_string()))
+        })
         .collect();
-    let head = ReqHead { method, uri: path_and_query, headers };
+    let head = ReqHead {
+        method,
+        uri: path_and_query,
+        headers,
+    };
     let head_json = serde_json::to_vec(&head).unwrap_or_default();
-    if !tunnel.send(TunnelFrame::new(KIND_REQ_HEAD, id, head_json)).await {
+    if !tunnel
+        .send(TunnelFrame::new(KIND_REQ_HEAD, id, head_json))
+        .await
+    {
         return (StatusCode::BAD_GATEWAY, "tunnel closed").into_response();
     }
     for chunk in bytes.chunks(BODY_CHUNK) {
-        if !tunnel.send(TunnelFrame::new(KIND_REQ_BODY, id, chunk.to_vec())).await {
+        if !tunnel
+            .send(TunnelFrame::new(KIND_REQ_BODY, id, chunk.to_vec()))
+            .await
+        {
             return (StatusCode::BAD_GATEWAY, "tunnel closed").into_response();
         }
     }
@@ -366,7 +385,14 @@ async fn client_forward(State(st): State<Shared>, ws: WebSocketUpgrade) -> Respo
 
 async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
     let (mut sink, mut stream) = socket.split();
-    if !ws::ws_handshake(&mut sink, &mut stream, st.config.token.as_deref(), &st.cert_fp).await {
+    if !ws::ws_handshake(
+        &mut sink,
+        &mut stream,
+        st.config.token.as_deref(),
+        &st.cert_fp,
+    )
+    .await
+    {
         return;
     }
 
@@ -377,7 +403,11 @@ async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
     };
     let id = tunnel.alloc_stream();
     let mut rx = tunnel.register(id);
-    let guard = StreamGuard { tunnel: tunnel.clone(), id, armed: true };
+    let guard = StreamGuard {
+        tunnel: tunnel.clone(),
+        id,
+        armed: true,
+    };
 
     let open = serde_json::to_vec(&WsOpen { uri: uri.into() }).unwrap_or_default();
     if !tunnel.send(TunnelFrame::new(KIND_WS_OPEN, id, open)).await {
@@ -506,7 +536,9 @@ async fn install_worker(socket: WebSocket, st: Shared) {
                 last_activity.store(now_millis(), Ordering::Relaxed);
                 match TunnelFrame::decode(&bytes) {
                     Ok(f) if f.kind == KIND_PING => {
-                        let _ = tunnel.send(TunnelFrame::control(KIND_PONG, f.stream_id)).await;
+                        let _ = tunnel
+                            .send(TunnelFrame::control(KIND_PONG, f.stream_id))
+                            .await;
                     }
                     Ok(f) if f.kind == KIND_PONG => {}
                     Ok(f) => tunnel.route(f).await,

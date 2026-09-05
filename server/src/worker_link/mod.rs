@@ -25,7 +25,7 @@ use rustls::ClientConfig;
 use switchboard_shared::{
     auth::{from_hex, hex, random_nonce, ws_mac, AuthMsg, NONCE_LEN},
     tunnel::{
-        RespHead, ReqHead, TunnelFrame, WsOpen, BODY_CHUNK, KIND_PING, KIND_PONG, KIND_REQ_BODY,
+        ReqHead, RespHead, TunnelFrame, WsOpen, BODY_CHUNK, KIND_PING, KIND_PONG, KIND_REQ_BODY,
         KIND_REQ_END, KIND_REQ_HEAD, KIND_RESP_BODY, KIND_RESP_END, KIND_RESP_HEAD, KIND_RST,
         KIND_WS_BIN, KIND_WS_CLOSE, KIND_WS_OPEN, KIND_WS_TEXT,
     },
@@ -88,8 +88,15 @@ pub async fn run(state: SharedState) -> Result<()> {
     let mut backoff = Duration::from_millis(500);
     let max_backoff = Duration::from_secs(30);
     loop {
-        match serve_once(&state, &repeater_addr, token.as_bytes(), &pin, tls.clone(), TUNNEL_IDLE)
-            .await
+        match serve_once(
+            &state,
+            &repeater_addr,
+            token.as_bytes(),
+            &pin,
+            tls.clone(),
+            TUNNEL_IDLE,
+        )
+        .await
         {
             Ok(Outcome::Dropped) => {
                 tracing::info!("repeater tunnel closed; reconnecting");
@@ -278,13 +285,21 @@ async fn dispatch(
     let id = frame.stream_id;
     match frame.kind {
         KIND_PING => {
-            let _ = mux_tx.send(TunnelFrame::control(KIND_PONG, id).encode()).await;
+            let _ = mux_tx
+                .send(TunnelFrame::control(KIND_PONG, id).encode())
+                .await;
         }
         KIND_PONG => {}
 
         KIND_REQ_HEAD => match serde_json::from_slice::<ReqHead>(&frame.payload) {
             Ok(head) => {
-                streams.insert(id, Stream::ReqBuffering { head, body: Vec::new() });
+                streams.insert(
+                    id,
+                    Stream::ReqBuffering {
+                        head,
+                        body: Vec::new(),
+                    },
+                );
             }
             Err(e) => tracing::warn!(stream = id, error = %e, "bad REQ_HEAD"),
         },
@@ -313,7 +328,9 @@ async fn dispatch(
                 if let Some(entry) = entry {
                     streams.insert(id, entry);
                 } else {
-                    let _ = mux_tx.send(TunnelFrame::control(KIND_WS_CLOSE, id).encode()).await;
+                    let _ = mux_tx
+                        .send(TunnelFrame::control(KIND_WS_CLOSE, id).encode())
+                        .await;
                 }
             }
             Err(e) => tracing::warn!(stream = id, error = %e, "bad WS_OPEN"),
@@ -348,7 +365,11 @@ async fn dispatch(
                 s.abort();
             }
         }
-        other => tracing::warn!(stream = id, kind = other, "unexpected tunnel frame on worker"),
+        other => tracing::warn!(
+            stream = id,
+            kind = other,
+            "unexpected tunnel frame on worker"
+        ),
     }
 }
 
@@ -362,7 +383,9 @@ fn spawn_request(
     mux_tx: mpsc::Sender<Vec<u8>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut builder = Request::builder().method(head.method.as_str()).uri(head.uri.as_str());
+        let mut builder = Request::builder()
+            .method(head.method.as_str())
+            .uri(head.uri.as_str());
         for (k, v) in &head.headers {
             builder = builder.header(k, v);
         }
@@ -387,7 +410,11 @@ fn spawn_request(
         let headers: Vec<(String, String)> = resp
             .headers()
             .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|s| (k.as_str().to_string(), s.to_string()))
+            })
             .collect();
         let head = RespHead { status, headers };
         let head_json = serde_json::to_vec(&head).unwrap_or_default();
@@ -403,7 +430,9 @@ fn spawn_request(
             Ok(c) => c.to_bytes(),
             Err(e) => {
                 tracing::warn!(stream = id, error = %e, "collecting response body failed");
-                let _ = mux_tx.send(TunnelFrame::control(KIND_RESP_END, id).encode()).await;
+                let _ = mux_tx
+                    .send(TunnelFrame::control(KIND_RESP_END, id).encode())
+                    .await;
                 return;
             }
         };
@@ -416,7 +445,9 @@ fn spawn_request(
                 return;
             }
         }
-        let _ = mux_tx.send(TunnelFrame::control(KIND_RESP_END, id).encode()).await;
+        let _ = mux_tx
+            .send(TunnelFrame::control(KIND_RESP_END, id).encode())
+            .await;
     })
 }
 
@@ -438,10 +469,16 @@ fn open_ws_session(id: u64, state: SharedState, mux_tx: mpsc::Sender<Vec<u8>>) -
             }
         }
         // Session ended (out_tx dropped): tell the repeater the WS is closed.
-        let _ = mux_tx.send(TunnelFrame::control(KIND_WS_CLOSE, id).encode()).await;
+        let _ = mux_tx
+            .send(TunnelFrame::control(KIND_WS_CLOSE, id).encode())
+            .await;
     });
 
-    Stream::Ws { in_tx, session, drain }
+    Stream::Ws {
+        in_tx,
+        session,
+        drain,
+    }
 }
 
 fn open_forward_session(id: u64, mux_tx: mpsc::Sender<Vec<u8>>) -> Stream {
@@ -459,10 +496,16 @@ fn open_forward_session(id: u64, mux_tx: mpsc::Sender<Vec<u8>>) -> Stream {
                 return;
             }
         }
-        let _ = mux_tx.send(TunnelFrame::control(KIND_WS_CLOSE, id).encode()).await;
+        let _ = mux_tx
+            .send(TunnelFrame::control(KIND_WS_CLOSE, id).encode())
+            .await;
     });
 
-    Stream::Forward { in_tx, session, drain }
+    Stream::Forward {
+        in_tx,
+        session,
+        drain,
+    }
 }
 
 /// Client side of the `SWB-WS-v1` handshake over the tunnel socket.

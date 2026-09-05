@@ -332,9 +332,7 @@ fn auth_error(message: &str) -> AuthMsg {
 }
 
 /// Read frames until a `Hello` arrives; returns (client_id, cursors).
-async fn read_hello(
-    rx: &mut mpsc::Receiver<WsIn>,
-) -> Option<(String, HashMap<String, u64>)> {
+async fn read_hello(rx: &mut mpsc::Receiver<WsIn>) -> Option<(String, HashMap<String, u64>)> {
     while let Some(win) = rx.recv().await {
         match win {
             WsIn::Text(t) => {

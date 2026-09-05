@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::{ring, verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms};
+use rustls::crypto::{
+    ring, verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms,
+};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use switchboard_shared::auth::{ct_eq, sha256};

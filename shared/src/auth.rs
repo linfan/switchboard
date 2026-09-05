@@ -204,10 +204,26 @@ mod tests {
         let sn = [1u8; NONCE_LEN];
         let cn = [2u8; NONCE_LEN];
         let base = ws_mac(TOKEN, &sn, &cn, CB);
-        assert_ne!(base, ws_mac(b"other-token", &sn, &cn, CB), "token must matter");
-        assert_ne!(base, ws_mac(TOKEN, &[9u8; NONCE_LEN], &cn, CB), "server nonce must matter");
-        assert_ne!(base, ws_mac(TOKEN, &sn, &[9u8; NONCE_LEN], CB), "client nonce must matter");
-        assert_ne!(base, ws_mac(TOKEN, &sn, &cn, b"different-cb"), "channel binding must matter");
+        assert_ne!(
+            base,
+            ws_mac(b"other-token", &sn, &cn, CB),
+            "token must matter"
+        );
+        assert_ne!(
+            base,
+            ws_mac(TOKEN, &[9u8; NONCE_LEN], &cn, CB),
+            "server nonce must matter"
+        );
+        assert_ne!(
+            base,
+            ws_mac(TOKEN, &sn, &[9u8; NONCE_LEN], CB),
+            "client nonce must matter"
+        );
+        assert_ne!(
+            base,
+            ws_mac(TOKEN, &sn, &cn, b"different-cb"),
+            "channel binding must matter"
+        );
     }
 
     #[test]
@@ -220,12 +236,46 @@ mod tests {
             rest_mac(TOKEN, "GET", "/api/info", 1000, &nonce, &body, CB),
             "deterministic"
         );
-        assert_ne!(base, rest_mac(TOKEN, "POST", "/api/info", 1000, &nonce, &body, CB));
-        assert_ne!(base, rest_mac(TOKEN, "GET", "/api/tasks", 1000, &nonce, &body, CB));
-        assert_ne!(base, rest_mac(TOKEN, "GET", "/api/info", 1001, &nonce, &body, CB));
-        assert_ne!(base, rest_mac(TOKEN, "GET", "/api/info", 1000, &[8u8; REST_NONCE_LEN], &body, CB));
-        assert_ne!(base, rest_mac(TOKEN, "GET", "/api/info", 1000, &nonce, &sha256(b"tampered"), CB));
-        assert_ne!(base, rest_mac(TOKEN, "GET", "/api/info", 1000, &nonce, &body, b"other-cb"));
+        assert_ne!(
+            base,
+            rest_mac(TOKEN, "POST", "/api/info", 1000, &nonce, &body, CB)
+        );
+        assert_ne!(
+            base,
+            rest_mac(TOKEN, "GET", "/api/tasks", 1000, &nonce, &body, CB)
+        );
+        assert_ne!(
+            base,
+            rest_mac(TOKEN, "GET", "/api/info", 1001, &nonce, &body, CB)
+        );
+        assert_ne!(
+            base,
+            rest_mac(
+                TOKEN,
+                "GET",
+                "/api/info",
+                1000,
+                &[8u8; REST_NONCE_LEN],
+                &body,
+                CB
+            )
+        );
+        assert_ne!(
+            base,
+            rest_mac(
+                TOKEN,
+                "GET",
+                "/api/info",
+                1000,
+                &nonce,
+                &sha256(b"tampered"),
+                CB
+            )
+        );
+        assert_ne!(
+            base,
+            rest_mac(TOKEN, "GET", "/api/info", 1000, &nonce, &body, b"other-cb")
+        );
     }
 
     #[test]
@@ -286,7 +336,9 @@ mod tests {
         assert!(json.contains("\"type\":\"auth_response\""));
         assert_eq!(serde_json::from_str::<AuthMsg>(&json).unwrap(), msg);
 
-        let ch = AuthMsg::AuthChallenge { server_nonce: "00ff".into() };
+        let ch = AuthMsg::AuthChallenge {
+            server_nonce: "00ff".into(),
+        };
         let j2 = serde_json::to_string(&ch).unwrap();
         assert!(j2.contains("\"type\":\"auth_challenge\""));
     }

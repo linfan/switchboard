@@ -77,10 +77,20 @@ async fn silent_tunnel_is_torn_down_after_the_idle_window() {
     let mut streams = HashMap::new();
 
     let start = Instant::now();
-    let err = demux(&mut stream, &mux_tx, &app, &state, &mut streams, Duration::from_millis(100))
-        .await
-        .expect_err("a silent tunnel must be torn down");
-    assert!(err.to_string().contains("silently dead"), "unexpected: {err}");
+    let err = demux(
+        &mut stream,
+        &mux_tx,
+        &app,
+        &state,
+        &mut streams,
+        Duration::from_millis(100),
+    )
+    .await
+    .expect_err("a silent tunnel must be torn down");
+    assert!(
+        err.to_string().contains("silently dead"),
+        "unexpected: {err}"
+    );
     assert!(start.elapsed() >= Duration::from_millis(100));
 }
 
@@ -93,15 +103,18 @@ async fn heartbeat_frames_keep_the_tunnel_alive() {
     let mut streams = HashMap::<u64, Stream>::new();
 
     let idle = Duration::from_millis(150);
-    let guard = tokio::spawn(async move {
-        demux(&mut stream, &mux_tx, &app, &state, &mut streams, idle).await
-    });
+    let guard =
+        tokio::spawn(
+            async move { demux(&mut stream, &mux_tx, &app, &state, &mut streams, idle).await },
+        );
 
     // Three PING beats 50ms apart span twice the idle window: each must be
     // answered with a PONG and none may trip the guard.
     for _ in 0..3 {
         repeater
-            .send(WsMessage::Binary(TunnelFrame::control(KIND_PING, 0).encode()))
+            .send(WsMessage::Binary(
+                TunnelFrame::control(KIND_PING, 0).encode(),
+            ))
             .await
             .unwrap();
         let pong = tokio::time::timeout(Duration::from_millis(100), mux_rx.recv())
@@ -119,5 +132,8 @@ async fn heartbeat_frames_keep_the_tunnel_alive() {
         .expect("demux never noticed the silence")
         .unwrap()
         .expect_err("a silent tunnel must be torn down");
-    assert!(err.to_string().contains("silently dead"), "unexpected: {err}");
+    assert!(
+        err.to_string().contains("silently dead"),
+        "unexpected: {err}"
+    );
 }

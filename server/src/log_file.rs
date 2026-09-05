@@ -55,19 +55,18 @@ impl LogFileConfig {
 fn parse_size(s: &str) -> Result<u64, String> {
     let lower = s.to_ascii_lowercase();
     // Check longer/larger suffixes first so `mb` isn't mistaken for a bare `b`.
-    let (num, mult): (&str, u64) = if let Some(n) =
-        lower.strip_suffix("gb").or_else(|| lower.strip_suffix('g'))
-    {
-        (n, 1024 * 1024 * 1024)
-    } else if let Some(n) = lower.strip_suffix("mb").or_else(|| lower.strip_suffix('m')) {
-        (n, 1024 * 1024)
-    } else if let Some(n) = lower.strip_suffix("kb").or_else(|| lower.strip_suffix('k')) {
-        (n, 1024)
-    } else if let Some(n) = lower.strip_suffix('b') {
-        (n, 1)
-    } else {
-        (lower.as_str(), 1)
-    };
+    let (num, mult): (&str, u64) =
+        if let Some(n) = lower.strip_suffix("gb").or_else(|| lower.strip_suffix('g')) {
+            (n, 1024 * 1024 * 1024)
+        } else if let Some(n) = lower.strip_suffix("mb").or_else(|| lower.strip_suffix('m')) {
+            (n, 1024 * 1024)
+        } else if let Some(n) = lower.strip_suffix("kb").or_else(|| lower.strip_suffix('k')) {
+            (n, 1024)
+        } else if let Some(n) = lower.strip_suffix('b') {
+            (n, 1)
+        } else {
+            (lower.as_str(), 1)
+        };
     let value: u64 = num
         .trim()
         .parse()
