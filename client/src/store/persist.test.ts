@@ -31,7 +31,9 @@ describe("persist round-trip through localStorage", () => {
   });
 
   it("writes an added service and removes it on delete", () => {
-    const id = useStore.getState().addService({ name: "Demo", url: "http://x", token: "t" });
+    const id = useStore
+      .getState()
+      .addService({ name: "Demo", url: "http://x", token: "t" });
     expect(persisted().services).toHaveLength(1);
 
     useStore.getState().removeService(id);

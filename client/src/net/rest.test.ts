@@ -23,13 +23,20 @@ function mockFetch(impl: () => Response | Promise<Response>) {
   vi.stubGlobal("fetch", vi.fn(impl));
 }
 
+/** The calls the stubbed `fetch` received, as `[url, init]`. */
+function fetchCalls(): [string, { headers: Record<string, string> }][] {
+  const stub = fetch as unknown as {
+    mock: { calls: [string, { headers: Record<string, string> }][] };
+  };
+  return stub.mock.calls;
+}
+
 describe("probeService", () => {
   it("returns the service info on success and signs without a bearer token", async () => {
     const info = { name: "Box", version: "1.0.0" };
     mockFetch(() => new Response(JSON.stringify(info), { status: 200 }));
     await expect(probeService(svc)).resolves.toEqual({ info });
-    const [url, init] = (fetch as unknown as { mock: { calls: any[][] } }).mock
-      .calls[0];
+    const [url, init] = fetchCalls()[0];
     expect(url).toBe("http://host:8787/api/info");
     // Token is proven via the SWB signature headers, never sent in the clear.
     expect(init.headers["x-swb-mac"]).toEqual(expect.any(String));
@@ -41,8 +48,7 @@ describe("probeService", () => {
   it("strips a trailing slash from the base url", async () => {
     mockFetch(() => new Response("{}", { status: 200 }));
     await probeService({ ...svc, url: "http://host:8787/" });
-    const [url] = (fetch as unknown as { mock: { calls: any[][] } }).mock
-      .calls[0];
+    const [url] = fetchCalls()[0];
     expect(url).toBe("http://host:8787/api/info");
   });
 
@@ -53,8 +59,7 @@ describe("probeService", () => {
 
   it("surfaces the server message on other non-2xx", async () => {
     mockFetch(
-      () =>
-        new Response(JSON.stringify({ message: "boom" }), { status: 500 }),
+      () => new Response(JSON.stringify({ message: "boom" }), { status: 500 }),
     );
     await expect(probeService(svc)).rejects.toThrow("boom");
   });

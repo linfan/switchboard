@@ -12,7 +12,11 @@ import type { Frame } from "./frame";
 import { convKey } from "../store/types";
 
 /** Keystrokes typed into a terminal are sent to the owning service/task. */
-export type InputSink = (serviceId: string, taskId: string, bytes: Uint8Array) => void;
+export type InputSink = (
+  serviceId: string,
+  taskId: string,
+  bytes: Uint8Array,
+) => void;
 /** A terminal geometry change is forwarded so the server PTY matches. */
 export type ResizeSink = (
   serviceId: string,
@@ -69,7 +73,9 @@ function ensure(serviceId: string, taskId: string): Entry {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.onData((s) => inputSink?.(serviceId, taskId, encoder.encode(s)));
-  term.onResize(({ cols, rows }) => resizeSink?.(serviceId, taskId, cols, rows));
+  term.onResize(({ cols, rows }) =>
+    resizeSink?.(serviceId, taskId, cols, rows),
+  );
 
   const el = document.createElement("div");
   el.className = "term-host";

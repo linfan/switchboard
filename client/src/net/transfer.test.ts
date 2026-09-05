@@ -16,7 +16,11 @@ function mockFetch(impl: FetchImpl) {
 }
 
 /** A response whose body arrives as `chunks`, with the given `Content-Length`. */
-function streamed(chunks: number[], total?: number, signal?: AbortSignal): Response {
+function streamed(
+  chunks: number[],
+  total?: number,
+  signal?: AbortSignal,
+): Response {
   const body = new ReadableStream<Uint8Array>({
     start(c) {
       for (const n of chunks) c.enqueue(new Uint8Array(n));
@@ -101,9 +105,11 @@ describe("downloadFile", () => {
   });
 
   it("propagates a server error", async () => {
-    mockFetch(() => new Response(JSON.stringify({ message: "gone" }), { status: 404 }));
-    await expect(
-      downloadFile(svc, "/host/big.bin", "big.bin"),
-    ).rejects.toThrow("gone");
+    mockFetch(
+      () => new Response(JSON.stringify({ message: "gone" }), { status: 404 }),
+    );
+    await expect(downloadFile(svc, "/host/big.bin", "big.bin")).rejects.toThrow(
+      "gone",
+    );
   });
 });

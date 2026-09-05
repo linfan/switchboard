@@ -1,11 +1,7 @@
 import type { ServiceInfo, TaskInfo, TaskStatus } from "../protocol";
 
 /** Liveness of a single hosting-service connection. */
-export type ConnStatus =
-  | "connecting"
-  | "online"
-  | "offline"
-  | "reconnecting";
+export type ConnStatus = "connecting" | "online" | "offline" | "reconnecting";
 
 /** A hosting service the user has registered. Persisted across restarts. */
 export interface Service {
@@ -64,11 +60,7 @@ export interface PortForward {
 }
 
 export type PortForwardStatus =
-  | "starting"
-  | "active"
-  | "stopped"
-  | "error"
-  | "unavailable";
+  "starting" | "active" | "stopped" | "error" | "unavailable";
 
 /** Native listener state, refreshed at runtime and never persisted. */
 export interface PortForwardRuntime {

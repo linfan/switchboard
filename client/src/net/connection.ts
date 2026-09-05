@@ -187,7 +187,8 @@ export class ConnectionManager {
   constructor(deps: ConnectionDeps) {
     this.d = deps;
     this.wsFactory =
-      deps.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike);
+      deps.wsFactory ??
+      ((url) => new WebSocket(url) as unknown as WebSocketLike);
     this.now = deps.now ?? (() => Date.now());
     this.reconnectOpts = { ...DEFAULT_RECONNECT, ...deps.reconnect };
     this.heartbeatOpts = { ...DEFAULT_HEARTBEAT, ...deps.heartbeat };
@@ -431,7 +432,11 @@ export class ConnectionManager {
     const delay = capped + capped * jitter * Math.random();
     this.attempt += 1;
     const nextRetryAt = this.now() + delay;
-    this.setStatus("reconnecting", { error, nextRetryAt, attempt: this.attempt });
+    this.setStatus("reconnecting", {
+      error,
+      nextRetryAt,
+      attempt: this.attempt,
+    });
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.open();
@@ -449,7 +454,10 @@ export class ConnectionManager {
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
-    this.heartbeatTimer = setInterval(() => this.sendPing(), this.heartbeatOpts.intervalMs);
+    this.heartbeatTimer = setInterval(
+      () => this.sendPing(),
+      this.heartbeatOpts.intervalMs,
+    );
   }
 
   private sendPing(): void {

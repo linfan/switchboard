@@ -19,8 +19,7 @@ import { makeTauriWsFactory } from "./tauriSocket";
  */
 const bridge = vi.hoisted(() => ({
   handler: null as
-    | null
-    | ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>),
+    null | ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>),
 }));
 
 vi.mock("./tauri", () => ({
@@ -139,7 +138,11 @@ describe("outbound serialization", () => {
     // Fire-and-forget invokes would all three be on the bridge by now, and their
     // completion order would then be up to the scheduler.
     expect(sends).toHaveLength(1);
-    expect(sends[0].args).toMatchObject({ id: CONN_ID, text: "a", binaryB64: null });
+    expect(sends[0].args).toMatchObject({
+      id: CONN_ID,
+      text: "a",
+      binaryB64: null,
+    });
 
     sends[0].resolve();
     await settle();
@@ -169,7 +172,11 @@ describe("outbound serialization", () => {
     ws.send(new Uint8Array([0x10, 0x11]));
     await settle();
 
-    expect(sends[0].args).toMatchObject({ id: CONN_ID, text: null, binaryB64: "EBE=" });
+    expect(sends[0].args).toMatchObject({
+      id: CONN_ID,
+      text: null,
+      binaryB64: "EBE=",
+    });
   });
 
   it("drops sends issued after close()", async () => {

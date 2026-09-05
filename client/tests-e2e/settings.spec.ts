@@ -7,10 +7,8 @@ const open = async (page: import("@playwright/test").Page) => {
   return page.getByRole("dialog", { name: "Settings" });
 };
 
-const field = (
-  dialog: import("@playwright/test").Locator,
-  label: string,
-) => dialog.getByLabel(label, { exact: true });
+const field = (dialog: import("@playwright/test").Locator, label: string) =>
+  dialog.getByLabel(label, { exact: true });
 
 test("edits persist across a reload", async ({ page }) => {
   await page.goto("/");

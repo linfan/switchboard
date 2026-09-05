@@ -50,7 +50,13 @@ describe("recent tools", () => {
     const { addRecentTool } = useStore.getState();
     for (const c of ["a", "b", "c", "a", "d", "e", "f"]) addRecentTool("s1", c);
     // "a" moved to front on reuse; only the 5 most recent are kept.
-    expect(useStore.getState().recentTools.s1).toEqual(["f", "e", "d", "a", "c"]);
+    expect(useStore.getState().recentTools.s1).toEqual([
+      "f",
+      "e",
+      "d",
+      "a",
+      "c",
+    ]);
   });
 
   it("ignores blank commands and scopes per service", () => {
@@ -193,7 +199,9 @@ describe("setCursor", () => {
       },
     });
     st.setCursor(svc, "t1", 7);
-    expect(useStore.getState().conversations[convKey(svc, "t1")].cursor).toBe(7);
+    expect(useStore.getState().conversations[convKey(svc, "t1")].cursor).toBe(
+      7,
+    );
   });
 
   it("cursorsFor returns task->seq scoped to one service", () => {
@@ -233,7 +241,14 @@ describe("removeService", () => {
       type: "welcome",
       service: { name: "h", version: "1", tools: [] },
       tasks: [
-        { id: "t1", tool: "claude", title: "T1", status: { state: "running" }, created_at: 0, last_seq: 0 },
+        {
+          id: "t1",
+          tool: "claude",
+          title: "T1",
+          status: { state: "running" },
+          created_at: 0,
+          last_seq: 0,
+        },
       ],
     });
     st.setCursor("s1", "t1", 5);
@@ -256,7 +271,14 @@ describe("removeService", () => {
     st.addService({ id: "s2", name: "S2", url: "http://b", token: "t" });
     st.applyServerMsg("s2", {
       type: "task_created",
-      task: { id: "t2", tool: "claude", title: "T2", status: { state: "running" }, created_at: 0, last_seq: 0 },
+      task: {
+        id: "t2",
+        tool: "claude",
+        title: "T2",
+        status: { state: "running" },
+        created_at: 0,
+        last_seq: 0,
+      },
     });
     st.select(convKey("s2", "t2"));
 
@@ -311,7 +333,9 @@ describe("workspaces", () => {
 
   it("leaves tasks unmapped when no workspace is queued (ungrouped)", () => {
     seedTask("s1", "t1");
-    expect(useStore.getState().taskWorkspace[convKey("s1", "t1")]).toBeUndefined();
+    expect(
+      useStore.getState().taskWorkspace[convKey("s1", "t1")],
+    ).toBeUndefined();
   });
 
   it("a failed create clears the pending queue so it can't steal a later task", () => {
@@ -329,7 +353,9 @@ describe("workspaces", () => {
 
     // A later task (e.g. from another client) is not attributed to the workspace.
     seedTask("s1", "t9");
-    expect(useStore.getState().taskWorkspace[convKey("s1", "t9")]).toBeUndefined();
+    expect(
+      useStore.getState().taskWorkspace[convKey("s1", "t9")],
+    ).toBeUndefined();
   });
 
   it("removeWorkspace forgets its task mappings and titles but not the server task", () => {
@@ -606,13 +632,30 @@ describe("file transfers", () => {
     // A first tick can supply the total the start didn't know yet.
     useStore.getState().progressTransfer(1, 25, 100);
     expect(useStore.getState().transfers).toEqual([
-      { id: 1, kind: "download", workspaceId: "w1", name: "big.bin", done: 25, total: 100 },
-      { id: 2, kind: "upload", workspaceId: "w2", name: "up.bin", done: 0, total: 50 },
+      {
+        id: 1,
+        kind: "download",
+        workspaceId: "w1",
+        name: "big.bin",
+        done: 25,
+        total: 100,
+      },
+      {
+        id: 2,
+        kind: "upload",
+        workspaceId: "w2",
+        name: "up.bin",
+        done: 0,
+        total: 50,
+      },
     ]);
 
     // A later tick without a total keeps the known one.
     useStore.getState().progressTransfer(1, 60);
-    expect(useStore.getState().transfers[0]).toMatchObject({ done: 60, total: 100 });
+    expect(useStore.getState().transfers[0]).toMatchObject({
+      done: 60,
+      total: 100,
+    });
 
     useStore.getState().endTransfer(1);
     expect(useStore.getState().transfers.map((t) => t.id)).toEqual([2]);

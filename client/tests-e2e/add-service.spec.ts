@@ -10,7 +10,9 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/");
 });
 
-test("a wrong token is rejected and blocks the Add dialog", async ({ page }) => {
+test("a wrong token is rejected and blocks the Add dialog", async ({
+  page,
+}) => {
   await page.getByTitle("Add service").click();
   const dialog = page.getByRole("dialog", { name: "Add hosting service" });
   await expect(dialog).toBeVisible();

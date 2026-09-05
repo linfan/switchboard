@@ -98,7 +98,14 @@ export function Modal({
               type="submit"
               aria-hidden="true"
               tabIndex={-1}
-              style={{ position: "absolute", width: 1, height: 1, padding: 0, border: 0, opacity: 0 }}
+              style={{
+                position: "absolute",
+                width: 1,
+                height: 1,
+                padding: 0,
+                border: 0,
+                opacity: 0,
+              }}
             />
           </form>
         ) : (

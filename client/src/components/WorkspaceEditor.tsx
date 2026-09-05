@@ -75,7 +75,10 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
     const startX = e.clientX;
     const startWidth = panelWidth;
     const onMove = (ev: MouseEvent) => {
-      const next = Math.min(640, Math.max(160, startWidth + ev.clientX - startX));
+      const next = Math.min(
+        640,
+        Math.max(160, startWidth + ev.clientX - startX),
+      );
       setPanelWidth(next);
     };
     const onUp = () => {
@@ -172,7 +175,14 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
     return {
       onStart: ({ id, name, total }) => {
         started = id;
-        startTransfer({ id, kind, workspaceId: workspace.id, name, total, done: 0 });
+        startTransfer({
+          id,
+          kind,
+          workspaceId: workspace.id,
+          name,
+          total,
+          done: 0,
+        });
       },
       onProgress: progressTransfer,
       ended: () => started !== null && endTransfer(started),
@@ -317,7 +327,9 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
           onCloseToRight={(k) => closeTabsToRight(workspace.id, k)}
           onCloseAll={() => closeAllTabs(workspace.id)}
           onDiffLayout={(layout) => patch(workspace.id, { diffLayout: layout })}
-          onOpenInEditor={(path) => openTab(workspace.id, { path, mode: "edit" })}
+          onOpenInEditor={(path) =>
+            openTab(workspace.id, { path, mode: "edit" })
+          }
         />
       </div>
 
@@ -461,7 +473,11 @@ async function scanMatches(
   const overBudget = () =>
     cancelled() || visited >= bounds.scanMaxDirs || Date.now() > deadline;
 
-  async function walk(dir: string, chain: string[], depth: number): Promise<void> {
+  async function walk(
+    dir: string,
+    chain: string[],
+    depth: number,
+  ): Promise<void> {
     if (overBudget()) return;
     visited++;
     let listing: FsListing;
@@ -478,7 +494,12 @@ async function scanMatches(
       if (matches) for (const p of here) dirs.add(p);
       // Descend into non-matching folders to find deeper matches, but stop
       // queueing work once we hit a bound so we don't build up a huge backlog.
-      if (e.is_dir && !matches && depth < bounds.scanMaxDepth && !overBudget()) {
+      if (
+        e.is_dir &&
+        !matches &&
+        depth < bounds.scanMaxDepth &&
+        !overBudget()
+      ) {
         childWalks.push(walk(e.path, here, depth + 1));
       }
     }
@@ -618,12 +639,19 @@ function FileTree({
     const del: MenuItem = {
       label: entry.is_dir ? "Delete folder" : "Delete",
       danger: true,
-      confirm: entry.is_dir ? "Click again to delete folder" : "Click again to delete",
+      confirm: entry.is_dir
+        ? "Click again to delete folder"
+        : "Click again to delete",
       onClick: () => onDelete(entry),
     };
     return entry.is_dir
       ? [newFile, newFolder, rename, upload, copyPath, del]
-      : [rename, { label: "Download", onClick: () => onDownload(entry) }, copyPath, del];
+      : [
+          rename,
+          { label: "Download", onClick: () => onDownload(entry) },
+          copyPath,
+          del,
+        ];
   };
 
   return (
@@ -661,7 +689,13 @@ function FileTree({
           </button>
         )}
       </div>
-      <DirNode service={service} path={root} depth={0} isRoot actions={actions} />
+      <DirNode
+        service={service}
+        path={root}
+        depth={0}
+        isRoot
+        actions={actions}
+      />
       {ctxMenu && (
         <ContextMenu
           x={ctxMenu.x}
@@ -748,7 +782,10 @@ function DirNode({
             editing={actions.renamingPath === path}
             onEditingChange={(on) => actions.setRenamingPath(on ? path : null)}
             onCommit={(newName) =>
-              actions.onRename({ name: name ?? "", path, is_dir: true }, newName)
+              actions.onRename(
+                { name: name ?? "", path, is_dir: true },
+                newName,
+              )
             }
           />
         </div>
@@ -889,9 +926,13 @@ function GitHistory({
           className={`weditor__row weditor__commit ${
             selected === c.hash ? "is-active" : ""
           }`}
-          title={`${c.subject}${c.body ? `
+          title={`${c.subject}${
+            c.body
+              ? `
 
-${c.body}` : ""}
+${c.body}`
+              : ""
+          }
 
 ${c.short} · ${c.author} · ${c.date}`}
           onClick={() => onSelect(c.hash)}
@@ -1036,7 +1077,9 @@ function ChangeTree({
   const indent = { paddingLeft: `${depth * 12 + 8}px` };
   const dirNames = [...node.dirs.keys()].sort((a, b) => a.localeCompare(b));
   const files = [...node.files].sort((a, b) =>
-    (a.path.split("/").pop() ?? "").localeCompare(b.path.split("/").pop() ?? ""),
+    (a.path.split("/").pop() ?? "").localeCompare(
+      b.path.split("/").pop() ?? "",
+    ),
   );
 
   return (
@@ -1052,7 +1095,9 @@ function ChangeTree({
               title={name}
               onClick={() => onToggle(dirPath)}
             >
-              <span className={`weditor__twist ${open ? "is-open" : ""}`}>▸</span>
+              <span className={`weditor__twist ${open ? "is-open" : ""}`}>
+                ▸
+              </span>
               <span className="weditor__label">{name}</span>
             </button>
             {open && (
@@ -1080,7 +1125,9 @@ function ChangeTree({
           title={c.path}
           onClick={() => onOpenDiff(c.path, commit)}
         >
-          <span className={`weditor__status weditor__status--${c.status[0] ?? ""}`}>
+          <span
+            className={`weditor__status weditor__status--${c.status[0] ?? ""}`}
+          >
             {c.status}
           </span>
           <span className="weditor__label">{c.path.split("/").pop()}</span>

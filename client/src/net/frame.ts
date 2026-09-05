@@ -57,7 +57,12 @@ export function decode(bytes: Uint8Array): Frame {
     const taskId = bytesToUuid(bytes.subarray(1, 1 + UUID_LEN));
     const seq = readU64BE(bytes, 1 + UUID_LEN);
     const data = bytes.slice(1 + UUID_LEN + SEQ_LEN);
-    return { kind: kind === KIND_OUTPUT ? "output" : "snapshot", taskId, seq, data };
+    return {
+      kind: kind === KIND_OUTPUT ? "output" : "snapshot",
+      taskId,
+      seq,
+      data,
+    };
   }
   if (kind === KIND_INPUT) {
     if (bytes.length < 1 + UUID_LEN) {
@@ -99,7 +104,9 @@ function uuidToBytes(uuid: string): Uint8Array {
 }
 
 function bytesToUuid(bytes: Uint8Array): string {
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(
+    "",
+  );
   return (
     `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-` +
     `${hex.slice(16, 20)}-${hex.slice(20)}`

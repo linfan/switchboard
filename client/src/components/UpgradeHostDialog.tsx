@@ -59,7 +59,9 @@ export function UpgradeHostDialog({
         if (Date.now() > deadline) {
           // The host may still be restarting; the sidebar's auto-reconnect will
           // recover it. Report a soft failure rather than blocking the dialog.
-          setError("Server did not come back in time — it may still be restarting.");
+          setError(
+            "Server did not come back in time — it may still be restarting.",
+          );
           setPhase("error");
           return;
         }
@@ -109,7 +111,12 @@ export function UpgradeHostDialog({
       dismissOnScrimClick={false}
       footer={
         <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>
+          <button
+            type="button"
+            className="btn"
+            onClick={onClose}
+            disabled={busy}
+          >
             {phase === "done" ? "Close" : "Cancel"}
           </button>
           {phase !== "done" && (
@@ -183,8 +190,8 @@ export function UpgradeHostDialog({
           )}
           {source === "upload" && (
             <p className="hint">
-              Pick a locally-built <code>switchboard-server</code> binary for this
-              host's OS and architecture. It's validated before anything is
+              Pick a locally-built <code>switchboard-server</code> binary for
+              this host's OS and architecture. It's validated before anything is
               replaced.
             </p>
           )}

@@ -125,9 +125,7 @@ export default function App() {
     <div
       className={`app ${collapsed ? "app--collapsed" : ""}`}
       style={
-        collapsed
-          ? undefined
-          : { gridTemplateColumns: `${sidebarWidth}px 1fr` }
+        collapsed ? undefined : { gridTemplateColumns: `${sidebarWidth}px 1fr` }
       }
     >
       {collapsed ? (

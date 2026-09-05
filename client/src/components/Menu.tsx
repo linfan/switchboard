@@ -24,8 +24,7 @@ export interface MenuItem {
 
 /** Where a popup anchors: to a trigger's edge, or at raw cursor coordinates. */
 type Anchor =
-  | { kind: "trigger"; rect: DOMRect }
-  | { kind: "point"; x: number; y: number };
+  { kind: "trigger"; rect: DOMRect } | { kind: "point"; x: number; y: number };
 
 const MENU_MIN_WIDTH = 168;
 const VIEWPORT_MARGIN = 8;
@@ -94,7 +93,11 @@ export function ContextMenu({
   onClose: () => void;
 }) {
   return (
-    <MenuPopup items={items} anchor={{ kind: "point", x, y }} onClose={onClose} />
+    <MenuPopup
+      items={items}
+      anchor={{ kind: "point", x, y }}
+      onClose={onClose}
+    />
   );
 }
 

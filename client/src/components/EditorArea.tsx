@@ -232,7 +232,11 @@ export function EditorArea({
     setError(null);
     setOversizeNote(null);
 
-    const attach = (dom: HTMLElement, measure?: () => void, focus?: EditorView) => {
+    const attach = (
+      dom: HTMLElement,
+      measure?: () => void,
+      focus?: EditorView,
+    ) => {
       host.appendChild(dom);
       attachedDom = dom;
       requestAnimationFrame(() => {
@@ -282,8 +286,14 @@ export function EditorArea({
 
       if (layout === "split") {
         const mv = new MergeView({
-          a: { doc: oldText, extensions: [basicSetup, oneDark, lang, ...readOnly] },
-          b: { doc: newText, extensions: [basicSetup, oneDark, lang, ...readOnly] },
+          a: {
+            doc: oldText,
+            extensions: [basicSetup, oneDark, lang, ...readOnly],
+          },
+          b: {
+            doc: newText,
+            extensions: [basicSetup, oneDark, lang, ...readOnly],
+          },
           gutter: true,
           highlightChanges: true,
           collapseUnchanged,
@@ -324,7 +334,10 @@ export function EditorArea({
       };
     };
 
-    const registerDiff = (built: BuiltDiff, diff: { oldText: string; newText: string }) => {
+    const registerDiff = (
+      built: BuiltDiff,
+      diff: { oldText: string; newText: string },
+    ) => {
       editors.setDiffView(workspaceId, key, {
         dom: built.dom,
         destroy: built.destroy,
@@ -388,8 +401,7 @@ export function EditorArea({
           // this effect's deps avoids tearing down live CodeMirror views when an
           // unrelated setting changes. Raising the cap therefore applies to the
           // next open of an oversize tab, not retroactively to this one.
-          const cap =
-            useStore.getState().settings[PREVIEW_CAP_KEY[media.kind]];
+          const cap = useStore.getState().settings[PREVIEW_CAP_KEY[media.kind]];
           if (st.size > cap) {
             setOversizeNote(
               `This ${media.kind} is ${formatBytes(st.size)} — too large to preview (limit ${formatBytes(cap)}).`,
@@ -490,7 +502,11 @@ export function EditorArea({
         const entry = editors.getEntry(workspaceId, key);
         // Tab closed / workspace gone / save started meanwhile: drop the result.
         if (!entry?.editor || entry.saving) return;
-        if (st.exists && entry.mtime !== undefined && st.mtime !== entry.mtime) {
+        if (
+          st.exists &&
+          entry.mtime !== undefined &&
+          st.mtime !== entry.mtime
+        ) {
           editors.flagDiskChange(workspaceId, key, st.mtime);
           markChanged(key, true);
         }
@@ -692,9 +708,7 @@ export function EditorArea({
           <button
             className="btn weditor__openeditor"
             title="Open this file for editing in a new tab"
-            onClick={() =>
-              onOpenInEditor(`${cwd.replace(/\/+$/, "")}/${path}`)
-            }
+            onClick={() => onOpenInEditor(`${cwd.replace(/\/+$/, "")}/${path}`)}
           >
             Open in editor
           </button>

@@ -20,7 +20,8 @@ export function logToBackend(level: Level, message: string): void {
 }
 
 function format(value: unknown): string {
-  if (value instanceof Error) return value.stack ?? `${value.name}: ${value.message}`;
+  if (value instanceof Error)
+    return value.stack ?? `${value.name}: ${value.message}`;
   if (typeof value === "string") return value;
   try {
     return JSON.stringify(value);

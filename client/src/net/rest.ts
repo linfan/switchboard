@@ -132,7 +132,13 @@ async function apiRequest<T>(
   const bodyBytes = payload === null ? null : new TextEncoder().encode(payload);
   const headers = await signHeaders(service, method, path, bodyBytes);
   if (isTauri) {
-    const res = await bridge(method, url, headers, payload, service.certFingerprint);
+    const res = await bridge(
+      method,
+      url,
+      headers,
+      payload,
+      service.certFingerprint,
+    );
     // 204 (e.g. a successful save) has no body for `interpret` to parse.
     if (res.status === 204) return undefined as T;
     return interpret<T>(res);
@@ -202,7 +208,9 @@ export async function probeService(
       );
     } catch (e) {
       if (e === TIMEOUT) throw timeoutErr();
-      throw new Error("Could not reach the server — check the address.");
+      throw new Error("Could not reach the server — check the address.", {
+        cause: e,
+      });
     }
     const fp = health.cert_fp ?? undefined; // absent on plain HTTP
     const probed: ServiceRef = { ...service, certFingerprint: fp };
@@ -216,7 +224,9 @@ export async function probeService(
       );
     } catch (e) {
       if (e === TIMEOUT) throw timeoutErr();
-      throw new Error("Could not reach the server — check the address.");
+      throw new Error("Could not reach the server — check the address.", {
+        cause: e,
+      });
     }
     return { info: interpret<ServiceInfo>(res), certFingerprint: fp };
   }
@@ -231,9 +241,11 @@ export async function probeService(
       headers,
       signal: controller.signal,
     });
-  } catch {
+  } catch (e) {
     if (controller.signal.aborted) throw timeoutErr();
-    throw new Error("Could not reach the server — check the address.");
+    throw new Error("Could not reach the server — check the address.", {
+      cause: e,
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -261,10 +273,15 @@ export function upgradeFromUrl(
   url: string,
   sha256Hex?: string,
 ): Promise<{ ok: boolean }> {
-  return apiRequest<{ ok: boolean }>(service, "POST", `/api/admin/upgrade/url`, {
-    url,
-    ...(sha256Hex ? { sha256: sha256Hex } : {}),
-  });
+  return apiRequest<{ ok: boolean }>(
+    service,
+    "POST",
+    `/api/admin/upgrade/url`,
+    {
+      url,
+      ...(sha256Hex ? { sha256: sha256Hex } : {}),
+    },
+  );
 }
 
 /** List a directory on the hosting machine (defaults to the server's home). */
@@ -373,10 +390,7 @@ export function gitBranches(
 }
 
 /** List commits on the current branch of a workspace folder. */
-export function gitLog(
-  service: ServiceRef,
-  cwd: string,
-): Promise<GitCommit[]> {
+export function gitLog(service: ServiceRef, cwd: string): Promise<GitCommit[]> {
   return apiRequest<GitCommit[]>(
     service,
     "GET",

@@ -4,9 +4,18 @@ import { DEFAULT_MAX_PREVIEW_BYTES, formatBytes, mediaForPath } from "./media";
 
 describe("mediaForPath", () => {
   it("classifies images, audio, and video", () => {
-    expect(mediaForPath("/tmp/shot.png")).toEqual({ kind: "image", ext: "png" });
-    expect(mediaForPath("/tmp/take.mp3")).toEqual({ kind: "audio", ext: "mp3" });
-    expect(mediaForPath("/tmp/clip.mp4")).toEqual({ kind: "video", ext: "mp4" });
+    expect(mediaForPath("/tmp/shot.png")).toEqual({
+      kind: "image",
+      ext: "png",
+    });
+    expect(mediaForPath("/tmp/take.mp3")).toEqual({
+      kind: "audio",
+      ext: "mp3",
+    });
+    expect(mediaForPath("/tmp/clip.mp4")).toEqual({
+      kind: "video",
+      ext: "mp4",
+    });
   });
 
   it("ignores case and leading directories", () => {

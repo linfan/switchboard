@@ -1,8 +1,18 @@
 import type { ServerMsg } from "../protocol";
 import type { AppState } from "./store";
-import { convKey, type Conversation, type ServiceInfo, type ServiceRuntime, type TaskInfo, type TaskStatus } from "./types";
+import {
+  convKey,
+  type Conversation,
+  type ServiceInfo,
+  type ServiceRuntime,
+  type TaskInfo,
+  type TaskStatus,
+} from "./types";
 
-export const DEFAULT_RUNTIME: ServiceRuntime = { status: "offline", attempt: 0 };
+export const DEFAULT_RUNTIME: ServiceRuntime = {
+  status: "offline",
+  attempt: 0,
+};
 
 function ensureConv(
   s: AppState,

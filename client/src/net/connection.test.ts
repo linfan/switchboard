@@ -50,7 +50,9 @@ class FakeSocket implements WebSocketLike {
     else if (data instanceof Uint8Array) this.sentBinary.push(data);
     else if (ArrayBuffer.isView(data)) {
       const v = data as ArrayBufferView;
-      this.sentBinary.push(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+      this.sentBinary.push(
+        new Uint8Array(v.buffer, v.byteOffset, v.byteLength),
+      );
     } else this.sentBinary.push(new Uint8Array(data as ArrayBufferLike));
   }
   close(): void {
@@ -65,16 +67,21 @@ class FakeSocket implements WebSocketLike {
     this.onmessage?.({ data: JSON.stringify(obj) });
   }
   emitBinary(bytes: Uint8Array): void {
-    this.onmessage?.({ data: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) });
+    this.onmessage?.({
+      data: bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ),
+    });
   }
   emitClose(): void {
     this.readyState = 3;
     this.onclose?.();
   }
-  parsed(): any[] {
-    return this.sent.map((s) => JSON.parse(s));
+  parsed(): Record<string, unknown>[] {
+    return this.sent.map((s) => JSON.parse(s) as Record<string, unknown>);
   }
-  find(type: string): any {
+  find(type: string): Record<string, unknown> | undefined {
     return this.parsed().find((m) => m.type === type);
   }
   count(type: string): number {

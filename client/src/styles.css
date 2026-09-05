@@ -5,7 +5,8 @@
   --fg: #e6e6e6;
   --fg-dim: #9a9ba0;
   --accent: #4c8bf5;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
 * {
@@ -1257,7 +1258,11 @@ audio.weditor__media {
 
 .service-panel {
   background:
-    radial-gradient(circle at 92% 8%, rgba(76, 139, 245, 0.11), transparent 28rem),
+    radial-gradient(
+      circle at 92% 8%,
+      rgba(76, 139, 245, 0.11),
+      transparent 28rem
+    ),
     var(--bg);
 }
 .service-panel__header {
@@ -1535,14 +1540,18 @@ audio.weditor__media {
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--bg);
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
 }
 .toggle__track > span {
   width: 12px;
   height: 12px;
   border-radius: 50%;
   background: var(--fg-dim);
-  transition: transform 0.15s ease, background 0.15s ease;
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease;
 }
 .toggle input:checked + .toggle__track {
   border-color: rgba(63, 185, 80, 0.75);

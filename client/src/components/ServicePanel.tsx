@@ -13,14 +13,35 @@ import { PortForwardDialog } from "./PortForwardDialog";
 
 function ForwardIcon() {
   return (
-    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-      <path d="M3.25 6.25h7.5M11 3.5l2.75 2.75L11 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M16.75 13.75h-7.5M9 11l-2.75 2.75L9 16.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 20 20"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M3.25 6.25h7.5M11 3.5l2.75 2.75L11 9"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M16.75 13.75h-7.5M9 11l-2.75 2.75L9 16.5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
 
-function statusText(runtime: PortForwardRuntime | undefined, enabled: boolean): string {
+function statusText(
+  runtime: PortForwardRuntime | undefined,
+  enabled: boolean,
+): string {
   if (!runtime) return enabled ? "Starting" : "Stopped";
   switch (runtime.status) {
     case "active":
@@ -55,14 +76,21 @@ function ForwardRow({
       <div className="forward-row__route">
         <div className="forward-row__ports">
           <code>127.0.0.1:{forward.localPort}</code>
-          <span className="forward-row__arrow" aria-hidden="true">→</span>
+          <span className="forward-row__arrow" aria-hidden="true">
+            →
+          </span>
           <code>127.0.0.1:{forward.remotePort}</code>
         </div>
-        <span className="forward-row__scope">local listener → remote loopback</span>
+        <span className="forward-row__scope">
+          local listener → remote loopback
+        </span>
       </div>
 
       <div className="forward-row__runtime">
-        <span className={`forward-status forward-status--${status}`} title={runtime?.error}>
+        <span
+          className={`forward-status forward-status--${status}`}
+          title={runtime?.error}
+        >
           <span className="forward-status__dot" />
           {statusText(runtime, forward.enabled)}
         </span>
@@ -74,7 +102,10 @@ function ForwardRow({
       </div>
 
       <div className="forward-row__actions">
-        <label className="toggle" title={forward.enabled ? "Stop forward" : "Start forward"}>
+        <label
+          className="toggle"
+          title={forward.enabled ? "Stop forward" : "Start forward"}
+        >
           <input
             type="checkbox"
             checked={forward.enabled}
@@ -83,9 +114,13 @@ function ForwardRow({
               updatePortForward(forward.id, { enabled: event.target.checked })
             }
           />
-          <span className="toggle__track" aria-hidden="true"><span /></span>
+          <span className="toggle__track" aria-hidden="true">
+            <span />
+          </span>
         </label>
-        <button type="button" className="btn" onClick={onEdit}>Edit</button>
+        <button type="button" className="btn" onClick={onEdit}>
+          Edit
+        </button>
         <ConfirmButton
           className="btn btn--danger"
           title="Remove forward"
@@ -122,11 +157,15 @@ export function ServicePanel({ service }: { service: Service }) {
   const rt = useStore((s) => s.runtime[service.id]);
   const portForwards = useStore((s) => s.portForwards);
   const runtimes = useStore((s) => s.portForwardRuntime);
-  const [editing, setEditing] = useState<PortForward | null | undefined>(undefined);
+  const [editing, setEditing] = useState<PortForward | null | undefined>(
+    undefined,
+  );
   const status = rt?.status ?? "offline";
   const now = useNow(status === "reconnecting");
 
-  const forwards = portForwards.filter((forward) => forward.serviceId === service.id);
+  const forwards = portForwards.filter(
+    (forward) => forward.serviceId === service.id,
+  );
   const listening = forwards.filter(
     (forward) => runtimes[forward.id]?.status === "active",
   ).length;
@@ -148,7 +187,11 @@ export function ServicePanel({ service }: { service: Service }) {
           <span className="service-panel__url">{service.url}</span>
         </div>
         <span className="panel__spacer" />
-        <button type="button" className="btn btn--primary" onClick={() => setEditing(null)}>
+        <button
+          type="button"
+          className="btn btn--primary"
+          onClick={() => setEditing(null)}
+        >
           Add forward
         </button>
       </header>
@@ -158,7 +201,9 @@ export function ServicePanel({ service }: { service: Service }) {
           <dl>
             <div className="service-panel__row">
               <dt>Connection</dt>
-              <dd className={`service-panel__conn service-panel__conn--${status}`}>
+              <dd
+                className={`service-panel__conn service-panel__conn--${status}`}
+              >
                 <span className={`dot dot--${status}`} />
                 {CONNECTION_LABEL[status]}
               </dd>
@@ -206,18 +251,31 @@ export function ServicePanel({ service }: { service: Service }) {
         <div className="service-panel__summary">
           <div>
             <span className="service-panel__eyebrow">PORT FORWARDING</span>
-            <p>Expose a port on this computer to a loopback-only port on {service.name}.</p>
+            <p>
+              Expose a port on this computer to a loopback-only port on{" "}
+              {service.name}.
+            </p>
           </div>
           <dl className="service-panel__metrics">
-            <div><dt>Rules</dt><dd>{forwards.length}</dd></div>
-            <div><dt>Listening</dt><dd>{listening}</dd></div>
-            <div><dt>Live links</dt><dd>{connections}</dd></div>
+            <div>
+              <dt>Rules</dt>
+              <dd>{forwards.length}</dd>
+            </div>
+            <div>
+              <dt>Listening</dt>
+              <dd>{listening}</dd>
+            </div>
+            <div>
+              <dt>Live links</dt>
+              <dd>{connections}</dd>
+            </div>
           </dl>
         </div>
 
         {!isTauri && (
           <p className="service-panel__notice">
-            Forwarding is available in the desktop app. Rules can still be configured here.
+            Forwarding is available in the desktop app. Rules can still be
+            configured here.
           </p>
         )}
 
@@ -226,9 +284,16 @@ export function ServicePanel({ service }: { service: Service }) {
             <ForwardIcon />
             <div>
               <strong>No port forwards</strong>
-              <p>Map a local loopback port to a service port without exposing either endpoint externally.</p>
+              <p>
+                Map a local loopback port to a service port without exposing
+                either endpoint externally.
+              </p>
             </div>
-            <button type="button" className="btn btn--primary" onClick={() => setEditing(null)}>
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => setEditing(null)}
+            >
               Add first forward
             </button>
           </div>

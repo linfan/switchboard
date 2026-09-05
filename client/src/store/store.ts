@@ -126,8 +126,13 @@ export interface AppState {
   setTaskTitle: (serviceId: string, taskId: string, title: string) => void;
 
   // --- port forwarding -----------------------------------------------------
-  addPortForward: (forward: Omit<PortForward, "id"> & { id?: string }) => string;
-  updatePortForward: (id: string, patch: Partial<Omit<PortForward, "id">>) => void;
+  addPortForward: (
+    forward: Omit<PortForward, "id"> & { id?: string },
+  ) => string;
+  updatePortForward: (
+    id: string,
+    patch: Partial<Omit<PortForward, "id">>,
+  ) => void;
   removePortForward: (id: string) => void;
   setPortForwardRuntime: (id: string, runtime: PortForwardRuntime) => void;
 
@@ -252,11 +257,16 @@ export const useStore = create<AppState>()(
           );
           const workspaces = s.workspaces.filter((w) => w.serviceId !== id);
           const removedForwardIds = new Set(
-            s.portForwards.filter((forward) => forward.serviceId === id).map((forward) => forward.id),
+            s.portForwards
+              .filter((forward) => forward.serviceId === id)
+              .map((forward) => forward.id),
           );
-          const portForwards = s.portForwards.filter((forward) => forward.serviceId !== id);
+          const portForwards = s.portForwards.filter(
+            (forward) => forward.serviceId !== id,
+          );
           const portForwardRuntime = { ...s.portForwardRuntime };
-          for (const forwardId of removedForwardIds) delete portForwardRuntime[forwardId];
+          for (const forwardId of removedForwardIds)
+            delete portForwardRuntime[forwardId];
           const runtime = { ...s.runtime };
           delete runtime[id];
           const prefix = `${id}::`;
@@ -283,9 +293,7 @@ export const useStore = create<AppState>()(
               ? undefined
               : s.selectedWorkspaceId;
           const selectedServiceId =
-            s.selectedServiceId === id
-              ? undefined
-              : s.selectedServiceId;
+            s.selectedServiceId === id ? undefined : s.selectedServiceId;
           return {
             services,
             workspaces,
@@ -378,7 +386,10 @@ export const useStore = create<AppState>()(
         set((s) => ({
           pendingWorkspace: {
             ...s.pendingWorkspace,
-            [serviceId]: [...(s.pendingWorkspace[serviceId] ?? []), workspaceId],
+            [serviceId]: [
+              ...(s.pendingWorkspace[serviceId] ?? []),
+              workspaceId,
+            ],
           },
         })),
 
@@ -423,8 +434,7 @@ export const useStore = create<AppState>()(
           portForwardRuntime: { ...s.portForwardRuntime, [id]: runtime },
         })),
 
-      setSidebarCollapsed: (collapsed) =>
-        set({ sidebarCollapsed: collapsed }),
+      setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
 
       toggleSidebar: () =>
         set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),

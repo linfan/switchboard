@@ -57,7 +57,11 @@ export function PortForwardDialog({
     !duplicate;
 
   const submit = () => {
-    if (!valid || parsedLocalPort === undefined || parsedRemotePort === undefined) {
+    if (
+      !valid ||
+      parsedLocalPort === undefined ||
+      parsedRemotePort === undefined
+    ) {
       return;
     }
     const patch = {
@@ -82,7 +86,12 @@ export function PortForwardDialog({
           <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button type="button" className="btn btn--primary" disabled={!valid} onClick={submit}>
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={!valid}
+            onClick={submit}
+          >
             {forward ? "Save" : "Add forward"}
           </button>
         </>
@@ -105,7 +114,9 @@ export function PortForwardDialog({
             min="1"
             max="65535"
             placeholder="5433"
-            aria-invalid={localPort.trim() !== "" && parsedLocalPort === undefined}
+            aria-invalid={
+              localPort.trim() !== "" && parsedLocalPort === undefined
+            }
             onChange={(event) => setLocalPort(event.target.value)}
             autoFocus
           />
@@ -123,7 +134,9 @@ export function PortForwardDialog({
             min="1"
             max="65535"
             placeholder="5432"
-            aria-invalid={remotePort.trim() !== "" && parsedRemotePort === undefined}
+            aria-invalid={
+              remotePort.trim() !== "" && parsedRemotePort === undefined
+            }
             onChange={(event) => setRemotePort(event.target.value)}
           />
         </div>

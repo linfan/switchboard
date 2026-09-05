@@ -70,7 +70,12 @@ describe("binary frame codec", () => {
 
   it("preserves seq bit-exactly across the 32-bit boundary", () => {
     const seq = 0xdeadbeef; // > 2^31, exercises the unsigned high bit of the low word
-    const f: Frame = { kind: "output", taskId: TID, seq, data: new Uint8Array() };
+    const f: Frame = {
+      kind: "output",
+      taskId: TID,
+      seq,
+      data: new Uint8Array(),
+    };
     expect((roundTrip(f) as { seq: number }).seq).toBe(seq);
   });
 
@@ -83,7 +88,11 @@ describe("binary frame codec", () => {
   });
 
   it("rejects truncated headers", () => {
-    expect(() => decode(new Uint8Array([KIND_OUTPUT, 0, 0, 0]))).toThrow(FrameError);
-    expect(() => decode(new Uint8Array([KIND_INPUT, 0, 0]))).toThrow(FrameError);
+    expect(() => decode(new Uint8Array([KIND_OUTPUT, 0, 0, 0]))).toThrow(
+      FrameError,
+    );
+    expect(() => decode(new Uint8Array([KIND_INPUT, 0, 0]))).toThrow(
+      FrameError,
+    );
   });
 });

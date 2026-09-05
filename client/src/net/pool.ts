@@ -48,8 +48,7 @@ function ensureClientId(): string {
     clientId = existing;
     return clientId;
   }
-  clientId =
-    globalThis.crypto?.randomUUID?.() ?? `client-${Date.now()}`;
+  clientId = globalThis.crypto?.randomUUID?.() ?? `client-${Date.now()}`;
   globalThis.localStorage?.setItem(KEY, clientId);
   return clientId;
 }
@@ -127,7 +126,9 @@ export class ConnectionPool {
           handshake: { timeoutMs: settings.handshakeTimeoutMs },
           // In the desktop app, route the socket through Rust so it can pin the
           // server's leaf cert (which the webview would reject if self-signed).
-          wsFactory: isTauri ? makeTauriWsFactory(svc.certFingerprint) : undefined,
+          wsFactory: isTauri
+            ? makeTauriWsFactory(svc.certFingerprint)
+            : undefined,
           getCursors: () => {
             // Land any buffered advances before the Hello reads cursors, so a
             // reconnect never asks the server to replay chunks we already have.
@@ -145,7 +146,10 @@ export class ConnectionPool {
               status,
               lastError: meta?.error,
               nextRetryAt: meta?.nextRetryAt,
-              attempt: meta?.attempt ?? useStore.getState().runtime[svc.id]?.attempt ?? 0,
+              attempt:
+                meta?.attempt ??
+                useStore.getState().runtime[svc.id]?.attempt ??
+                0,
             }),
         });
         this.managers.set(svc.id, mgr);
@@ -272,8 +276,18 @@ export class ConnectionPool {
   }
 
   /** Report a terminal geometry change so the server PTY resizes. */
-  sendResize(serviceId: string, taskId: string, cols: number, rows: number): boolean {
-    return this.send(serviceId, { type: "resize", task_id: taskId, cols, rows });
+  sendResize(
+    serviceId: string,
+    taskId: string,
+    cols: number,
+    rows: number,
+  ): boolean {
+    return this.send(serviceId, {
+      type: "resize",
+      task_id: taskId,
+      cols,
+      rows,
+    });
   }
 
   terminateTask(serviceId: string, taskId: string): boolean {

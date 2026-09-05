@@ -236,8 +236,8 @@ export function CreateWorktreeDialog({
       )}
 
       <p className="hint hint--muted">
-        Created at ~/.switchboard/worktree/{workspace.name}/
-        {name || "<name>"} on the host.
+        Created at ~/.switchboard/worktree/{workspace.name}/{name || "<name>"}{" "}
+        on the host.
       </p>
 
       {error && <p className="hint hint--error">{error}</p>}

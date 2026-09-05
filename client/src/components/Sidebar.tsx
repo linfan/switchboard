@@ -191,7 +191,10 @@ function ServiceGroup({ service }: { service: Service }) {
               onClick: () => setAddingWorkspace(true),
             },
             { label: "Edit service", onClick: () => setEditing(true) },
-            { label: "Reconnect now", onClick: () => pool.reconnect(service.id) },
+            {
+              label: "Reconnect now",
+              onClick: () => pool.reconnect(service.id),
+            },
             {
               label: "Upgrade host…",
               disabled: status !== "online",
@@ -235,7 +238,10 @@ function ServiceGroup({ service }: { service: Service }) {
                 />
               ))}
               {ungrouped.length > 0 && (
-                <UngroupedGroup serviceId={service.id} conversations={ungrouped} />
+                <UngroupedGroup
+                  serviceId={service.id}
+                  conversations={ungrouped}
+                />
               )}
             </>
           )}

@@ -1,9 +1,5 @@
 import { useStore } from "../store/store";
-import type {
-  PortForward,
-  PortForwardRuntime,
-  Service,
-} from "../store/types";
+import type { PortForward, PortForwardRuntime, Service } from "../store/types";
 import { invoke, isTauri } from "./tauri";
 
 const POLL_MS = 2000;
@@ -146,12 +142,21 @@ export class PortForwardCoordinator {
       return;
     }
 
-    const servicesById = new Map(services.map((service) => [service.id, service]));
-    const desired = new Map<string, { forward: PortForward; service: Service; key: string }>();
+    const servicesById = new Map(
+      services.map((service) => [service.id, service]),
+    );
+    const desired = new Map<
+      string,
+      { forward: PortForward; service: Service; key: string }
+    >();
     for (const forward of portForwards) {
       const service = servicesById.get(forward.serviceId);
       if (forward.enabled && service) {
-        desired.set(forward.id, { forward, service, key: configKey(forward, service) });
+        desired.set(forward.id, {
+          forward,
+          service,
+          key: configKey(forward, service),
+        });
       } else {
         useStore.getState().setPortForwardRuntime(forward.id, {
           status: "stopped",

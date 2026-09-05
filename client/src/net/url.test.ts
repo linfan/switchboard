@@ -4,9 +4,9 @@ import { buildServiceUrl, DEFAULT_PORT, parseServiceUrl } from "./url";
 
 describe("buildServiceUrl", () => {
   it("combines protocol, host, and port", () => {
-    expect(buildServiceUrl({ protocol: "https", host: "host", port: "8787" })).toBe(
-      "https://host:8787",
-    );
+    expect(
+      buildServiceUrl({ protocol: "https", host: "host", port: "8787" }),
+    ).toBe("https://host:8787");
   });
   it("defaults the port when blank", () => {
     expect(

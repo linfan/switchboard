@@ -80,7 +80,10 @@ const MB = 1024 * 1024;
  * the app (a zero-length heartbeat, an unbounded scan) can never be persisted —
  * including by hand-editing the store file.
  */
-export const SETTING_BOUNDS: Record<keyof Settings, { min: number; max: number }> = {
+export const SETTING_BOUNDS: Record<
+  keyof Settings,
+  { min: number; max: number }
+> = {
   previewMaxImageBytes: { min: MB, max: 2048 * MB },
   previewMaxAudioBytes: { min: MB, max: 2048 * MB },
   previewMaxVideoBytes: { min: MB, max: 2048 * MB },

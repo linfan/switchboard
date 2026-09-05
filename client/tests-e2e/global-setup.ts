@@ -16,7 +16,10 @@ const FAKE_AGENT_DIR = join(ROOT, "e2e", "fake-agent");
 export const STATE_FILE = join(HERE, ".server.json");
 
 export default async function globalSetup() {
-  execSync("cargo build -p switchboard-server", { cwd: ROOT, stdio: "inherit" });
+  execSync("cargo build -p switchboard-server", {
+    cwd: ROOT,
+    stdio: "inherit",
+  });
 
   const dbDir = mkdtempSync(join(tmpdir(), "switchboard-pw-"));
   const child = spawn(BIN, [], {

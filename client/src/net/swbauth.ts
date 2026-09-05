@@ -87,7 +87,9 @@ async function hmac(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
     false,
     ["sign"],
   );
-  return new Uint8Array(await crypto.subtle.sign("HMAC", k, data as BufferSource));
+  return new Uint8Array(
+    await crypto.subtle.sign("HMAC", k, data as BufferSource),
+  );
 }
 
 /** SHA-256 digest. */

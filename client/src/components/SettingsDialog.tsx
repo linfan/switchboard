@@ -43,19 +43,54 @@ const GROUPS: { legend: string; hint?: string; fields: Field[] }[] = [
     legend: "Connection",
     hint: "Saving a change here reconnects every service.",
     fields: [
-      { key: "reconnectBaseMs", label: "First reconnect delay", scale: 1, unit: "ms" },
-      { key: "reconnectMaxMs", label: "Longest reconnect delay", scale: 1, unit: "ms" },
-      { key: "heartbeatIntervalMs", label: "Heartbeat interval", scale: 1, unit: "ms" },
-      { key: "heartbeatTimeoutMs", label: "Heartbeat timeout", scale: 1, unit: "ms" },
-      { key: "handshakeTimeoutMs", label: "Handshake timeout", scale: 1, unit: "ms" },
-      { key: "probeTimeoutMs", label: "Service probe timeout", scale: 1, unit: "ms" },
+      {
+        key: "reconnectBaseMs",
+        label: "First reconnect delay",
+        scale: 1,
+        unit: "ms",
+      },
+      {
+        key: "reconnectMaxMs",
+        label: "Longest reconnect delay",
+        scale: 1,
+        unit: "ms",
+      },
+      {
+        key: "heartbeatIntervalMs",
+        label: "Heartbeat interval",
+        scale: 1,
+        unit: "ms",
+      },
+      {
+        key: "heartbeatTimeoutMs",
+        label: "Heartbeat timeout",
+        scale: 1,
+        unit: "ms",
+      },
+      {
+        key: "handshakeTimeoutMs",
+        label: "Handshake timeout",
+        scale: 1,
+        unit: "ms",
+      },
+      {
+        key: "probeTimeoutMs",
+        label: "Service probe timeout",
+        scale: 1,
+        unit: "ms",
+      },
     ],
   },
   {
     legend: "File tree filter",
     hint: "Bounds on the scan that reveals matches. Hitting one returns partial results rather than hanging.",
     fields: [
-      { key: "scanMaxConcurrency", label: "Concurrent listings", scale: 1, unit: "" },
+      {
+        key: "scanMaxConcurrency",
+        label: "Concurrent listings",
+        scale: 1,
+        unit: "",
+      },
       { key: "scanMaxDirs", label: "Directory budget", scale: 1, unit: "" },
       { key: "scanMaxDepth", label: "Maximum depth", scale: 1, unit: "" },
       { key: "scanTimeBudgetMs", label: "Time budget", scale: 1, unit: "ms" },
@@ -170,7 +205,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     for (const f of FIELDS) {
       const value = values[f.key] as number;
       if (isFontKey(f.key)) {
-        setFontSize(f.key === "terminalFontSize" ? "terminal" : "editor", value);
+        setFontSize(
+          f.key === "terminalFontSize" ? "terminal" : "editor",
+          value,
+        );
       } else {
         patch[f.key] = value;
       }
