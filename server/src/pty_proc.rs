@@ -76,6 +76,22 @@ impl PtyHandle {
     }
 }
 
+/// Locale forced on the child when the agent's own environment carries none.
+///
+/// Service supervisors hand us a bare environment: launchd injects no locale vars
+/// the way Terminal.app does, and an nssm-started service has none either. A
+/// shell in the C locale drops multibyte handling, so zsh's ZLE judges each UTF-8
+/// byte on its own and `拉` comes back as `æ<008b><0089>`. `C.UTF-8` ships with
+/// macOS and with glibc/musl Linux, and leaves C collation semantics alone.
+const DEFAULT_LOCALE: &str = "C.UTF-8";
+
+/// True when the environment already pins a character-encoding locale. We then
+/// stay out of it: an explicit `LANG=C` is an operator choice, not a gap.
+fn has_locale(env: &[(String, String)]) -> bool {
+    env.iter()
+        .any(|(k, v)| !v.is_empty() && matches!(k.as_str(), "LC_ALL" | "LC_CTYPE" | "LANG"))
+}
+
 /// Spawn an already-resolved `bin` + `argv` on a fresh PTY in optional working
 /// dir `cwd`, sized `cols`×`rows`. Callers resolve the executable path (e.g. via
 /// [`crate::agent::resolve_command`]) before spawning.
@@ -107,15 +123,20 @@ fn spawn_pty(
         .openpty(size)
         .map_err(|e| AppError::Other(anyhow::anyhow!("openpty failed: {e}")))?;
 
+    let env: Vec<(String, String)> = std::env::vars().collect();
+    let needs_locale = !has_locale(&env);
     let mut cmd = CommandBuilder::new(bin);
     cmd.args(argv);
     if let Some(dir) = cwd {
         cmd.cwd(dir);
     }
-    for (k, v) in std::env::vars() {
+    for (k, v) in env {
         cmd.env(k, v);
     }
     cmd.env("TERM", "xterm-256color");
+    if needs_locale {
+        cmd.env("LANG", DEFAULT_LOCALE);
+    }
 
     let mut child = pair
         .slave
@@ -240,6 +261,50 @@ mod tests {
     #[cfg(unix)]
     fn sh(script: &str) -> (PtyHandle, mpsc::Receiver<PtyOutput>) {
         spawn_pty("sh", &["-c".into(), script.into()], None, 80, 24).expect("spawn sh")
+    }
+
+    #[test]
+    fn keeps_a_locale_the_operator_pinned() {
+        assert!(has_locale(&[("LANG".into(), "C".into())]));
+        assert!(has_locale(&[("LC_ALL".into(), "zh_CN.UTF-8".into())]));
+        assert!(has_locale(&[("LC_CTYPE".into(), "UTF-8".into())]));
+    }
+
+    #[test]
+    fn supplies_a_locale_when_the_environment_has_none() {
+        // The bare environment a launchd daemon (or an nssm service) hands us.
+        let daemon_env: Vec<(String, String)> = [
+            ("HOME", "/Users/x"),
+            ("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            ("SHELL", "/bin/zsh"),
+            ("TERM", "xterm-256color"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        assert!(!has_locale(&daemon_env));
+        assert!(!has_locale(&[]));
+        // An empty var is not a choice.
+        assert!(!has_locale(&[("LANG".into(), String::new())]));
+    }
+
+    /// The child must always end up with *some* locale. Run this test binary
+    /// under `env -i` to exercise the [`DEFAULT_LOCALE`] fallback: a service
+    /// manager gives the agent no locale vars, and without the fallback the
+    /// value below comes back empty — i.e. the C locale, i.e. mangled CJK.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_always_gets_a_locale() {
+        let (_handle, mut rx) = sh("printf 'LOCALE=%s\\n' \"${LC_ALL-}${LC_CTYPE-}${LANG-}\"");
+        let acc = wait_for(&mut rx, "LOCALE=").await;
+        let value = acc
+            .split_once("LOCALE=")
+            .expect("LOCALE= marker")
+            .1
+            .split(['\r', '\n'])
+            .next()
+            .unwrap_or_default();
+        assert!(!value.is_empty(), "child got no locale; output {acc:?}");
     }
 
     /// A bare interactive `cmd.exe` on a ConPTY must echo typed commands and run

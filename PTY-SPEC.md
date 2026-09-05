@@ -78,7 +78,11 @@ channels.
 1. `native_pty_system().openpty(PtySize { rows, cols, pixel_width:0, pixel_height:0 })`
    using the client-provided initial size from `create_task` (default 80×24).
 2. `CommandBuilder` with the tool's **native interactive argv** (see §7), `cwd`,
-   inherited env. `pair.slave.spawn_command(cmd)` → `child`.
+   inherited env plus `TERM=xterm-256color`. When the inherited env pins no
+   locale at all (`LC_ALL` / `LC_CTYPE` / `LANG` all absent or empty) the child
+   also gets `LANG=C.UTF-8`: a service manager hands the daemon no locale vars,
+   and a shell in the C locale drops multibyte handling. An explicit
+   `LANG=C` is left alone. `pair.slave.spawn_command(cmd)` → `child`.
 3. **Reader**: `pair.master.try_clone_reader()` in a `spawn_blocking`/std thread;
    read into a buffer, forward chunks over an `mpsc` to the async output pipeline.
 4. **Writer**: `pair.master.take_writer()` in a thread fed by an `mpsc`; each
