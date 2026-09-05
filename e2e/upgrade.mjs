@@ -9,7 +9,14 @@
 // (Windows, always) after an upgrade.
 import { spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  chmodSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,7 +36,10 @@ const WS_URL = `ws://${ADDR}/ws`;
 const dir = mkdtempSync(join(tmpdir(), "swb-ws-"));
 const agentDir = join(dir, "bin");
 mkdirSync(agentDir);
-writeFileSync(join(agentDir, "claude"), readFileSync(join(HERE, "fake-agent", "claude")));
+writeFileSync(
+  join(agentDir, "claude"),
+  readFileSync(join(HERE, "fake-agent", "claude")),
+);
 chmodSync(join(agentDir, "claude"), 0o755);
 
 const serverLog = [];
@@ -48,36 +58,60 @@ function mac(key, domain, fields) {
 
 function request(method, path, body = null) {
   return new Promise((res, rej) => {
-    const bodyBuf = body === null ? Buffer.alloc(0) : Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
+    const bodyBuf =
+      body === null
+        ? Buffer.alloc(0)
+        : Buffer.isBuffer(body)
+          ? body
+          : Buffer.from(JSON.stringify(body));
     const ts = Date.now();
     const nonce = randomBytes(16);
     const macHex = mac(Buffer.from(TOKEN), Buffer.from("SWB-REST-v1"), [
       Buffer.from(method),
       Buffer.from(path),
-      (() => { const b = Buffer.alloc(8); b.writeBigInt64BE(BigInt(ts)); return b; })(),
+      (() => {
+        const b = Buffer.alloc(8);
+        b.writeBigInt64BE(BigInt(ts));
+        return b;
+      })(),
       nonce,
       createHash("sha256").update(bodyBuf).digest(),
       Buffer.alloc(0),
     ]).toString("hex");
     const req = http.request(
-      { host: HOST, port: PORT, method, path, headers: {
-        "x-swb-ts": String(ts),
-        "x-swb-nonce": nonce.toString("hex"),
-        "x-swb-mac": macHex,
-        ...(body !== null && !Buffer.isBuffer(body) ? { "content-type": "application/json" } : {}),
-        "content-length": bodyBuf.length,
-      } },
+      {
+        host: HOST,
+        port: PORT,
+        method,
+        path,
+        headers: {
+          "x-swb-ts": String(ts),
+          "x-swb-nonce": nonce.toString("hex"),
+          "x-swb-mac": macHex,
+          ...(body !== null && !Buffer.isBuffer(body)
+            ? { "content-type": "application/json" }
+            : {}),
+          "content-length": bodyBuf.length,
+        },
+      },
       (r) => {
         const chunks = [];
         r.on("data", (c) => chunks.push(c));
         r.on("end", () => {
           const text = Buffer.concat(chunks).toString();
-          if (r.statusCode >= 400) return rej(new Error(`${method} ${path} -> ${r.statusCode}: ${text.slice(0, 300)}`));
+          if (r.statusCode >= 400)
+            return rej(
+              new Error(
+                `${method} ${path} -> ${r.statusCode}: ${text.slice(0, 300)}`,
+              ),
+            );
           res(text ? JSON.parse(text) : null);
         });
       },
     );
-    req.on("error", (e) => rej(new Error(`${method} ${path} transport: ${e.message}`)));
+    req.on("error", (e) =>
+      rej(new Error(`${method} ${path} transport: ${e.message}`)),
+    );
     if (bodyBuf.length) req.write(bodyBuf);
     req.end();
   });
@@ -110,10 +144,16 @@ function startServer() {
 async function waitHealth(timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (server.exitCode !== null) throw new Error(`server exited rc=${server.exitCode}`);
+    if (server.exitCode !== null)
+      throw new Error(`server exited rc=${server.exitCode}`);
     try {
       const ok = await new Promise((res) => {
-        http.get({ host: HOST, port: PORT, path: "/health" }, (r) => { r.resume(); res(r.statusCode === 200); }).on("error", () => res(false));
+        http
+          .get({ host: HOST, port: PORT, path: "/health" }, (r) => {
+            r.resume();
+            res(r.statusCode === 200);
+          })
+          .on("error", () => res(false));
       });
       if (ok) return;
     } catch {}
@@ -132,7 +172,8 @@ const KIND_INPUT = 0x10;
 function uuidToBytes(uuid) {
   const hex = uuid.replace(/-/g, "");
   const out = Buffer.alloc(16);
-  for (let i = 0; i < 16; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  for (let i = 0; i < 16; i++)
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   return out;
 }
 function bytesToUuid(buf) {
@@ -145,12 +186,21 @@ function decodeFrame(buf) {
     const taskId = bytesToUuid(buf.subarray(1, 17));
     const seq = buf.readUInt32BE(17) * 2 ** 32 + buf.readUInt32BE(21);
     const data = buf.subarray(25);
-    return { kind: kind === KIND_OUTPUT ? "output" : "snapshot", taskId, seq, data };
+    return {
+      kind: kind === KIND_OUTPUT ? "output" : "snapshot",
+      taskId,
+      seq,
+      data,
+    };
   }
   return null;
 }
 function encodeInput(taskId, text) {
-  return Buffer.concat([Buffer.from([KIND_INPUT]), uuidToBytes(taskId), Buffer.from(text)]);
+  return Buffer.concat([
+    Buffer.from([KIND_INPUT]),
+    uuidToBytes(taskId),
+    Buffer.from(text),
+  ]);
 }
 
 class Client {
@@ -171,28 +221,53 @@ class Client {
         this.text.push(JSON.parse(data.toString()));
       }
       this.pending = this.pending.filter((p) => {
-        if (p.pred()) { p.res(); return false; }
+        if (p.pred()) {
+          p.res();
+          return false;
+        }
         return true;
       });
     });
     this.closed = new Promise((res) => this.ws.on("close", res));
   }
-  open() { return this.opened; }
+  open() {
+    return this.opened;
+  }
   async auth() {
-    await this.waitUntil(() => this.hasText((m) => m.type === "auth_challenge"), "auth_challenge");
-    const serverNonce = Buffer.from(this.text.find((m) => m.type === "auth_challenge").server_nonce, "hex");
+    await this.waitUntil(
+      () => this.hasText((m) => m.type === "auth_challenge"),
+      "auth_challenge",
+    );
+    const serverNonce = Buffer.from(
+      this.text.find((m) => m.type === "auth_challenge").server_nonce,
+      "hex",
+    );
     const clientNonce = randomBytes(32);
     this.send({
       type: "auth_response",
       client_nonce: clientNonce.toString("hex"),
-      mac: mac(Buffer.from(TOKEN), WS_DOMAIN, [serverNonce, clientNonce, CHANNEL_BINDING]).toString("hex"),
+      mac: mac(Buffer.from(TOKEN), WS_DOMAIN, [
+        serverNonce,
+        clientNonce,
+        CHANNEL_BINDING,
+      ]).toString("hex"),
     });
-    await this.waitUntil(() => this.hasText((m) => m.type === "auth_ok"), "auth_ok");
+    await this.waitUntil(
+      () => this.hasText((m) => m.type === "auth_ok"),
+      "auth_ok",
+    );
   }
-  send(obj) { this.ws.send(JSON.stringify(obj)); }
-  sendInput(taskId, text) { this.ws.send(encodeInput(taskId, text)); }
+  send(obj) {
+    this.ws.send(JSON.stringify(obj));
+  }
+  sendInput(taskId, text) {
+    this.ws.send(encodeInput(taskId, text));
+  }
   close() {
-    return new Promise((res) => { this.ws.on("close", res); this.ws.close(); });
+    return new Promise((res) => {
+      this.ws.on("close", res);
+      this.ws.close();
+    });
   }
   waitUntil(pred, desc, timeout = 10000) {
     return new Promise((res, rej) => {
@@ -205,10 +280,14 @@ class Client {
       }, timeout);
     });
   }
-  hasText(pred) { return this.text.some(pred); }
+  hasText(pred) {
+    return this.text.some(pred);
+  }
   screen(taskId) {
     return Buffer.concat(
-      this.frames.filter((f) => f.taskId === taskId).map((f) => Buffer.from(f.data)),
+      this.frames
+        .filter((f) => f.taskId === taskId)
+        .map((f) => Buffer.from(f.data)),
     ).toString("utf8");
   }
 }
@@ -222,11 +301,18 @@ async function reconnect(cursors, timeoutMs = 30000) {
       await c.open();
       await c.auth();
       c.send({ type: "hello", client_id: "repro", cursors });
-      await c.waitUntil(() => c.hasText((m) => m.type === "welcome"), "welcome", 10000);
+      await c.waitUntil(
+        () => c.hasText((m) => m.type === "welcome"),
+        "welcome",
+        10000,
+      );
       return c;
     } catch {
-      try { c.ws.terminate(); } catch {}
-      if (Date.now() > deadline) throw new Error("could not reconnect after upgrade");
+      try {
+        c.ws.terminate();
+      } catch {}
+      if (Date.now() > deadline)
+        throw new Error("could not reconnect after upgrade");
       await new Promise((r) => setTimeout(r, 150));
     }
   }
@@ -240,7 +326,12 @@ function dumpDiagnostics() {
     for (const f of readdirSync(hostsDir)) {
       if (f.endsWith(".log")) {
         console.log(`--- host log ${f} (tail 30) ---`);
-        console.log(readFileSync(join(hostsDir, f), "utf8").split("\n").slice(-30).join("\n"));
+        console.log(
+          readFileSync(join(hostsDir, f), "utf8")
+            .split("\n")
+            .slice(-30)
+            .join("\n"),
+        );
       }
     }
   } catch {}
@@ -248,26 +339,44 @@ function dumpDiagnostics() {
 
 async function main() {
   const binBytes = readFileSync(BIN);
-  console.log(`binary ${BIN}; ${ITERATIONS} upgrade iterations with a live WS client`);
+  console.log(
+    `binary ${BIN}; ${ITERATIONS} upgrade iterations with a live WS client`,
+  );
 
   server = startServer();
   await waitHealth();
 
-  const info = await request("POST", "/api/tasks", { tool: "claude", title: "ws", cwd: null, cols: 80, rows: 24 });
+  const info = await request("POST", "/api/tasks", {
+    tool: "claude",
+    title: "ws",
+    cwd: null,
+    cols: 80,
+    rows: 24,
+  });
   const taskId = info.id;
   console.log(`created task ${taskId}`);
 
   let client = await reconnect({});
-  const t0 = client.text.find((m) => m.type === "welcome").tasks.find((t) => t.id === taskId);
+  const t0 = client.text
+    .find((m) => m.type === "welcome")
+    .tasks.find((t) => t.id === taskId);
   if (!t0 || t0.status.state !== "running") {
-    console.log(`\n=== FAILURE: task not running right after create: ${JSON.stringify(t0?.status)} ===`);
+    console.log(
+      `\n=== FAILURE: task not running right after create: ${JSON.stringify(t0?.status)} ===`,
+    );
     dumpDiagnostics();
     process.exitCode = 1;
     return;
   }
-  await client.waitUntil(() => client.screen(taskId).includes("AGENT-READY"), "agent banner");
+  await client.waitUntil(
+    () => client.screen(taskId).includes("AGENT-READY"),
+    "agent banner",
+  );
   client.sendInput(taskId, "m0\r");
-  await client.waitUntil(() => client.screen(taskId).includes("reply:m0"), "reply m0");
+  await client.waitUntil(
+    () => client.screen(taskId).includes("reply:m0"),
+    "reply m0",
+  );
   console.log("client attached and driving the task");
 
   for (let i = 1; i <= ITERATIONS; i++) {
@@ -289,7 +398,11 @@ async function main() {
     // The agent must still answer on the new server.
     client.sendInput(taskId, `p${i}\r`);
     try {
-      await client.waitUntil(() => client.screen(taskId).includes(`reply:p${i}`), `reply p${i}`, 15000);
+      await client.waitUntil(
+        () => client.screen(taskId).includes(`reply:p${i}`),
+        `reply p${i}`,
+        15000,
+      );
       console.log(`iter ${i}: agent still answering after the upgrade`);
     } catch (e) {
       console.log(`\n=== FAILURE at iteration ${i}: ${e.message} ===`);
@@ -299,7 +412,8 @@ async function main() {
     }
     await new Promise((r) => setTimeout(r, 300));
   }
-  if (!process.exitCode) console.log(`OK: ${ITERATIONS} upgrades survived with a live WS client`);
+  if (!process.exitCode)
+    console.log(`OK: ${ITERATIONS} upgrades survived with a live WS client`);
 
   // Terminate the task before killing the server: the pty-host outlives the
   // server by design, and killing the server alone would leak it (and the
@@ -319,12 +433,17 @@ async function main() {
     );
     console.log("task terminated; pty-hosts will exit on their own");
   } catch {}
-  try { await client.close(); } catch {}
+  try {
+    await client.close();
+  } catch {}
 }
 
-main().catch((e) => {
-  console.error("HARNESS ERROR:", e.message);
-  dumpDiagnostics();
-  process.exitCode = 1;
-})
-  .finally(() => { if (server) server.kill("SIGKILL"); });
+main()
+  .catch((e) => {
+    console.error("HARNESS ERROR:", e.message);
+    dumpDiagnostics();
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    if (server) server.kill("SIGKILL");
+  });

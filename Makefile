@@ -145,15 +145,17 @@ test-live: ## Run live agent-CLI tests (needs claude/qodercli auth)
 
 # ---------------------------------------------------------------- quality
 .PHONY: fmt lint
-fmt: ## Format Rust + client
+fmt: ## Format Rust + client + e2e
 	$(CARGO) fmt
 	cd client/src-tauri && $(CARGO) fmt
 	cd client && $(NPM) run fmt
-lint: ## Lint Rust (clippy + rustfmt) + client (tsc + eslint + prettier)
+	cd e2e && $(NPM) install --silent && $(NPM) run fmt
+lint: ## Lint Rust (clippy + rustfmt) + client (tsc + eslint + prettier) + e2e
 	$(CARGO) fmt --check
 	cd client/src-tauri && $(CARGO) fmt --check
 	cd client && $(NPM) run fmt:check
 	cd client && $(NPM) run typecheck
+	cd e2e && $(NPM) install --silent && $(NPM) run fmt:check && $(NPM) run lint
 	$(CARGO) clippy --all-targets -- -D warnings
 	cd client/src-tauri && $(CARGO) clippy --all-targets -- -D warnings
 	cd client && $(NPM) run lint

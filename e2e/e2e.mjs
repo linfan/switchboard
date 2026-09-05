@@ -72,7 +72,8 @@ const KIND_INPUT = 0x10;
 function uuidToBytes(uuid) {
   const hex = uuid.replace(/-/g, "");
   const out = Buffer.alloc(16);
-  for (let i = 0; i < 16; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  for (let i = 0; i < 16; i++)
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   return out;
 }
 function bytesToUuid(buf) {
@@ -85,12 +86,21 @@ function decodeFrame(buf) {
     const taskId = bytesToUuid(buf.subarray(1, 17));
     const seq = buf.readUInt32BE(17) * 2 ** 32 + buf.readUInt32BE(21);
     const data = buf.subarray(25);
-    return { kind: kind === KIND_OUTPUT ? "output" : "snapshot", taskId, seq, data };
+    return {
+      kind: kind === KIND_OUTPUT ? "output" : "snapshot",
+      taskId,
+      seq,
+      data,
+    };
   }
   return null; // client never receives INPUT frames
 }
 function encodeInput(taskId, text) {
-  return Buffer.concat([Buffer.from([KIND_INPUT]), uuidToBytes(taskId), Buffer.from(text)]);
+  return Buffer.concat([
+    Buffer.from([KIND_INPUT]),
+    uuidToBytes(taskId),
+    Buffer.from(text),
+  ]);
 }
 
 class Client {
@@ -142,7 +152,10 @@ class Client {
         CHANNEL_BINDING,
       ]).toString("hex"),
     });
-    await this.waitUntil(() => this.hasText((m) => m.type === "auth_ok"), "auth_ok");
+    await this.waitUntil(
+      () => this.hasText((m) => m.type === "auth_ok"),
+      "auth_ok",
+    );
   }
   send(obj) {
     this.ws.send(JSON.stringify(obj));
@@ -182,9 +195,9 @@ class Client {
   }
   // Concatenated bytes of all data-plane frames for a task, as text.
   screen(taskId) {
-    return Buffer.concat(this.dataFrames(taskId).map((f) => Buffer.from(f.data))).toString(
-      "utf8",
-    );
+    return Buffer.concat(
+      this.dataFrames(taskId).map((f) => Buffer.from(f.data)),
+    ).toString("utf8");
   }
 }
 
@@ -214,7 +227,8 @@ async function waitForHealth(server, timeoutMs = 15000) {
     // Our server dying (a port already in use, say) would otherwise leave the
     // health probe answering from whatever else is listening on ADDR, and the
     // failure would surface much later as an inexplicable protocol timeout.
-    if (server.exitCode !== null) fail(`server exited with code ${server.exitCode}`);
+    if (server.exitCode !== null)
+      fail(`server exited with code ${server.exitCode}`);
     try {
       const r = await fetch(`${HTTP}/health`);
       if (r.ok) return;
@@ -240,7 +254,10 @@ async function main() {
     await c1.open();
     await c1.auth();
     c1.send({ type: "hello", client_id: "c1", cursors: {} });
-    await c1.waitUntil(() => c1.hasText((m) => m.type === "welcome"), "c1 welcome");
+    await c1.waitUntil(
+      () => c1.hasText((m) => m.type === "welcome"),
+      "c1 welcome",
+    );
     log("c1 welcomed");
 
     c1.send({
@@ -251,19 +268,31 @@ async function main() {
       cols: 80,
       rows: 24,
     });
-    await c1.waitUntil(() => c1.hasText((m) => m.type === "task_created"), "task_created");
+    await c1.waitUntil(
+      () => c1.hasText((m) => m.type === "task_created"),
+      "task_created",
+    );
     const taskId = c1.text.find((m) => m.type === "task_created").task.id;
     log(`task created: ${taskId}`);
 
     // 2. The PTY program prints its banner as terminal output.
-    await c1.waitUntil(() => c1.screen(taskId).includes("AGENT-READY"), "agent banner");
+    await c1.waitUntil(
+      () => c1.screen(taskId).includes("AGENT-READY"),
+      "agent banner",
+    );
     log("c1 saw the agent banner over the data plane");
 
     // 3. Drive two turns; each reply is more terminal output.
     c1.sendInput(taskId, "m1\r");
-    await c1.waitUntil(() => c1.screen(taskId).includes("reply:m1"), "reply m1");
+    await c1.waitUntil(
+      () => c1.screen(taskId).includes("reply:m1"),
+      "reply m1",
+    );
     c1.sendInput(taskId, "m2\r");
-    await c1.waitUntil(() => c1.screen(taskId).includes("reply:m2"), "reply m2");
+    await c1.waitUntil(
+      () => c1.screen(taskId).includes("reply:m2"),
+      "reply m2",
+    );
     const cursor = c1.maxSeq(taskId);
     log(`c1 durably applied up to chunk seq ${cursor}`);
 
@@ -276,13 +305,19 @@ async function main() {
     await c2.open();
     await c2.auth();
     c2.send({ type: "hello", client_id: "c2", cursors: {} });
-    await c2.waitUntil(() => c2.hasText((m) => m.type === "welcome"), "c2 welcome");
+    await c2.waitUntil(
+      () => c2.hasText((m) => m.type === "welcome"),
+      "c2 welcome",
+    );
     await c2.waitUntil(
       () => c2.hasText((m) => m.type === "replay_done" && m.task_id === taskId),
       "c2 replay_done",
     );
     c2.sendInput(taskId, "m3\r");
-    await c2.waitUntil(() => c2.screen(taskId).includes("reply:m3"), "reply m3 while c1 offline");
+    await c2.waitUntil(
+      () => c2.screen(taskId).includes("reply:m3"),
+      "reply m3 while c1 offline",
+    );
     log("produced reply:m3 while c1 offline");
 
     // 6. Reconnect c1 with its durable cursor. It MUST be fast-forwarded only the
@@ -293,7 +328,8 @@ async function main() {
     await c1b.auth();
     c1b.send({ type: "hello", client_id: "c1", cursors: { [taskId]: cursor } });
     await c1b.waitUntil(
-      () => c1b.hasText((m) => m.type === "replay_done" && m.task_id === taskId),
+      () =>
+        c1b.hasText((m) => m.type === "replay_done" && m.task_id === taskId),
       "c1 reconnect replay_done",
     );
     const replayed = c1b.seqs(taskId);
@@ -303,15 +339,26 @@ async function main() {
       `no chunk at or below the cursor may be replayed (got ${replayed.join(",")}, cursor ${cursor})`,
     );
     for (let i = 1; i < replayed.length; i++) {
-      assert(replayed[i] === replayed[i - 1] + 1, `replay must be gap-free (got ${replayed.join(",")})`);
+      assert(
+        replayed[i] === replayed[i - 1] + 1,
+        `replay must be gap-free (got ${replayed.join(",")})`,
+      );
     }
     assert(
       replayed[0] === cursor + 1,
       `replay must start at cursor+1 (got ${replayed[0]}, cursor ${cursor})`,
     );
-    assert(c1b.screen(taskId).includes("reply:m3"), "reconnect must include the missed reply:m3");
-    assert(!c1b.screen(taskId).includes("reply:m1"), "reconnect must NOT re-send bytes at/below cursor");
-    log(`reconnect fast-forwarded exactly [${replayed.join(", ")}] — no loss, no dupes`);
+    assert(
+      c1b.screen(taskId).includes("reply:m3"),
+      "reconnect must include the missed reply:m3",
+    );
+    assert(
+      !c1b.screen(taskId).includes("reply:m1"),
+      "reconnect must NOT re-send bytes at/below cursor",
+    );
+    log(
+      `reconnect fast-forwarded exactly [${replayed.join(", ")}] — no loss, no dupes`,
+    );
 
     // 7. Replace the server process, exactly as a self-upgrade does. The agent
     //    lives in its own pty-host process, so it must still be running when the
@@ -330,16 +377,26 @@ async function main() {
     await c4.open();
     await c4.auth();
     c4.send({ type: "hello", client_id: "c4", cursors: {} });
-    await c4.waitUntil(() => c4.hasText((m) => m.type === "welcome"), "c4 welcome");
+    await c4.waitUntil(
+      () => c4.hasText((m) => m.type === "welcome"),
+      "c4 welcome",
+    );
     const survivor = c4.text
       .find((m) => m.type === "welcome")
       .tasks.find((t) => t.id === taskId);
     assert(survivor, "the task must still exist after the server is replaced");
-    eq(survivor.status.state, "running", "task must still be running after the restart");
+    eq(
+      survivor.status.state,
+      "running",
+      "task must still be running after the restart",
+    );
     log("task survived the server restart, still running");
 
     c4.sendInput(taskId, "m4\r");
-    await c4.waitUntil(() => c4.screen(taskId).includes("reply:m4"), "reply m4 after restart");
+    await c4.waitUntil(
+      () => c4.screen(taskId).includes("reply:m4"),
+      "reply m4 after restart",
+    );
     log("the same agent still answers on the new server — PTY re-attached");
 
     // 8. Terminate the task and observe the terminal state transition.
