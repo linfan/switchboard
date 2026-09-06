@@ -97,14 +97,27 @@ function mkManager(over: Partial<Parameters<typeof makeDeps>[0]> = {}) {
 
 /**
  * Drive the SWB-WS-v1 handshake to completion: open, answer the server's
- * challenge, and accept. `auth_ok` is applied synchronously, so afterwards the
- * manager is online with the heartbeat running.
+ * challenge, and accept. Afterwards the manager is authed ("connecting") with
+ * the heartbeat running, but not yet "online" — that requires `welcome`.
  */
 async function driveHandshake(s: FakeSocket): Promise<void> {
   s.emitOpen();
   s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
   await settleCrypto(s);
   s.emitMessage({ type: "auth_ok" });
+}
+
+/** Minimal welcome the server sends after Hello; promotes status to "online". */
+const WELCOME = {
+  type: "welcome",
+  service: { name: "svc", version: "0.0.0", tools: [] },
+  tasks: [],
+};
+
+/** Full session establishment: auth handshake + welcome. */
+async function driveSession(s: FakeSocket): Promise<void> {
+  await driveHandshake(s);
+  s.emitMessage(WELCOME);
 }
 
 function makeDeps(over: {
@@ -169,6 +182,9 @@ describe("handshake", () => {
     });
     expect(mgr.getStatus()).toBe("connecting"); // still awaiting auth_ok
     s.emitMessage({ type: "auth_ok" });
+    // Authed but not yet "online" — the session needs `welcome`.
+    expect(mgr.getStatus()).toBe("connecting");
+    s.emitMessage(WELCOME);
     expect(mgr.getStatus()).toBe("online");
     mgr.stop();
   });
@@ -179,12 +195,14 @@ describe("handshake", () => {
     expect(mgr.getStatus()).toBe("connecting");
     const s = FakeSocket.last();
     await driveHandshake(s);
-    expect(mgr.getStatus()).toBe("online");
+    expect(mgr.getStatus()).toBe("connecting"); // authed, awaiting welcome
     expect(s.find("hello")).toEqual({
       type: "hello",
       client_id: "c1",
       cursors: { t1: 5 },
     });
+    s.emitMessage(WELCOME);
+    expect(mgr.getStatus()).toBe("online");
     mgr.stop();
   });
 
@@ -241,6 +259,23 @@ describe("handshake", () => {
     s.emitOpen();
     expect(mgr.sendBytes(new Uint8Array([9, 8, 7]))).toBe(false);
     expect(s.sentBinary).toHaveLength(0);
+    mgr.stop();
+  });
+
+  it("never reports online when auth succeeds but welcome never arrives", async () => {
+    // Repeater with no paired worker: the relay auths the client itself, then
+    // closes after its GRACE timeout. The session was never established, so the
+    // status must not flash "online" — that is the false-connected impression.
+    const { mgr, statuses } = mkManager();
+    mgr.start();
+    const s = FakeSocket.last();
+    await driveHandshake(s);
+    expect(mgr.getStatus()).toBe("connecting");
+    expect(statuses).not.toContain("online");
+    // The repeater gives up waiting for a worker and closes the socket.
+    s.emitClose();
+    expect(mgr.getStatus()).toBe("reconnecting");
+    expect(statuses).not.toContain("online");
     mgr.stop();
   });
 });
@@ -331,7 +366,7 @@ describe("heartbeat", () => {
     const { mgr } = mkManager();
     mgr.start();
     const s = FakeSocket.last();
-    await driveHandshake(s);
+    await driveSession(s);
     vi.advanceTimersByTime(15000);
     s.emitMessage({ type: "pong", ts: 1000 });
     vi.advanceTimersByTime(10000);
@@ -374,6 +409,8 @@ describe("network + wake", () => {
     s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
     await settleCrypto(s);
     s.emitMessage({ type: "auth_ok" });
+    expect(mgr.getStatus()).toBe("connecting"); // authed, awaiting welcome
+    s.emitMessage(WELCOME);
     expect(mgr.getStatus()).toBe("online");
     mgr.stop();
   });
@@ -396,7 +433,7 @@ describe("network + wake", () => {
     const { mgr } = mkManager({ now: () => now });
     mgr.start();
     const s = FakeSocket.last();
-    await driveHandshake(s);
+    await driveSession(s);
     const count = FakeSocket.instances.length;
     now = 1000 + 2000 + 6000; // elapsed 8000 > check(2000)+drift(5000)
     vi.advanceTimersByTime(2000); // fire one wake tick
@@ -447,6 +484,8 @@ describe("handshake watchdog", () => {
     s.emitMessage({ type: "auth_challenge", server_nonce: "11".repeat(32) });
     await settleCrypto(s);
     s.emitMessage({ type: "auth_ok" });
+    expect(mgr.getStatus()).toBe("connecting"); // authed, awaiting welcome
+    s.emitMessage(WELCOME);
     expect(mgr.getStatus()).toBe("online");
     mgr.stop();
   });
@@ -463,7 +502,7 @@ describe("starvation-safe heartbeat", () => {
     });
     mgr.start();
     const s = FakeSocket.last();
-    await driveHandshake(s);
+    await driveSession(s);
     now = 15000;
     vi.advanceTimersByTime(15000); // heartbeat ping; pong deadline = 25000
     const ping = (): number =>

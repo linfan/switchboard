@@ -164,6 +164,8 @@ export class ConnectionManager {
   private stopped = true;
   /** True once the SWB-WS-v1 handshake has succeeded on the current socket. */
   private authed = false;
+  /** True once the server's `welcome` has arrived — the session is established. */
+  private welcomed = false;
   /** True while the browser reports the network as down. */
   private networkDown = false;
 
@@ -345,6 +347,10 @@ export class ConnectionManager {
       this.onPong(msg.ts as number);
       return;
     }
+    if (msg.type === "welcome" && !this.welcomed) {
+      this.welcomed = true;
+      this.setStatus("online");
+    }
     this.d.onMessage(msg as unknown as ServerMsg);
   }
 
@@ -392,8 +398,14 @@ export class ConnectionManager {
   private onAuthed(): void {
     this.clearHandshakeWatchdog();
     this.authed = true;
+    this.welcomed = false;
     this.attempt = 0;
-    this.setStatus("online");
+    // Transport is authed but the session is not established yet: `welcome`
+    // (which only arrives through a paired worker) is what promotes us to
+    // "online". A repeater with no worker auths the client then closes after
+    // its GRACE timeout — reporting "online" here would flash a false
+    // "Connected" every cycle.
+    this.setStatus("connecting", { attempt: 0 });
     // Re-issue Hello with the freshest cursors so the server replays only what
     // we have not durably applied.
     this.send({
@@ -488,6 +500,9 @@ export class ConnectionManager {
       clearTimeout(this.pongTimer);
       this.pongTimer = null;
     }
+    // Only re-assert "online" once the session is established; a pong that
+    // arrives before `welcome` must not promote the status prematurely.
+    if (!this.welcomed) return;
     const rttMs = this.now() - ts;
     this.setStatus("online", { rttMs });
   }
@@ -587,6 +602,7 @@ export class ConnectionManager {
 
   private closeSocket(): void {
     this.authed = false;
+    this.welcomed = false;
     this.clearHandshakeWatchdog();
     if (this.ws) {
       this.ws.onopen = null;
