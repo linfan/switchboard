@@ -15,7 +15,8 @@
 //! The registry also owns each tab's long-line wrap choice, so flipping it
 //! reconfigures the live view in place instead of rebuilding it (which would cost
 //! the tab its edits, scroll, and undo) and so the choice survives a workspace
-//! switch the same way the view does.
+//! switch the same way the view does. Each markdown tab's rendered-vs-source
+//! choice lives here too, for the same reason.
 
 import { Compartment, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
@@ -264,6 +265,35 @@ export function wrapExtension(wrap: boolean): Extension {
  */
 const wraps = new Map<string, boolean>();
 
+/**
+ * Whether each markdown tab shows the rendered view or the raw source. Just a
+ * recorded choice — the view itself is untouched — so `EditorArea` can keep the
+ * CodeMirror buffer alive (hidden) behind the rendered pane, and reopening a
+ * closed tab starts rendered again. `undefined` means "no choice yet", which
+ * reads as the rendered default.
+ */
+const mdPreviews = new Map<string, boolean>();
+
+/**
+ * The tab's rendered-vs-source choice for markdown, or `undefined` if the tab
+ * never toggled it (callers apply the rendered default themselves).
+ */
+export function getMdPreview(
+  workspaceId: string,
+  tabKey: string,
+): boolean | undefined {
+  return mdPreviews.get(mapKey(workspaceId, tabKey));
+}
+
+/** Record a markdown tab's rendered-vs-source choice. */
+export function setMdPreview(
+  workspaceId: string,
+  tabKey: string,
+  rendered: boolean,
+): void {
+  mdPreviews.set(mapKey(workspaceId, tabKey), rendered);
+}
+
 /** The tab's wrap choice, or `undefined` if it hasn't been seeded yet. */
 export function getWrap(
   workspaceId: string,
@@ -304,6 +334,7 @@ export function remeasureAll(): void {
 
 function destroy(key: string): void {
   wraps.delete(key);
+  mdPreviews.delete(key);
   const e = entries.get(key);
   if (!e) return;
   if (e.dom.parentElement) {

@@ -3,7 +3,15 @@ import { MergeView, unifiedMergeView } from "@codemirror/merge";
 import { EditorState, type Extension } from "@codemirror/state";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { EditorView, keymap } from "@codemirror/view";
-import { useEffect, useRef, useState } from "react";
+import DOMPurify from "dompurify";
+import { marked } from "marked";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 import { createPortal } from "react-dom";
 
 import { javascript } from "@codemirror/lang-javascript";
@@ -17,7 +25,7 @@ import { css } from "@codemirror/lang-css";
 import * as editors from "../net/editors";
 import { formatBytes, mediaForPath, type MediaKind } from "../net/media";
 import { gitFileDiff, readFile, statPath, writeFile } from "../net/rest";
-import { openPreview } from "../net/transfer";
+import { openPreview, type Preview } from "../net/transfer";
 import { useStore } from "../store/store";
 import { tabKey, type DiffLayout, type OpenFile } from "../store/types";
 import { ContextMenu } from "./Menu";
@@ -61,6 +69,40 @@ function langForPath(path: string): Extension {
   }
 }
 
+/** True for files the editor offers a rendered-markdown view for. */
+function isMarkdownPath(path: string): boolean {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return ext === "md" || ext === "markdown";
+}
+
+/**
+ * Resolve a relative markdown link/image target against the referencing file's
+ * own path (absolute, or relative to the workspace cwd), tolerating `.`/`..`
+ * segments. An absolute base keeps its leading `/` (the empty first segment).
+ */
+function resolveRelative(basePath: string, rel: string): string {
+  const stack = basePath.split("/");
+  stack.pop(); // the referencing file's own name
+  const absolute = stack[0] === "";
+  for (const part of rel.split("/")) {
+    if (part === "" || part === ".") continue;
+    // Never let ".." climb above the filesystem root (or the cwd).
+    if (part === "..") {
+      if (stack.length > (absolute ? 1 : 0)) stack.pop();
+    } else stack.push(part);
+  }
+  return stack.join("/");
+}
+
+/** Decode a percent-encoded markdown target, keeping the raw form if malformed. */
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
 /** Base name of a path, for tab labels. */
 function basename(path: string): string {
   return path.split("/").pop() || path;
@@ -95,7 +137,10 @@ function mediaElement(kind: MediaKind, src: string): HTMLElement {
  * The right-hand editor pane: a tab bar over the open files plus the active
  * file's editor. Tree files are editable (Cmd/Ctrl+S saves). Diff files are
  * read-only and rendered with a real diff editor — inline (unified) or
- * side-by-side, switchable via the title-bar toggle. Each tab's live view lives in
+ * side-by-side, switchable via the title-bar toggle. Markdown files render as
+ * a sanitized HTML document (headings, tables, relative images fetched through
+ * the authenticated preview path), with the raw source one toggle away. Each
+ * tab's live view lives in
  * the `editors` registry so switching tabs — or workspaces — preserves unsaved
  * edits, scroll, and undo. Long lines wrap or scroll sideways per tab, chosen by
  * the Auto-wrap/No-wrap toggle and seeded from the settings default at build
@@ -148,6 +193,22 @@ export function EditorArea({
   const [changed, setChanged] = useState<Record<string, boolean>>({});
   // Per-tab wrap choices, mirrored from the registry for the same reason.
   const [wraps, setWraps] = useState<Record<string, boolean>>({});
+  // Per-tab markdown rendered-vs-source choices, mirrored the same way.
+  const [mdPrev, setMdPrev] = useState<Record<string, boolean>>({});
+  // The active tab's rendered HTML, or null while no preview is on screen.
+  // `for` keys it to the tab so a switch never paints the previous tab's body.
+  const [mdHtml, setMdHtml] = useState<{ for: string; html: string } | null>(
+    null,
+  );
+  // The rendered pane's host, for post-processing (image srcs, link targets).
+  const mdHostRef = useRef<HTMLDivElement>(null);
+  // Image previews behind the current rendered pane, by target path. A tab
+  // switch re-mounts the HTML with its original relative srcs, so resolved
+  // URLs are re-applied from here instead of refetching every image.
+  const mdImagesRef = useRef<Map<string, Preview>>(new Map());
+  // The document the image cache was built for, to refresh it when the same
+  // tab's buffer changes (an edit followed by a re-render, or a disk reload).
+  const mdDocRef = useRef<{ for: string; html: string } | null>(null);
   // Fallback for a tab with no choice of its own yet — its view isn't built.
   const defaultWrap = useStore((s) => s.editorWrapDefault);
   // Drag-to-reorder state: the tab key being dragged, and the one hovered over.
@@ -173,6 +234,12 @@ export function EditorArea({
   const key = active ? tabKey(active) : undefined;
   // Image/audio/video tree files preview instead of loading into CodeMirror.
   const media = mode === "edit" && path ? mediaForPath(path) : null;
+  // Markdown tree files render as a document, with the raw source one toggle away.
+  const isMd = mode === "edit" && !!path && isMarkdownPath(path);
+  const mdRendered = (k: string) =>
+    mdPrev[k] ?? editors.getMdPreview(workspaceId, k) ?? true;
+  // The active markdown tab is currently showing its rendered pane.
+  const showPreview = !!key && isMd && mdRendered(key);
 
   const markDirty = (k: string, d: boolean) => {
     editors.setDirty(workspaceId, k, d);
@@ -181,6 +248,16 @@ export function EditorArea({
 
   const markChanged = (k: string, c: boolean) => {
     setChanged((m) => ({ ...m, [k]: c }));
+  };
+
+  /** Render a markdown tab's live buffer into sanitized HTML for the preview. */
+  const renderMarkdownDoc = (k: string, view: EditorView) => {
+    // Sanitized because a file (say, a cloned repo's README) can carry raw
+    // HTML: it must never execute in the app's origin, which holds tokens.
+    const html = DOMPurify.sanitize(
+      marked.parse(view.state.doc.toString()) as string,
+    );
+    setMdHtml({ for: k, html });
   };
 
   const save = (k: string, filePath: string, view: EditorView): boolean => {
@@ -219,6 +296,8 @@ export function EditorArea({
         editors.clearDiskChange(workspaceId, k, false);
         markDirty(k, false);
         markChanged(k, false);
+        // The rendered pane (if up) must not keep showing the pre-reload body.
+        if (mdRendered(k)) renderMarkdownDoc(k, view);
       })
       .catch((e: unknown) =>
         setError(e instanceof Error ? e.message : String(e)),
@@ -522,6 +601,110 @@ export function EditorArea({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, key, path, mode, commit, diffLayout]);
 
+  // Markdown preview: whenever the rendered pane is (or becomes) the thing on
+  // screen, render the active tab's buffer into HTML. Reads the live view's
+  // doc, so unsaved edits show too; while the pane is up the buffer can only
+  // change through a disk reload, which re-renders explicitly. A layout effect
+  // so a tab switch fills the new tab's HTML in before the browser paints,
+  // never flashing the previous tab's body.
+  useLayoutEffect(() => {
+    if (!key || !showPreview || status !== "ready") {
+      setMdHtml(null);
+      return;
+    }
+    const view = editors.getView(workspaceId, key);
+    if (view) renderMarkdownDoc(key, view);
+  }, [workspaceId, key, showPreview, status]);
+
+  // Post-process the rendered pane: give headings ids so `[x](#x)` TOC links
+  // resolve, open links outside the app, and point relative image srcs at
+  // authenticated previews. `<img src>` can't reach /api itself — every REST
+  // request carries per-request MAC headers, nothing a plain URL could hold —
+  // so each relative image is fetched like a media preview and its blob/asset
+  // URL swapped in. Runs on every (re)mount of the pane: toggling or switching
+  // tabs re-creates the DOM from the original HTML, with relative srcs back.
+  useEffect(() => {
+    const host = mdHostRef.current;
+    if (!host || !mdHtml || !path) return;
+
+    host.querySelectorAll("h1,h2,h3,h4,h5,h6").forEach((h) => {
+      if (h.id) return;
+      const slug =
+        h.textContent
+          ?.trim()
+          .toLowerCase()
+          .replace(/[^\p{L}\p{N}\s-]/gu, "")
+          .replace(/\s+/g, "-") ?? "";
+      if (slug) h.id = slug;
+    });
+    host.querySelectorAll("a").forEach((a) => {
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+    });
+
+    // A different document in the same tab means its images may have changed
+    // with it; a different tab keeps both tabs' images cached for switch-back.
+    const prevDoc = mdDocRef.current;
+    mdDocRef.current = { for: mdHtml.for, html: mdHtml.html };
+    if (prevDoc && prevDoc.for === mdHtml.for && prevDoc.html !== mdHtml.html) {
+      mdImagesRef.current.forEach((p) => p.release());
+      mdImagesRef.current.clear();
+    }
+
+    let cancelled = false;
+    const cache = mdImagesRef.current;
+    for (const img of Array.from(host.querySelectorAll("img"))) {
+      const raw = img.getAttribute("src") ?? "";
+      const clean = raw.split("#")[0].split("?")[0];
+      // Absolute URLs (badges, hotlinked screenshots) load directly; only
+      // workspace-relative srcs need the authenticated hop.
+      if (
+        !clean ||
+        /^[a-z][a-z0-9+.-]*:/i.test(clean) ||
+        clean.startsWith("//")
+      )
+        continue;
+      const target = resolveRelative(path, safeDecode(clean));
+      if (!target) continue;
+      const cached = cache.get(target);
+      if (cached) {
+        img.src = cached.url;
+        continue;
+      }
+      statPath(service, target)
+        .then((st) => {
+          if (cancelled || !st.exists || st.is_dir) return null;
+          const ext = target.split(".").pop()?.toLowerCase() ?? "";
+          return openPreview(service, target, ext, st.mtime);
+        })
+        .then((preview) => {
+          if (!preview) return;
+          if (cancelled) {
+            preview.release(); // pane went away mid-fetch: don't leak it
+            return;
+          }
+          cache.set(target, preview);
+          if (img.isConnected) img.src = preview.url;
+        })
+        .catch(() => {
+          // Missing or undecodable image: leave the alt text where it is.
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mdHtml]);
+
+  // Release every fetched image preview when the workspace pane goes away.
+  useEffect(
+    () => () => {
+      mdImagesRef.current.forEach((p) => p.release());
+      mdImagesRef.current.clear();
+    },
+    [],
+  );
+
   // Watch the ACTIVE edit tab for out-of-app changes: an immediate stat on
   // activation (so a change made while the tab was backgrounded surfaces the
   // moment you switch back), a slow poll while it stays active, and a re-check
@@ -597,6 +780,11 @@ export function EditorArea({
       keys.forEach((k) => delete next[k]);
       return next;
     });
+    setMdPrev((m) => {
+      const next = { ...m };
+      keys.forEach((k) => delete next[k]);
+      return next;
+    });
   };
 
   const closeTab = (k: string) => {
@@ -644,6 +832,47 @@ export function EditorArea({
     // tab keeps its edits, scroll position, and undo history.
     editors.setWrap(workspaceId, k, next);
     setWraps((m) => ({ ...m, [k]: next }));
+  };
+
+  /** Flip this markdown tab between its rendered pane and the raw source. */
+  const toggleMdPreview = (k: string, rendered: boolean) => {
+    // A recorded choice only — the buffer view stays alive behind the pane,
+    // so switching back restores edits, scroll, and undo untouched.
+    editors.setMdPreview(workspaceId, k, rendered);
+    setMdPrev((m) => ({ ...m, [k]: rendered }));
+  };
+
+  /**
+   * Route a plain click inside the rendered pane. Nothing here may navigate
+   * the app itself: external links open a new window, `#anchor` links scroll
+   * the preview (marked emits no heading ids; the post-processing adds them),
+   * and workspace-relative links open as an editor tab.
+   */
+  const onMdPaneClick = (e: MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
+      return;
+    const a = (e.target as HTMLElement).closest("a");
+    if (!a || !path) return;
+    const href = a.getAttribute("href") ?? "";
+    if (/^(https?:|mailto:)/i.test(href) || href.startsWith("//")) {
+      e.preventDefault();
+      window.open(href, "_blank", "noopener");
+      return;
+    }
+    if (href.startsWith("#")) {
+      e.preventDefault();
+      document.getElementById(href.slice(1))?.scrollIntoView();
+      return;
+    }
+    e.preventDefault();
+    const clean = href.split("#")[0].split("?")[0];
+    if (!clean) return;
+    const target = resolveRelative(path, safeDecode(clean));
+    if (!target) return;
+    // Tree paths are absolute; a relative resolution needs the cwd in front.
+    onOpenInEditor(
+      target.startsWith("/") ? target : `${cwd.replace(/\/+$/, "")}/${target}`,
+    );
   };
 
   const wrapped = !!key && isWrapped(key);
@@ -751,7 +980,37 @@ export function EditorArea({
         {actionsSlot &&
           createPortal(
             <>
-              {key && !media && (
+              {key && isMd && (
+                <div
+                  className="weditor__seg"
+                  role="radiogroup"
+                  aria-label="Markdown view"
+                >
+                  <button
+                    role="radio"
+                    aria-checked={showPreview}
+                    className={`weditor__seg-opt ${showPreview ? "is-active" : ""}`}
+                    title="Show the rendered document"
+                    onClick={() => {
+                      if (!showPreview) toggleMdPreview(key, true);
+                    }}
+                  >
+                    Preview
+                  </button>
+                  <button
+                    role="radio"
+                    aria-checked={!showPreview}
+                    className={`weditor__seg-opt ${!showPreview ? "is-active" : ""}`}
+                    title="Show the raw markdown source"
+                    onClick={() => {
+                      if (showPreview) toggleMdPreview(key, false);
+                    }}
+                  >
+                    Source
+                  </button>
+                </div>
+              )}
+              {key && !media && !showPreview && (
                 <div
                   className="weditor__wrap weditor__seg"
                   role="radiogroup"
@@ -809,7 +1068,9 @@ export function EditorArea({
                 <button
                   className="btn weditor__openeditor"
                   title="Open this file for editing in a new tab"
-                  onClick={() => onOpenInEditor(`${cwd.replace(/\/+$/, "")}/${path}`)}
+                  onClick={() =>
+                    onOpenInEditor(`${cwd.replace(/\/+$/, "")}/${path}`)
+                  }
                 >
                   Open in editor
                 </button>
@@ -860,12 +1121,23 @@ export function EditorArea({
       {status === "oversize" && oversizeNote && (
         <p className="hint">{oversizeNote}</p>
       )}
-      {/* Editor mounts here; hidden (not unmounted) on binary/error states. */}
+      {/* Editor mounts here; hidden (not unmounted) on binary/error states —
+          and while a markdown tab shows its rendered pane instead. */}
       <div
         className="weditor__cm"
         ref={hostRef}
-        style={{ display: status === "ready" ? "block" : "none" }}
+        style={{
+          display: status === "ready" && !showPreview ? "block" : "none",
+        }}
       />
+      {showPreview && mdHtml?.for === key && (
+        <div
+          ref={mdHostRef}
+          className="weditor__md"
+          onClick={onMdPaneClick}
+          dangerouslySetInnerHTML={{ __html: mdHtml.html }}
+        />
+      )}
       {status === "loading" && <p className="hint">Loading…</p>}
 
       {ctxMenu &&

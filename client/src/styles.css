@@ -1270,6 +1270,126 @@ audio.weditor__media {
   width: min(480px, 100%);
 }
 
+/* Rendered markdown: a readable column, scrolling in place of the editor. */
+.weditor__md {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px 32px 48px;
+  font-size: 14px;
+  line-height: 1.6;
+  scrollbar-width: thin;
+}
+.weditor__md > *:first-child {
+  margin-top: 0;
+}
+.weditor__md h1,
+.weditor__md h2,
+.weditor__md h3,
+.weditor__md h4,
+.weditor__md h5,
+.weditor__md h6 {
+  margin: 1.4em 0 0.5em;
+  line-height: 1.3;
+  font-weight: 600;
+}
+.weditor__md h1 {
+  font-size: 1.7em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.3em;
+}
+.weditor__md h2 {
+  font-size: 1.4em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.25em;
+}
+.weditor__md h3 {
+  font-size: 1.2em;
+}
+.weditor__md h4,
+.weditor__md h5,
+.weditor__md h6 {
+  font-size: 1em;
+}
+.weditor__md p {
+  margin: 0.6em 0;
+}
+.weditor__md ul,
+.weditor__md ol {
+  margin: 0.6em 0;
+  padding-left: 2em;
+}
+.weditor__md li {
+  margin: 0.25em 0;
+}
+.weditor__md li > p {
+  margin: 0.35em 0;
+}
+.weditor__md blockquote {
+  margin: 0.8em 0;
+  padding: 0.1em 1em;
+  border-left: 3px solid var(--accent);
+  color: var(--fg-dim);
+  background: rgba(255, 255, 255, 0.03);
+}
+.weditor__md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.weditor__md pre {
+  margin: 0.8em 0;
+  padding: 12px 14px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  scrollbar-width: thin;
+}
+.weditor__md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+.weditor__md table {
+  margin: 0.8em 0;
+  border-collapse: collapse;
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+.weditor__md th,
+.weditor__md td {
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  text-align: left;
+}
+.weditor__md th {
+  background: var(--bg-alt);
+  font-weight: 600;
+}
+.weditor__md img {
+  max-width: 100%;
+}
+.weditor__md a {
+  color: var(--accent);
+}
+.weditor__md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.6em 0;
+}
+.weditor__md input[type="checkbox"] {
+  /* GFM task lists; keep the native box legible on the dark background. */
+  margin-right: 0.4em;
+}
+
 .service-panel {
   background:
     radial-gradient(
