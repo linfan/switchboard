@@ -42,6 +42,17 @@ REPEATER_TOKEN ?= dev-repeater-token
 REPEATER_CA ?= server/data/switchboard-cert.pem
 REPEATER_DATA ?= server/data/switchboard-worker.db
 
+# `make set-version x.y.z` — the version is a positional extra goal, so lift it
+# out of MAKECMDGOALS and give it a no-op rule of its own (otherwise make fails
+# with "no rule to make target 'x.y.z'").
+ifneq (,$(filter set-version,$(MAKECMDGOALS)))
+VERSION := $(word 2,$(MAKECMDGOALS))
+ifneq (,$(VERSION))
+$(VERSION):
+	@:
+endif
+endif
+
 # ---------------------------------------------------------------- meta
 .PHONY: help
 help: ## Show this help
@@ -162,8 +173,8 @@ lint: ## Lint Rust (clippy + rustfmt) + client (tsc + eslint + prettier) + e2e
 
 # ---------------------------------------------------------------- release
 .PHONY: set-version
-set-version: ## Align every component to one version: make set-version VERSION=x.y.z
-	@test -n "$(VERSION)" || { echo "usage: make set-version VERSION=x.y.z"; exit 1; }
+set-version: ## Align every component to one version: make set-version x.y.z
+	@test -n "$(VERSION)" || { echo "usage: make set-version x.y.z"; exit 1; }
 	@echo "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+.-][0-9A-Za-z.+.-]*)?$$' \
 	  || { echo "error: '$(VERSION)' is not valid semver"; exit 1; }
 	@# Rust workspace (server + shared crates) + root Cargo.lock
