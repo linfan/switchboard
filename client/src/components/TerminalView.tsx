@@ -91,6 +91,7 @@ export function TerminalView({
       </svg>
     );
   } else if (locked) {
+    // Lock ON — closed padlock
     title = "Locked — click to unlock scrolling";
     icon = (
       <svg
@@ -101,23 +102,23 @@ export function TerminalView({
         aria-hidden="true"
       >
         <path
-          d="M12 6.5V5a4 4 0 0 0-8 0v1.5"
+          d="M5 7.5V5a3 3 0 0 1 6 0v2.5"
           stroke="currentColor"
           strokeWidth="1.3"
           strokeLinecap="round"
           strokeLinejoin="round"
         />
         <rect
-          x="3"
-          y="6.5"
-          width="10"
-          height="7"
-          rx="1"
+          x="2.5"
+          y="7.5"
+          width="11"
+          height="6.5"
+          rx="1.2"
           stroke="currentColor"
           strokeWidth="1.3"
         />
         <path
-          d="M8 9.5v2"
+          d="M8 10v2"
           stroke="currentColor"
           strokeWidth="1.3"
           strokeLinecap="round"
@@ -125,6 +126,7 @@ export function TerminalView({
       </svg>
     );
   } else {
+    // Lock OFF — open padlock (same body, broken shackle, no keyhole)
     title = "Unlocked — click to lock scrolling";
     icon = (
       <svg
@@ -135,26 +137,20 @@ export function TerminalView({
         aria-hidden="true"
       >
         <path
-          d="M12 6.5V5a4 4 0 0 0-6.5-3"
+          d="M5 7.5V5a3 3 0 0 1 4.5-2.5"
           stroke="currentColor"
           strokeWidth="1.3"
           strokeLinecap="round"
           strokeLinejoin="round"
         />
         <rect
-          x="3"
-          y="6.5"
-          width="10"
-          height="7"
-          rx="1"
+          x="2.5"
+          y="7.5"
+          width="11"
+          height="6.5"
+          rx="1.2"
           stroke="currentColor"
           strokeWidth="1.3"
-        />
-        <path
-          d="M8 9.5v2"
-          stroke="currentColor"
-          strokeWidth="1.3"
-          strokeLinecap="round"
         />
       </svg>
     );

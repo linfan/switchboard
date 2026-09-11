@@ -167,7 +167,7 @@ export function write(serviceId: string, taskId: string, frame: Frame): void {
     });
   } else if (frame.kind === "output") {
     e.term.write(frame.data, () => {
-      if (e.follow) e.term.scrollToBottom();
+      if (e.lock || e.follow) e.term.scrollToBottom();
     });
   }
 }
@@ -262,13 +262,33 @@ export function attach(
     // so its public onScroll stays silent for wheel/scrollbar interaction. Watch
     // the DOM scroller instead; xterm registers its own handler first, so ydisp
     // is already up to date by the time this runs.
+    //
+    // Only re-derive follow after the scroll stream settles (50ms debounce).
+    // xterm's internal reflow (fit/resize/scrollToBottom) can fire scroll events
+    // at intermediate positions where viewportY < baseY transiently; a direct
+    // syncFollow would incorrectly set follow=false on every programmatic reflow.
     const vp = viewportEl(e);
+    let scrollTimer: number | null = null;
     vp?.addEventListener("scroll", () => {
       // React removes our element before TerminalView's cleanup runs, so a
       // scroll event is the only moment the live offset can be noted.
       e.scrollTop = vp.scrollTop;
-      syncFollow(e);
+      if (scrollTimer !== null) clearTimeout(scrollTimer);
+      scrollTimer = window.setTimeout(() => {
+        scrollTimer = null;
+        syncFollow(e);
+      }, 50);
     });
+    // Immediately pause follow on wheel scroll so an in-flight write() callback
+    // doesn't steal the user's scroll position (the debounced scroll handler
+    // will re-check the settled position 50ms later).
+    vp?.addEventListener(
+      "wheel",
+      () => {
+        if (e.follow) setFollow(e, false);
+      },
+      { passive: true },
+    );
     // When the auto-follow lock is on and the user has scrolled away, pressing
     // any key should jump back to the bottom and resume following.
     e.el.addEventListener("keydown", () => {
