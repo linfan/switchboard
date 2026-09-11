@@ -31,14 +31,34 @@ interface Entry {
   /** Detached host element; re-parented into the panel by TerminalView. */
   el: HTMLDivElement;
   opened: boolean;
-  /** Viewport is pinned to the last line, so new output keeps auto-scrolling. */
+  /**
+   * Viewport is pinned to the last line, so new output keeps auto-scrolling.
+   * Flipping to false means the user scrolled away to read history, which is
+   * when the jump-to-bottom affordance appears.
+   */
   follow: boolean;
+  /** Notified on every `follow` flip; see onFollow. */
+  followListeners: Set<(following: boolean) => void>;
   serviceId: string;
   taskId: string;
 }
 
 const entries = new Map<string, Entry>();
 const encoder = new TextEncoder();
+
+/** Flip `follow` and tell subscribers, skipping no-op transitions so a smooth
+ *  wheel gesture doesn't re-render React on every scrolled row. */
+function setFollow(e: Entry, follow: boolean): void {
+  if (e.follow === follow) return;
+  e.follow = follow;
+  for (const l of e.followListeners) l(follow);
+}
+
+/** Re-derive `follow` from where the viewport sits in the buffer. */
+function syncFollow(e: Entry): void {
+  const b = e.term.buffer.active;
+  setFollow(e, b.viewportY >= b.baseY);
+}
 
 /**
  * Font size (px) applied to every terminal, adjustable via the zoom shortcuts.
@@ -80,15 +100,22 @@ function ensure(serviceId: string, taskId: string): Entry {
   const el = document.createElement("div");
   el.className = "term-host";
 
-  e = { term, fit, el, opened: false, follow: true, serviceId, taskId };
+  e = {
+    term,
+    fit,
+    el,
+    opened: false,
+    follow: true,
+    followListeners: new Set(),
+    serviceId,
+    taskId,
+  };
   const entry = e;
   // Track whether the viewport is riding the bottom. xterm only auto-scrolls on
   // write while the user is already at the bottom, so we mirror that state here
   // and re-assert it after writes/refits (a reflow can nudge ydisp off ybase).
-  term.onScroll(() => {
-    const b = term.buffer.active;
-    entry.follow = b.viewportY >= b.baseY;
-  });
+  // This fires for buffer-driven scrolls only; user scrolling is caught in attach.
+  term.onScroll(() => syncFollow(entry));
   entries.set(key, e);
   return e;
 }
@@ -101,7 +128,7 @@ export function write(serviceId: string, taskId: string, frame: Frame): void {
     // reconstructs the *current* screen, so always land the viewport on it.
     e.term.reset();
     e.term.write(frame.data, () => {
-      e.follow = true;
+      setFollow(e, true);
       e.term.scrollToBottom();
     });
   } else if (frame.kind === "output") {
@@ -115,6 +142,41 @@ export function write(serviceId: string, taskId: string, frame: Frame): void {
   }
 }
 
+/**
+ * Whether a task's viewport is riding the last line. Safe to call during render:
+ * a terminal that doesn't exist yet has nothing scrolled away from, so it reads
+ * as following rather than being constructed on the spot.
+ */
+export function isFollowing(serviceId: string, taskId: string): boolean {
+  return entries.get(convKey(serviceId, taskId))?.follow ?? true;
+}
+
+/**
+ * Subscribe to a task's follow-state flips, so the panel can show a
+ * jump-to-bottom affordance while the user reads history and hide it again once
+ * they return to the latest output. Resolves to an unsubscribe function.
+ */
+export function onFollow(
+  serviceId: string,
+  taskId: string,
+  cb: (following: boolean) => void,
+): () => void {
+  const e = ensure(serviceId, taskId);
+  e.followListeners.add(cb);
+  return () => {
+    e.followListeners.delete(cb);
+  };
+}
+
+/** Jump to the latest output and resume auto-following it. */
+export function scrollToBottom(serviceId: string, taskId: string): void {
+  const e = entries.get(convKey(serviceId, taskId));
+  if (!e) return;
+  setFollow(e, true);
+  e.term.scrollToBottom();
+  e.term.focus();
+}
+
 /** Mount a task's terminal into `host` (idempotent across task switches). */
 export function attach(
   serviceId: string,
@@ -126,6 +188,13 @@ export function attach(
   if (!e.opened) {
     e.term.open(e.el);
     e.opened = true;
+    // xterm funnels user scrolling through scrollLines(..., suppressScrollEvent),
+    // so its public onScroll stays silent for wheel/scrollbar interaction. Watch
+    // the DOM scroller instead; xterm registers its own handler first, so ydisp
+    // is already up to date by the time this runs.
+    e.el
+      .querySelector(".xterm-viewport")
+      ?.addEventListener("scroll", () => syncFollow(e));
   }
   const settle = () => {
     try {

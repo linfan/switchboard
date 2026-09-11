@@ -133,6 +133,58 @@ test("terminal screen content is restored after a full client reload", async ({
   });
 });
 
+test("scrolling away from the last line pauses auto-follow and offers a jump back", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
+
+  await addWorkspace(page, "proj");
+  await openNewTask(page, "proj");
+  const dialog = page.getByRole("dialog", { name: "New task" });
+  await dialog.getByLabel("Title (optional)").fill("follow-task");
+  await dialog.getByRole("button", { name: "Create" }).click();
+  const conv = page.locator(".conv", { hasText: "follow-task" });
+  await expect(conv).toBeVisible({ timeout: 15000 });
+  await conv.click();
+
+  const rows = page.locator(".xterm-rows");
+  const screen = page.locator(".xterm-screen");
+  const jump = page.locator(".term-jump");
+  await expect(rows).toContainText("AGENT-READY", { timeout: 15000 });
+
+  // Fill the scrollback (each line comes back as an echo plus a reply) so the
+  // viewport can actually leave the last line.
+  await screen.click();
+  await page.keyboard.type(
+    Array.from({ length: 100 }, (_, i) => `filler${i}`).join("\n") + "\n",
+    { delay: 1 },
+  );
+  const last = "reply:filler99";
+  await expect(rows).toContainText(last, { timeout: 15000 });
+  // Riding the bottom: no affordance.
+  await expect(jump).toBeHidden();
+
+  // Wheel up to read history.
+  const box = await screen.boundingBox();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.wheel(0, -2000);
+  await expect(jump).toBeVisible();
+  await expect(rows).not.toContainText(last);
+
+  // Scrolling back down by hand resumes following and hides the button again.
+  await page.mouse.wheel(0, 2000);
+  await expect(jump).toBeHidden();
+  await expect(rows).toContainText(last);
+
+  // The button lands on the latest output in one click, and resumes following.
+  await page.mouse.wheel(0, -2000);
+  await expect(jump).toBeVisible();
+  await jump.click();
+  await expect(jump).toBeHidden();
+  await expect(rows).toContainText(last);
+});
+
 test("hosting service reports healthy over REST", async ({ request }) => {
   const res = await request.get(`${HTTP}/health`);
   expect(res.ok()).toBeTruthy();
