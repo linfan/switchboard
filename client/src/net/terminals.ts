@@ -54,6 +54,14 @@ interface Entry {
   lockListeners: Set<(locked: boolean) => void>;
   serviceId: string;
   taskId: string;
+  /**
+   * Set true while a programmatic scroll operation (write callback, refit,
+   * settle, setFontSize) is in progress. The scroll listener skips syncFollow
+   * when this flag is set, preventing xterm's internal reflow/scrollToBottom
+   * from incorrectly breaking the follow state. User-initiated scrolls
+   * (wheel, scrollbar, keyboard) always have this flag false.
+   */
+  _inSyncGuard: boolean;
 }
 
 const entries = new Map<string, Entry>();
@@ -71,6 +79,20 @@ function setFollow(e: Entry, follow: boolean): void {
 function syncFollow(e: Entry): void {
   const b = e.term.buffer.active;
   setFollow(e, b.viewportY >= b.baseY);
+}
+
+/**
+ * Call scrollToBottom and suppress the resulting DOM scroll event from
+ * re-evaluating the follow state. The _inSyncGuard flag is set before the
+ * call and cleared on the next macrotask, after the browser has dispatched
+ * any queued scroll event from the programmatic scroll change.
+ */
+function programmaticScrollToBottom(e: Entry): void {
+  e._inSyncGuard = true;
+  e.term.scrollToBottom();
+  setTimeout(() => {
+    e._inSyncGuard = false;
+  }, 0);
 }
 
 /** The element xterm scrolls; absent until `Terminal.open` has run. */
@@ -147,6 +169,7 @@ function ensure(serviceId: string, taskId: string): Entry {
     followListeners: new Set(),
     lock: true,
     lockListeners: new Set(),
+    _inSyncGuard: false,
     serviceId,
     taskId,
   };
@@ -163,11 +186,11 @@ export function write(serviceId: string, taskId: string, frame: Frame): void {
     e.term.reset();
     e.term.write(frame.data, () => {
       setFollow(e, true);
-      e.term.scrollToBottom();
+      programmaticScrollToBottom(e);
     });
   } else if (frame.kind === "output") {
     e.term.write(frame.data, () => {
-      if (e.lock || e.follow) e.term.scrollToBottom();
+      if (e.lock || e.follow) programmaticScrollToBottom(e);
     });
   }
 }
@@ -232,7 +255,7 @@ export function toggleLock(serviceId: string, taskId: string): void {
   if (e.lock) {
     // Enabling lock while scrolled away: jump to bottom immediately.
     setFollow(e, true);
-    e.term.scrollToBottom();
+    programmaticScrollToBottom(e);
     e.term.focus();
   }
   for (const cb of e.lockListeners) cb(e.lock);
@@ -243,7 +266,7 @@ export function scrollToBottom(serviceId: string, taskId: string): void {
   const e = entries.get(convKey(serviceId, taskId));
   if (!e) return;
   setFollow(e, true);
-  e.term.scrollToBottom();
+  programmaticScrollToBottom(e);
   e.term.focus();
 }
 
@@ -263,60 +286,35 @@ export function attach(
     // the DOM scroller instead; xterm registers its own handler first, so ydisp
     // is already up to date by the time this runs.
     //
-    // The scroll listener only re-derives follow when the user explicitly
-    // initiated the scroll (wheel, scrollbar drag, or keyboard navigation).
-    // Programmatic scrolls from xterm's internal reflow (fit/resize/
-    // scrollToBottom) are ignored — they were never requested by the user and
-    // should not silently break auto-follow.
+    // The scroll listener re-derives follow on every DOM scroll event, but
+    // skips re-evaluation when _inSyncGuard is set — programmatic scroll
+    // operations (write callback, refit, settle, setFontSize) set this flag
+    // and the resulting scroll events are ignored.
     const vp = viewportEl(e);
-    let userScrolling = false;
     vp?.addEventListener("scroll", () => {
       // React removes our element before TerminalView's cleanup runs, so a
       // scroll event is the only moment the live offset can be noted.
       e.scrollTop = vp.scrollTop;
-      if (userScrolling) {
-        userScrolling = false;
+      if (!e._inSyncGuard) {
         syncFollow(e);
       }
     });
     // Mark every wheel event as user-initiated scrolling and immediately
     // pause follow so an in-flight write() callback cannot steal the
-    // scroll position. The scroll listener will re-check the settled
-    // position (via syncFollow) after the browser finishes scrolling.
+    // scroll position.
     vp?.addEventListener(
       "wheel",
       () => {
-        userScrolling = true;
         if (e.follow) setFollow(e, false);
       },
       { passive: true },
     );
-    // Mousedown near the right edge of the viewport means the user is
-    // about to drag the scrollbar thumb — treat subsequent scroll events
-    // as user-initiated.
-    vp?.addEventListener("mousedown", (ev: MouseEvent) => {
-      const rect = vp.getBoundingClientRect();
-      if (ev.clientX > rect.right - 16) userScrolling = true;
-    });
-    // Keyboard navigation (arrows, page-up/down, home/end) inside the
-    // terminal host also counts as user-initiated scrolling.
-    e.el.addEventListener("keydown", (ev: KeyboardEvent) => {
-      if (
-        ev.key.startsWith("Arrow") ||
-        ev.key === "PageUp" ||
-        ev.key === "PageDown" ||
-        ev.key === "Home" ||
-        ev.key === "End"
-      ) {
-        userScrolling = true;
-      }
-    });
     // When the auto-follow lock is on and the user has scrolled away, pressing
     // any key should jump back to the bottom and resume following.
     e.el.addEventListener("keydown", () => {
       if (e.lock && !e.follow) {
         setFollow(e, true);
-        e.term.scrollToBottom();
+        programmaticScrollToBottom(e);
       }
     });
   }
@@ -332,7 +330,7 @@ export function attach(
     // over old on re-attach. A full refresh clears that; a plain fit does not
     // when the geometry is unchanged.
     e.term.refresh(0, e.term.rows - 1);
-    if (e.follow) e.term.scrollToBottom();
+    if (e.follow) programmaticScrollToBottom(e);
   };
   // Defer the first fit until the host has a measured size.
   requestAnimationFrame(() => {
@@ -362,7 +360,7 @@ export function refit(serviceId: string, taskId: string): void {
   }
   // fit() reflows the buffer, which can leave the viewport above the last line;
   // re-pin so a resize never scrolls live output out of view.
-  if (e.follow) e.term.scrollToBottom();
+  if (e.follow) programmaticScrollToBottom(e);
 }
 
 /**
@@ -381,7 +379,7 @@ export function setFontSize(size: number): void {
       // ignore transient zero-size measurements
     }
     e.term.refresh(0, e.term.rows - 1);
-    if (e.follow) e.term.scrollToBottom();
+    if (e.follow) programmaticScrollToBottom(e);
   }
 }
 

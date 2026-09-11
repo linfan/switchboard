@@ -58,11 +58,11 @@ export function TerminalView({
   const locked = useSyncExternalStore(subscribeLock, getLocked);
 
   const handleClick = () => {
-    if (locked && !following) {
-      // Locked but paused — jump to bottom (stays locked).
+    if (!following) {
+      // Not at bottom — jump to latest output.
       terminals.scrollToBottom(serviceId, taskId);
     } else {
-      // Toggle lock.
+      // At bottom — toggle lock.
       terminals.toggleLock(serviceId, taskId);
     }
   };
@@ -71,8 +71,8 @@ export function TerminalView({
   let title: string;
   let icon: JSX.Element;
 
-  if (locked && !following) {
-    title = "Locked — click to jump to latest output";
+  if (!following) {
+    title = "Jump to latest output";
     icon = (
       <svg
         width="14"
@@ -163,7 +163,7 @@ export function TerminalView({
         type="button"
         className={
           "term-jump" +
-          (locked && !following ? " term-jump--alert" : "") +
+          (!following ? " term-jump--alert" : "") +
           (locked ? " term-jump--locked" : " term-jump--unlocked")
         }
         title={title}
