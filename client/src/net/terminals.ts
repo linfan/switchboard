@@ -140,12 +140,6 @@ function ensure(serviceId: string, taskId: string): Entry {
     serviceId,
     taskId,
   };
-  const entry = e;
-  // Track whether the viewport is riding the bottom. xterm only auto-scrolls on
-  // write while the user is already at the bottom, so we mirror that state here
-  // and re-assert it after writes/refits (a reflow can nudge ydisp off ybase).
-  // This fires for buffer-driven scrolls only; user scrolling is caught in attach.
-  term.onScroll(() => syncFollow(entry));
   entries.set(key, e);
   return e;
 }
@@ -162,12 +156,8 @@ export function write(serviceId: string, taskId: string, frame: Frame): void {
       e.term.scrollToBottom();
     });
   } else if (frame.kind === "output") {
-    // Pin to the bottom after the chunk is parsed if we were following it. This
-    // keeps streaming output (Qoder-style downward growth) glued to the latest
-    // line instead of drifting up when a write races with a reflow.
-    const follow = e.follow;
     e.term.write(frame.data, () => {
-      if (follow) e.term.scrollToBottom();
+      if (e.follow) e.term.scrollToBottom();
     });
   }
 }
