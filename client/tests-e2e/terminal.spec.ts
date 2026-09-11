@@ -133,7 +133,7 @@ test("terminal screen content is restored after a full client reload", async ({
   });
 });
 
-test("scrolling away from the last line pauses auto-follow and offers a jump back", async ({
+test("scrolling away from the last line pauses auto-follow and the lock button changes state", async ({
   page,
 }) => {
   await page.goto("/");
@@ -151,6 +151,8 @@ test("scrolling away from the last line pauses auto-follow and offers a jump bac
   const rows = page.locator(".xterm-rows");
   const screen = page.locator(".xterm-screen");
   const jump = page.locator(".term-jump");
+  const lockedClass = "term-jump--locked";
+  const alertClass = "term-jump--alert";
   await expect(rows).toContainText("AGENT-READY", { timeout: 15000 });
 
   // Fill the scrollback (each line comes back as an echo plus a reply) so the
@@ -162,26 +164,29 @@ test("scrolling away from the last line pauses auto-follow and offers a jump bac
   );
   const last = "reply:filler99";
   await expect(rows).toContainText(last, { timeout: 15000 });
-  // Riding the bottom: no affordance.
-  await expect(jump).toBeHidden();
+  // Riding the bottom: lock button shows locked state.
+  await expect(jump).toHaveClass(new RegExp(lockedClass));
+  await expect(jump).not.toHaveClass(new RegExp(alertClass));
 
   // Wheel up to read history.
   const box = await screen.boundingBox();
   await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
   await page.mouse.wheel(0, -2000);
-  await expect(jump).toBeVisible();
+  await expect(jump).toHaveClass(new RegExp(alertClass));
   await expect(rows).not.toContainText(last);
 
-  // Scrolling back down by hand resumes following and hides the button again.
+  // Scrolling back down by hand resumes following and shows locked state again.
   await page.mouse.wheel(0, 2000);
-  await expect(jump).toBeHidden();
+  await expect(jump).toHaveClass(new RegExp(lockedClass));
+  await expect(jump).not.toHaveClass(new RegExp(alertClass));
   await expect(rows).toContainText(last);
 
   // The button lands on the latest output in one click, and resumes following.
   await page.mouse.wheel(0, -2000);
-  await expect(jump).toBeVisible();
+  await expect(jump).toHaveClass(new RegExp(alertClass));
   await jump.click();
-  await expect(jump).toBeHidden();
+  await expect(jump).toHaveClass(new RegExp(lockedClass));
+  await expect(jump).not.toHaveClass(new RegExp(alertClass));
   await expect(rows).toContainText(last);
 });
 
@@ -213,7 +218,7 @@ test("re-selecting a conversation keeps the viewport pinned to the latest output
   );
   const last = "reply:filler199";
   await expect(rows).toContainText(last, { timeout: 20000 });
-  await expect(jump).toBeHidden();
+  await expect(jump).toHaveClass(/term-jump--locked/);
 
   // Switch to the workspace view and back, which unmounts the pane and
   // re-parents the terminal's element. Removing an element zeroes its scrollTop
@@ -238,7 +243,7 @@ test("re-selecting a conversation keeps the viewport pinned to the latest output
   const box = await screen.boundingBox();
   await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
   await page.mouse.wheel(0, 120);
-  await expect(jump).toBeHidden();
+  await expect(jump).toHaveClass(/term-jump--locked/);
   await expect(rows).toContainText(last);
 });
 

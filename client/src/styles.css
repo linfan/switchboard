@@ -249,7 +249,8 @@ body {
   width: 100%;
   height: 100%;
 }
-/* Shown only while the viewport is scrolled away from the latest output. */
+/* Floating button for the scroll-lock toggle / jump-to-bottom action.
+   Always visible at the top-right corner of the terminal pane. */
 .term-jump {
   position: absolute;
   top: 10px;
@@ -268,10 +269,25 @@ body {
   cursor: pointer;
   box-shadow: 0 2px 8px rgb(0 0 0 / 45%);
   animation: term-jump-in 0.12s ease-out;
+  transition: border-color 0.15s, color 0.15s, box-shadow 0.15s;
 }
 .term-jump:hover {
   color: var(--fg);
   border-color: var(--accent);
+}
+/* Lock is ON: accent border indicates scrolling is locked. */
+.term-jump--locked {
+  border-color: var(--accent-dim, var(--accent));
+}
+/* Lock is OFF: border returns to default. */
+.term-jump--unlocked {
+  border-color: var(--border);
+}
+/* Locked but user scrolled away: pulse to draw attention. */
+.term-jump--alert {
+  color: var(--fg);
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 45%), 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 @keyframes term-jump-in {
   from {

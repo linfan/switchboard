@@ -44,6 +44,14 @@ interface Entry {
   follow: boolean;
   /** Notified on every `follow` flip; see onFollow. */
   followListeners: Set<(following: boolean) => void>;
+  /**
+   * When lock is ON, auto-follow is "sticky": scrolling up pauses follow but
+   * pressing any key (or scrolling back to the bottom) resumes it immediately.
+   * A toggle button in the terminal UI controls this flag.
+   */
+  lock: boolean;
+  /** Notified on every `lock` flip; see onLock. */
+  lockListeners: Set<(locked: boolean) => void>;
   serviceId: string;
   taskId: string;
 }
@@ -137,6 +145,8 @@ function ensure(serviceId: string, taskId: string): Entry {
     opened: false,
     follow: true,
     followListeners: new Set(),
+    lock: true,
+    lockListeners: new Set(),
     serviceId,
     taskId,
   };
@@ -188,6 +198,46 @@ export function onFollow(
   };
 }
 
+/**
+ * Whether auto-follow lock is ON for a task. Defaults to true for new
+ * terminals. Safe to call during render.
+ */
+export function isLocked(serviceId: string, taskId: string): boolean {
+  return entries.get(convKey(serviceId, taskId))?.lock ?? true;
+}
+
+/**
+ * Subscribe to lock-state flips. Returns an unsubscribe function.
+ */
+export function onLock(
+  serviceId: string,
+  taskId: string,
+  cb: (locked: boolean) => void,
+): () => void {
+  const e = ensure(serviceId, taskId);
+  e.lockListeners.add(cb);
+  return () => {
+    e.lockListeners.delete(cb);
+  };
+}
+
+/**
+ * Toggle the auto-follow lock. When locking ON while scrolled away the
+ * viewport jumps to the latest output and resumes following.
+ */
+export function toggleLock(serviceId: string, taskId: string): void {
+  const e = entries.get(convKey(serviceId, taskId));
+  if (!e) return;
+  e.lock = !e.lock;
+  if (e.lock) {
+    // Enabling lock while scrolled away: jump to bottom immediately.
+    setFollow(e, true);
+    e.term.scrollToBottom();
+    e.term.focus();
+  }
+  for (const cb of e.lockListeners) cb(e.lock);
+}
+
 /** Jump to the latest output and resume auto-following it. */
 export function scrollToBottom(serviceId: string, taskId: string): void {
   const e = entries.get(convKey(serviceId, taskId));
@@ -218,6 +268,14 @@ export function attach(
       // scroll event is the only moment the live offset can be noted.
       e.scrollTop = vp.scrollTop;
       syncFollow(e);
+    });
+    // When the auto-follow lock is on and the user has scrolled away, pressing
+    // any key should jump back to the bottom and resume following.
+    e.el.addEventListener("keydown", () => {
+      if (e.lock && !e.follow) {
+        setFollow(e, true);
+        e.term.scrollToBottom();
+      }
     });
   }
   restoreScrollTop(e);
