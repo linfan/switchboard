@@ -185,6 +185,63 @@ test("scrolling away from the last line pauses auto-follow and offers a jump bac
   await expect(rows).toContainText(last);
 });
 
+test("re-selecting a conversation keeps the viewport pinned to the latest output", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
+
+  await addWorkspace(page, "proj");
+  await openNewTask(page, "proj");
+  const dialog = page.getByRole("dialog", { name: "New task" });
+  await dialog.getByLabel("Title (optional)").fill("repin-task");
+  await dialog.getByRole("button", { name: "Create" }).click();
+  const conv = page.locator(".conv", { hasText: "repin-task" });
+  await expect(conv).toBeVisible({ timeout: 15000 });
+  await conv.click();
+
+  const rows = page.locator(".xterm-rows");
+  const screen = page.locator(".xterm-screen");
+  const jump = page.locator(".term-jump");
+  await expect(rows).toContainText("AGENT-READY", { timeout: 15000 });
+
+  // Build enough scrollback that a stray jump to the first line is unmistakable.
+  await screen.click();
+  await page.keyboard.type(
+    Array.from({ length: 200 }, (_, i) => `filler${i}`).join("\n") + "\n",
+    { delay: 1 },
+  );
+  const last = "reply:filler199";
+  await expect(rows).toContainText(last, { timeout: 20000 });
+  await expect(jump).toBeHidden();
+
+  // Switch to the workspace view and back, which unmounts the pane and
+  // re-parents the terminal's element. Removing an element zeroes its scrollTop
+  // behind xterm's back, so the DOM scroller has to be put back explicitly.
+  await page.locator(".workspace__head", { hasText: "proj" }).click();
+  await expect(screen).toHaveCount(0);
+  await conv.click();
+  await expect(rows).toContainText(last, { timeout: 15000 });
+
+  // Riding the bottom means the DOM scroller is maxed out. Left desynced it
+  // sits at 0 while xterm still reports the last line.
+  await expect
+    .poll(() =>
+      page
+        .locator(".xterm-viewport")
+        .evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop),
+    )
+    .toBe(0);
+
+  // The next wheel notch must be a no-op at the bottom, not a jump to line 1
+  // that also ends auto-follow.
+  const box = await screen.boundingBox();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.wheel(0, 120);
+  await expect(jump).toBeHidden();
+  await expect(rows).toContainText(last);
+});
+
 test("hosting service reports healthy over REST", async ({ request }) => {
   const res = await request.get(`${HTTP}/health`);
   expect(res.ok()).toBeTruthy();

@@ -30,6 +30,11 @@ interface Entry {
   fit: FitAddon;
   /** Detached host element; re-parented into the panel by TerminalView. */
   el: HTMLDivElement;
+  /**
+   * Last known `.xterm-viewport` scrollTop, recorded on every scroll event so
+   * it survives re-parenting. See `restoreScrollTop`.
+   */
+  scrollTop: number;
   opened: boolean;
   /**
    * Viewport is pinned to the last line, so new output keeps auto-scrolling.
@@ -58,6 +63,30 @@ function setFollow(e: Entry, follow: boolean): void {
 function syncFollow(e: Entry): void {
   const b = e.term.buffer.active;
   setFollow(e, b.viewportY >= b.baseY);
+}
+
+/** The element xterm scrolls; absent until `Terminal.open` has run. */
+function viewportEl(e: Entry): HTMLElement | null {
+  return e.el.querySelector<HTMLElement>(".xterm-viewport");
+}
+
+/**
+ * Put the DOM scroller back where xterm believes it is, after re-parenting.
+ *
+ * Inserting an element resets its scrollTop to 0 and xterm never notices: it
+ * caches the previous offset, so `syncScrollArea()`'s fast path compares that
+ * cache against `ydisp`, sees no change, and skips the rewrite. `ydisp` then
+ * says "last line" while the DOM says "first line", and the next scroll event
+ * makes xterm scroll by `round(0 / rowHeight) - ydisp` — hurling the viewport
+ * to the top of the scrollback. That lands as a DOM scroll event, so the follow
+ * listener reads it as the user scrolling away and auto-follow silently ends.
+ *
+ * A following terminal wants a maxed-out scroller, which is exact and needs no
+ * memory; otherwise fall back to the offset the last scroll event recorded.
+ */
+function restoreScrollTop(e: Entry): void {
+  const vp = viewportEl(e);
+  if (vp) vp.scrollTop = e.follow ? vp.scrollHeight : e.scrollTop;
 }
 
 /**
@@ -104,6 +133,7 @@ function ensure(serviceId: string, taskId: string): Entry {
     term,
     fit,
     el,
+    scrollTop: 0,
     opened: false,
     follow: true,
     followListeners: new Set(),
@@ -192,10 +222,15 @@ export function attach(
     // so its public onScroll stays silent for wheel/scrollbar interaction. Watch
     // the DOM scroller instead; xterm registers its own handler first, so ydisp
     // is already up to date by the time this runs.
-    e.el
-      .querySelector(".xterm-viewport")
-      ?.addEventListener("scroll", () => syncFollow(e));
+    const vp = viewportEl(e);
+    vp?.addEventListener("scroll", () => {
+      // React removes our element before TerminalView's cleanup runs, so a
+      // scroll event is the only moment the live offset can be noted.
+      e.scrollTop = vp.scrollTop;
+      syncFollow(e);
+    });
   }
+  restoreScrollTop(e);
   const settle = () => {
     try {
       e.fit.fit();
