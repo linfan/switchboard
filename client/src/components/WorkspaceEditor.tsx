@@ -895,6 +895,11 @@ function GitHistory({
 }) {
   const [commits, setCommits] = useState<GitCommit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    commit: GitCommit;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -940,11 +945,37 @@ ${c.body}`
 
 ${c.short} · ${c.author} · ${c.date}`}
           onClick={() => onSelect(c.hash)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setCtxMenu({ x: e.clientX, y: e.clientY, commit: c });
+          }}
         >
           <span className="weditor__label">{c.subject}</span>
           <span className="weditor__commit-meta">{c.short}</span>
         </button>
       ))}
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={[
+            {
+              label: "Copy commit id",
+              onClick: () => {
+                navigator.clipboard.writeText(ctxMenu.commit.hash).catch(() => {});
+              },
+            },
+            {
+              label: "Copy message",
+              onClick: () => {
+                navigator.clipboard.writeText(ctxMenu.commit.subject).catch(() => {});
+              },
+            },
+          ]}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
     </>
   );
 }
