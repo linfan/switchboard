@@ -263,32 +263,54 @@ export function attach(
     // the DOM scroller instead; xterm registers its own handler first, so ydisp
     // is already up to date by the time this runs.
     //
-    // Only re-derive follow after the scroll stream settles (50ms debounce).
-    // xterm's internal reflow (fit/resize/scrollToBottom) can fire scroll events
-    // at intermediate positions where viewportY < baseY transiently; a direct
-    // syncFollow would incorrectly set follow=false on every programmatic reflow.
+    // The scroll listener only re-derives follow when the user explicitly
+    // initiated the scroll (wheel, scrollbar drag, or keyboard navigation).
+    // Programmatic scrolls from xterm's internal reflow (fit/resize/
+    // scrollToBottom) are ignored — they were never requested by the user and
+    // should not silently break auto-follow.
     const vp = viewportEl(e);
-    let scrollTimer: number | null = null;
+    let userScrolling = false;
     vp?.addEventListener("scroll", () => {
       // React removes our element before TerminalView's cleanup runs, so a
       // scroll event is the only moment the live offset can be noted.
       e.scrollTop = vp.scrollTop;
-      if (scrollTimer !== null) clearTimeout(scrollTimer);
-      scrollTimer = window.setTimeout(() => {
-        scrollTimer = null;
+      if (userScrolling) {
+        userScrolling = false;
         syncFollow(e);
-      }, 50);
+      }
     });
-    // Immediately pause follow on wheel scroll so an in-flight write() callback
-    // doesn't steal the user's scroll position (the debounced scroll handler
-    // will re-check the settled position 50ms later).
+    // Mark every wheel event as user-initiated scrolling and immediately
+    // pause follow so an in-flight write() callback cannot steal the
+    // scroll position. The scroll listener will re-check the settled
+    // position (via syncFollow) after the browser finishes scrolling.
     vp?.addEventListener(
       "wheel",
       () => {
+        userScrolling = true;
         if (e.follow) setFollow(e, false);
       },
       { passive: true },
     );
+    // Mousedown near the right edge of the viewport means the user is
+    // about to drag the scrollbar thumb — treat subsequent scroll events
+    // as user-initiated.
+    vp?.addEventListener("mousedown", (ev: MouseEvent) => {
+      const rect = vp.getBoundingClientRect();
+      if (ev.clientX > rect.right - 16) userScrolling = true;
+    });
+    // Keyboard navigation (arrows, page-up/down, home/end) inside the
+    // terminal host also counts as user-initiated scrolling.
+    e.el.addEventListener("keydown", (ev: KeyboardEvent) => {
+      if (
+        ev.key.startsWith("Arrow") ||
+        ev.key === "PageUp" ||
+        ev.key === "PageDown" ||
+        ev.key === "Home" ||
+        ev.key === "End"
+      ) {
+        userScrolling = true;
+      }
+    });
     // When the auto-follow lock is on and the user has scrolled away, pressing
     // any key should jump back to the bottom and resume following.
     e.el.addEventListener("keydown", () => {
