@@ -162,6 +162,7 @@ export function EditorArea({
   onCloseAll,
   onDiffLayout,
   onOpenInEditor,
+  onRevealInTree,
 }: {
   workspaceId: string;
   service: { url: string; token: string };
@@ -180,6 +181,8 @@ export function EditorArea({
   onDiffLayout: (layout: DiffLayout) => void;
   /** Open the given absolute path as an editable tab (from the diff view). */
   onOpenInEditor: (absPath: string) => void;
+  /** Expand and scroll the file tree to the given absolute path. */
+  onRevealInTree: (absPath: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<Status>("loading");
@@ -240,6 +243,9 @@ export function EditorArea({
     mdPrev[k] ?? editors.getMdPreview(workspaceId, k) ?? true;
   // The active markdown tab is currently showing its rendered pane.
   const showPreview = !!key && isMd && mdRendered(key);
+  // Diff tab paths are repo-relative; edit tabs carry absolute paths already.
+  const absPath = (p: string) =>
+    p.startsWith("/") ? p : `${cwd.replace(/\/+$/, "")}/${p}`;
 
   const markDirty = (k: string, d: boolean) => {
     editors.setDirty(workspaceId, k, d);
@@ -1064,13 +1070,20 @@ export function EditorArea({
                   </button>
                 </div>
               )}
+              {path && (
+                <button
+                  className="btn weditor__reveal"
+                  title="Reveal this file in the file tree"
+                  onClick={() => onRevealInTree(absPath(path))}
+                >
+                  Reveal in tree
+                </button>
+              )}
               {mode === "diff" && path && (
                 <button
                   className="btn weditor__openeditor"
                   title="Open this file for editing in a new tab"
-                  onClick={() =>
-                    onOpenInEditor(`${cwd.replace(/\/+$/, "")}/${path}`)
-                  }
+                  onClick={() => onOpenInEditor(absPath(path))}
                 >
                   Open in editor
                 </button>

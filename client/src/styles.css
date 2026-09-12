@@ -1080,6 +1080,18 @@ body {
   background: rgba(76, 139, 245, 0.24);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
+/* Brief flash on the row a "Reveal in tree" jump landed on. */
+.weditor__row.is-reveal {
+  animation: weditor-reveal 1.5s ease-out;
+}
+@keyframes weditor-reveal {
+  0% {
+    background-color: rgba(76, 139, 245, 0.45);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
 .weditor__row--hint {
   color: var(--fg-dim);
   cursor: default;
@@ -1233,6 +1245,11 @@ body {
   align-self: center;
 }
 .weditor__openeditor {
+  flex: none;
+  align-self: center;
+  white-space: nowrap;
+}
+.weditor__reveal {
   flex: none;
   align-self: center;
   white-space: nowrap;

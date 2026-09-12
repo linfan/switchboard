@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 import * as editors from "../net/editors";
 import {
@@ -39,6 +39,43 @@ import { ContextMenu, type MenuItem } from "./Menu";
 
 type ServiceRef = { url: string; token: string };
 
+/**
+ * Resolve `path` against the tree rooted at `root`, returning the resolved
+ * path of every segment (the target last). Listings report canonicalized paths
+ * — the same form the tree rows use — so this is how a file path (either
+ * client-built from `root`, or already canonical because it came from the
+ * tree) is translated into the paths the tree is actually rendered with.
+ * Rejects when the path is outside the root or a segment can't be found.
+ */
+async function resolveTreePath(
+  service: ServiceRef,
+  root: string,
+  path: string,
+): Promise<string[]> {
+  const rootListing = await listDir(service, root);
+  const bases = [
+    root.replace(/\/+$/, ""),
+    rootListing.path.replace(/\/+$/, ""),
+  ];
+  const base = bases.find((b) => path.startsWith(`${b}/`));
+  if (!base) throw new Error(`outside workspace: ${path}`);
+  const parts = path.slice(base.length + 1).split("/");
+
+  const chain: string[] = [];
+  let entries = rootListing.entries;
+  for (const seg of parts) {
+    const entry = entries.find((e) => e.name === seg);
+    if (!entry) throw new Error(`not found: ${seg}`);
+    chain.push(entry.path);
+    // No need to list the target itself (a file — and its row path is just
+    // parent + name); intermediate directories must be listed to descend.
+    if (chain.length < parts.length) {
+      entries = (await listDir(service, entry.path)).entries;
+    }
+  }
+  return chain;
+}
+
 /** Right-pane file editor for a selected workspace. */
 export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
   const service = useStore((s) =>
@@ -72,6 +109,11 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
   const [panelWidth, setPanelWidth] = useState(280);
   // Header slot the editor's tab actions are portaled into (see EditorArea).
   const [actionsSlot, setActionsSlot] = useState<HTMLDivElement | null>(null);
+  // Latest reveal request from the editor toolbar; `seq` makes repeat clicks on
+  // the same path distinct so the tree re-scrolls.
+  const [reveal, setReveal] = useState<{ path: string; seq: number } | null>(
+    null,
+  );
   const startDrag = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -131,6 +173,25 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
       ? expandedDirs.filter((p) => p !== path)
       : [...expandedDirs, path];
     patch(workspace.id, { expandedDirs: next });
+  };
+
+  // Expand the tree down to `path` and have it scroll the row into view.
+  const revealInTree = async (path: string) => {
+    const chain = await resolveTreePath(service, workspace.cwd, path).catch(
+      () => null,
+    );
+    if (chain && chain.length > 1) {
+      const dirs = chain.slice(0, -1);
+      const current =
+        useStore.getState().editorState[workspace.id]?.expandedDirs ?? [];
+      patch(workspace.id, {
+        expandedDirs: [...new Set([...current, ...dirs])],
+      });
+    }
+    setReveal((prev) => ({
+      path: chain?.at(-1) ?? path,
+      seq: (prev?.seq ?? 0) + 1,
+    }));
   };
 
   const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -259,6 +320,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
                 root={workspace.cwd}
                 expanded={expandedDirs}
                 activePath={active?.mode === "edit" ? active.path : undefined}
+                reveal={reveal}
                 refreshKey={refreshKey}
                 onToggleDir={toggleDir}
                 onOpenFile={(path) =>
@@ -302,6 +364,9 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
                   onOpenDiff={(path, commit) =>
                     openTab(workspace.id, { path, mode: "diff", commit })
                   }
+                  onOpenInEditor={(path) =>
+                    openTab(workspace.id, { path, mode: "edit" })
+                  }
                 />
               </div>
             </section>
@@ -334,6 +399,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
           onOpenInEditor={(path) =>
             openTab(workspace.id, { path, mode: "edit" })
           }
+          onRevealInTree={revealInTree}
         />
       </div>
 
@@ -425,6 +491,8 @@ interface TreeActions {
   visibleDirs: Set<string>;
   renamingPath: string | null;
   setRenamingPath: (path: string | null) => void;
+  /** Path the last reveal landed on, flashed briefly so the jump is visible. */
+  revealPath: string | null;
   /** An in-progress "new file/folder" inline input inside directory `dir`. */
   creating: { dir: string; isDir: boolean } | null;
   setCreating: (c: { dir: string; isDir: boolean } | null) => void;
@@ -518,6 +586,7 @@ function FileTree({
   root,
   expanded,
   activePath,
+  reveal,
   refreshKey,
   onToggleDir,
   onOpenFile,
@@ -531,6 +600,8 @@ function FileTree({
   root: string;
   expanded: string[];
   activePath?: string;
+  /** A request from the editor toolbar to scroll `path` into view. */
+  reveal: { path: string; seq: number } | null;
   refreshKey: number;
   onToggleDir: (path: string) => void;
   onOpenFile: (path: string) => void;
@@ -554,6 +625,10 @@ function FileTree({
     dir: string;
     isDir: boolean;
   } | null>(null);
+  const treeRef = useRef<HTMLDivElement>(null);
+  // Path the last reveal landed on, flashed briefly so the eye can find it.
+  const [flashPath, setFlashPath] = useState<string | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout>>();
 
   const normFilter = filter.trim().toLowerCase();
 
@@ -581,11 +656,40 @@ function FileTree({
     };
   }, [service, root, normFilter, refreshKey]);
 
+  // Reveal request from the editor toolbar: drop any filter that would hide the
+  // row, then scroll it into view. Expanded ancestors only render their rows
+  // after their listings come back, so retry briefly until the row exists.
+  useEffect(() => {
+    if (!reveal) return;
+    setFilter("");
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = () => {
+      const el = treeRef.current?.querySelector<HTMLElement>(
+        `[data-path="${CSS.escape(reveal.path)}"]`,
+      );
+      if (el) {
+        el.scrollIntoView({ block: "nearest" });
+        el.focus({ preventScroll: true });
+        setFlashPath(reveal.path);
+        clearTimeout(flashTimer.current);
+        flashTimer.current = setTimeout(() => setFlashPath(null), 1600);
+        return;
+      }
+      if (attempts++ < 60) timer = setTimeout(tick, 50);
+    };
+    tick();
+    return () => clearTimeout(timer);
+  }, [reveal]);
+
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
+
   const actions: TreeActions = {
     service,
     expanded,
     activePath,
     contextPath: ctxMenu && !ctxMenu.isRoot ? ctxMenu.entry.path : null,
+    revealPath: flashPath,
     refreshKey,
     filter: normFilter,
     visibleDirs,
@@ -660,6 +764,7 @@ function FileTree({
 
   return (
     <div
+      ref={treeRef}
       className={`weditor__tree ${ctxMenu?.isRoot ? "is-context" : ""}`}
       onContextMenu={(e) => {
         // Right-click on the tree background targets the workspace root.
@@ -853,9 +958,12 @@ function DirNode({
               key={e.path}
               role="button"
               tabIndex={0}
+              data-path={e.path}
               className={`weditor__row weditor__row--file ${
                 actions.activePath === e.path ? "is-active" : ""
-              } ${actions.contextPath === e.path ? "is-context" : ""}`}
+              } ${actions.contextPath === e.path ? "is-context" : ""} ${
+                actions.revealPath === e.path ? "is-reveal" : ""
+              }`}
               style={{ paddingLeft: `${(depth + 1) * 12 + 8}px` }}
               title={e.name}
               onClick={() => {
@@ -961,7 +1069,7 @@ ${c.short} · ${c.author} · ${c.date}`}
           y={ctxMenu.y}
           items={[
             {
-              label: "Copy commit id",
+              label: "Copy commit ID",
               onClick: () => {
                 navigator.clipboard.writeText(ctxMenu.commit.hash).catch(() => {});
               },
@@ -988,17 +1096,28 @@ function ChangedFiles({
   commit,
   activePath,
   onOpenDiff,
+  onOpenInEditor,
 }: {
   service: ServiceRef;
   cwd: string;
   commit?: string;
   activePath?: string;
   onOpenDiff: (path: string, commit: string) => void;
+  /** Open the given absolute path as an editable tab. */
+  onOpenInEditor: (absPath: string) => void;
 }) {
   const [changes, setChanges] = useState<GitChange[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Collapsed directory paths (default: everything expanded).
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    change: GitChange;
+  } | null>(null);
+
+  // Git reports changed-file paths relative to the repo root; tabs use absolute.
+  const absPath = (p: string) => `${cwd.replace(/\/+$/, "")}/${p}`;
 
   useEffect(() => {
     if (!commit) {
@@ -1055,6 +1174,30 @@ function ChangedFiles({
           activePath={activePath}
           onToggle={toggle}
           onOpenDiff={onOpenDiff}
+          onFileContextMenu={(change, e) =>
+            setCtxMenu({ x: e.clientX, y: e.clientY, change })
+          }
+        />
+      )}
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={[
+            {
+              label: "Copy file path",
+              onClick: () => {
+                navigator.clipboard
+                  .writeText(absPath(ctxMenu.change.path))
+                  .catch(() => {});
+              },
+            },
+            {
+              label: "Open in editor",
+              onClick: () => onOpenInEditor(absPath(ctxMenu.change.path)),
+            },
+          ]}
+          onClose={() => setCtxMenu(null)}
         />
       )}
     </>
@@ -1099,6 +1242,7 @@ function ChangeTree({
   activePath,
   onToggle,
   onOpenDiff,
+  onFileContextMenu,
 }: {
   node: ChangeTreeNode;
   prefix: string;
@@ -1108,6 +1252,7 @@ function ChangeTree({
   activePath?: string;
   onToggle: (dirPath: string) => void;
   onOpenDiff: (path: string, commit: string) => void;
+  onFileContextMenu: (change: GitChange, e: React.MouseEvent) => void;
 }) {
   const indent = { paddingLeft: `${depth * 12 + 8}px` };
   const dirNames = [...node.dirs.keys()].sort((a, b) => a.localeCompare(b));
@@ -1145,6 +1290,7 @@ function ChangeTree({
                 activePath={activePath}
                 onToggle={onToggle}
                 onOpenDiff={onOpenDiff}
+                onFileContextMenu={onFileContextMenu}
               />
             )}
           </Fragment>
@@ -1159,6 +1305,11 @@ function ChangeTree({
           style={indent}
           title={c.path}
           onClick={() => onOpenDiff(c.path, commit)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onFileContextMenu(c, e);
+          }}
         >
           <span
             className={`weditor__status weditor__status--${c.status[0] ?? ""}`}
