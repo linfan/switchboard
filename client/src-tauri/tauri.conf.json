@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Switchboard",
-  "version": "0.5.1",
-  "identifier": "dev.switchboard.client",
+  "version": "0.6.0",
+  "identifier": "app.switchboard",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",

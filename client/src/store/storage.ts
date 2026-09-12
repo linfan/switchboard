@@ -1,5 +1,7 @@
 import type { StateStorage } from "zustand/middleware";
 
+import { invoke } from "../net/tauri";
+
 /**
  * Persistence backend for the zustand store.
  *
@@ -10,6 +12,11 @@ import type { StateStorage } from "zustand/middleware";
  * why removed services would reappear on the next launch. Writing through the
  * plugin and calling `save()` after every mutation makes each change durable
  * immediately.
+ *
+ * Where that file lives is the native layer's call: `tauri-plugin-store`
+ * resolves a bare name against the bundle identifier's directory, while this
+ * app keeps its data in a product-named folder, so `store_path` supplies the
+ * absolute path.
  */
 
 const isTauri =
@@ -26,8 +33,10 @@ let storePromise: Promise<TauriStore> | null = null;
 
 function tauriStore(): Promise<TauriStore> {
   if (!storePromise) {
-    storePromise = import("@tauri-apps/plugin-store").then(({ load }) =>
-      load("switchboard.json", { defaults: {}, autoSave: false }),
+    storePromise = invoke<string>("store_path").then((path) =>
+      import("@tauri-apps/plugin-store").then(({ load }) =>
+        load(path, { defaults: {}, autoSave: false }),
+      ),
     );
   }
   return storePromise;

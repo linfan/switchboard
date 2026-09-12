@@ -8,6 +8,7 @@ mod port_forward;
 
 use std::path::PathBuf;
 
+use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
 /// UTC instant this binary was compiled, stamped in by `build.rs`.
@@ -21,6 +22,31 @@ const GIT_COMMIT: &str = env!("SWITCHBOARD_GIT_COMMIT");
 const MENU_ID_SETTINGS: &str = "settings";
 #[cfg(target_os = "macos")]
 const EVENT_OPEN_SETTINGS: &str = "open-settings";
+
+/// Folder the settings store lives in. Tauri names it after the bundle
+/// identifier by default, which reads badly next to folders named after the
+/// products they belong to, so it carries the product name instead.
+const DATA_DIR_NAME: &str = "Switchboard";
+/// Settings store inside [`DATA_DIR_NAME`], written by `tauri-plugin-store`.
+const STORE_FILE: &str = "switchboard.json";
+
+/// `<platform data dir>/Switchboard` — [`DATA_DIR_NAME`] hung off the same base
+/// Tauri would have used, so the location stays idiomatic per platform.
+fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let identifier_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let base = identifier_dir
+        .parent()
+        .ok_or_else(|| format!("{} has no parent", identifier_dir.display()))?;
+    Ok(base.join(DATA_DIR_NAME))
+}
+
+/// Absolute path of the settings store. The frontend hands it to
+/// `tauri-plugin-store`, whose `load` resolves a relative name against the
+/// identifier-derived directory instead.
+#[tauri::command]
+fn store_path(app: tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(data_dir(&app)?.join(STORE_FILE))
+}
 
 /// `~/.switchboard/logs/switchboard-client.log`, or `None` if no home directory
 /// is discoverable (`HOME` on Unix, `USERPROFILE` on Windows).
@@ -253,7 +279,8 @@ pub fn run() {
             port_forward::start_port_forward,
             port_forward::stop_port_forward,
             port_forward::list_port_forwards,
-            frontend_log
+            frontend_log,
+            store_path
         ])
         // Media previews are cached on disk and released when their tab closes;
         // sweeping at both ends bounds the cache if a crash skipped the release.
