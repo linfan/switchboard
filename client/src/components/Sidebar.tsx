@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type DragEvent } from "react";
 
 import * as editors from "../net/editors";
 import { pool } from "../net/pool";
@@ -6,6 +6,7 @@ import { gitInfo, gitRemoveWorktree } from "../net/rest";
 import { useStore } from "../store/store";
 import {
   convKey,
+  sortConversations,
   type Conversation,
   type Service,
   type Workspace,
@@ -81,6 +82,100 @@ function GearIcon() {
   );
 }
 
+/** A sidebar row taking part in a drag-to-reorder. */
+interface DragRow {
+  kind: "service" | "workspace" | "task";
+  id: string;
+  /**
+   * Parent scope the row lives in. A drop only reorders within one scope, so a
+   * workspace can't be dragged into another service and a task can't be dragged
+   * into another workspace.
+   */
+  group: string;
+}
+
+/**
+ * The row currently being dragged. Module-scoped because a drag is a single
+ * interaction spanning components — each drop target has to ask whether what is
+ * hovering over it is a sibling it may reorder with.
+ */
+let dragged: DragRow | null = null;
+
+function isSibling(src: DragRow | null, row: DragRow): src is DragRow {
+  return (
+    src !== null &&
+    src.kind === row.kind &&
+    src.group === row.group &&
+    src.id !== row.id
+  );
+}
+
+/**
+ * Drag-to-reorder wiring for one sidebar row, using the same HTML5 drag events as
+ * the editor's tabs. `ids` lists the row's siblings in display order and
+ * `onReorder` moves the dragged id into the dropped-on id's slot.
+ */
+function useReorderDrag(
+  row: DragRow,
+  ids: string[],
+  onReorder: (fromId: string, toId: string) => void,
+) {
+  const [dragging, setDragging] = useState(false);
+  const [edge, setEdge] = useState<"top" | "bottom" | null>(null);
+
+  const reset = () => {
+    dragged = null;
+    setDragging(false);
+    setEdge(null);
+  };
+
+  return {
+    dragClass: `${dragging ? "is-dragging" : ""} ${
+      edge ? `is-drop-${edge}` : ""
+    }`.trim(),
+    handlers: {
+      draggable: true,
+      onDragStart: (e: DragEvent<HTMLElement>) => {
+        // A drag beginning inside the rename input belongs to the input: with a
+        // draggable ancestor WebKit turns selecting its text into a row drag.
+        if ((e.target as HTMLElement).closest("input")) {
+          e.preventDefault();
+          return;
+        }
+        dragged = row;
+        setDragging(true);
+        e.dataTransfer.effectAllowed = "move";
+        // WebKit/Firefox only fire drop events once drag data is set.
+        e.dataTransfer.setData("text/plain", row.id);
+      },
+      onDragOver: (e: DragEvent<HTMLElement>) => {
+        const src = dragged;
+        if (!isSibling(src, row)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        // Marks where the move lands: dragging down slots in after the target,
+        // dragging up slots in before it.
+        const next =
+          ids.indexOf(row.id) > ids.indexOf(src.id) ? "bottom" : "top";
+        if (edge !== next) setEdge(next);
+      },
+      onDragLeave: (e: DragEvent<HTMLElement>) => {
+        // Crossing the row's own children fires dragleave as well; only clear the
+        // indicator once the pointer has really left the row.
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+        setEdge(null);
+      },
+      onDrop: (e: DragEvent<HTMLElement>) => {
+        e.preventDefault();
+        const src = dragged;
+        if (isSibling(src, row)) onReorder(src.id, row.id);
+        reset();
+      },
+      onDragEnd: reset,
+    },
+  };
+}
+
 export function Sidebar() {
   const services = useStore((s) => s.services);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
@@ -134,10 +229,13 @@ export function Sidebar() {
 }
 
 function ServiceGroup({ service }: { service: Service }) {
+  const services = useStore((s) => s.services);
+  const moveService = useStore((s) => s.moveService);
   const rt = useStore((s) => s.runtime[service.id]);
   const workspaces = useStore((s) => s.workspaces);
   const conversations = useStore((s) => s.conversations);
   const taskWorkspace = useStore((s) => s.taskWorkspace);
+  const taskOrder = useStore((s) => s.taskOrder);
   const removeService = useStore((s) => s.removeService);
   const selectService = useStore((s) => s.selectService);
   const serviceSelected = useStore((s) => s.selectedServiceId === service.id);
@@ -147,13 +245,22 @@ function ServiceGroup({ service }: { service: Service }) {
   const [upgrading, setUpgrading] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
+  const drag = useReorderDrag(
+    { kind: "service", id: service.id, group: "" },
+    services.map((sv) => sv.id),
+    moveService,
+  );
+
   const serviceWorkspaces = workspaces.filter(
     (w) => w.serviceId === service.id,
   );
   const wsIds = new Set(serviceWorkspaces.map((w) => w.id));
 
-  const convs = Object.values(conversations).filter(
-    (c) => c.serviceId === service.id,
+  // Ordered once for the whole service: the workspace groups below each render a
+  // slice of this list, so the drag-to-reorder order carries into every group.
+  const convs = sortConversations(
+    Object.values(conversations).filter((c) => c.serviceId === service.id),
+    taskOrder?.[service.id],
   );
   // Tasks whose mapping is missing or points to a removed workspace.
   const ungrouped = convs.filter((c) => {
@@ -164,9 +271,12 @@ function ServiceGroup({ service }: { service: Service }) {
   return (
     <section className="service">
       <div
-        className={`service__head ${serviceSelected ? "service__head--active" : ""}`}
+        className={`service__head ${
+          serviceSelected ? "service__head--active" : ""
+        } ${drag.dragClass}`}
         title="Show service status"
         onClick={() => selectService(service.id)}
+        {...drag.handlers}
       >
         <button
           className="icon-btn icon-btn--sm caret-btn"
@@ -278,6 +388,8 @@ function WorkspaceGroup({
 }) {
   const updateWorkspace = useStore((s) => s.updateWorkspace);
   const removeWorkspace = useStore((s) => s.removeWorkspace);
+  const moveWorkspace = useStore((s) => s.moveWorkspace);
+  const allWorkspaces = useStore((s) => s.workspaces);
   const selectWorkspace = useStore((s) => s.selectWorkspace);
   const selected = useStore((s) => s.selectedWorkspaceId === workspace.id);
   const service = useStore((s) =>
@@ -286,6 +398,14 @@ function WorkspaceGroup({
   const [addingTask, setAddingTask] = useState(false);
   const [creatingWorktree, setCreatingWorktree] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+
+  const drag = useReorderDrag(
+    { kind: "workspace", id: workspace.id, group: workspace.serviceId },
+    allWorkspaces
+      .filter((w) => w.serviceId === workspace.serviceId)
+      .map((w) => w.id),
+    moveWorkspace,
+  );
   // Whether this workspace folder is a git repo (drives the "Create git
   // worktree" menu item). Probed once the service is online; null while unknown.
   const [isRepo, setIsRepo] = useState<boolean | null>(null);
@@ -351,8 +471,9 @@ function WorkspaceGroup({
   return (
     <section className="workspace">
       <div
-        className={`workspace__head ${selected ? "workspace__head--active" : ""}`}
+        className={`workspace__head ${selected ? "workspace__head--active" : ""} ${drag.dragClass}`}
         onClick={() => selectWorkspace(workspace.id)}
+        {...drag.handlers}
       >
         <button
           className="icon-btn icon-btn--sm caret-btn"
@@ -419,6 +540,7 @@ function WorkspaceGroup({
       {!collapsed && (
         <TaskList
           serviceId={workspace.serviceId}
+          workspaceId={workspace.id}
           conversations={conversations}
         />
       )}
@@ -461,58 +583,92 @@ function UngroupedGroup({
 
 function TaskList({
   serviceId,
+  workspaceId,
   conversations,
 }: {
   serviceId: string;
+  /** Omitted for the "Ungrouped" pseudo-group. */
+  workspaceId?: string;
   conversations: Conversation[];
 }) {
-  const selectedKey = useStore((s) => s.selectedKey);
-  const titles = useStore((s) => s.titles);
-  const select = useStore((s) => s.select);
-  const setTaskTitle = useStore((s) => s.setTaskTitle);
-
   if (conversations.length === 0) {
     return <ul className="conv-list">{null}</ul>;
   }
 
+  const ids = conversations.map((c) => c.task.id);
   return (
     <ul className="conv-list">
-      {conversations.map((c) => {
-        const key = convKey(serviceId, c.task.id);
-        const displayTitle = titles[key] ?? c.task.title;
-        return (
-          <li
-            key={key}
-            className={`conv ${selectedKey === key ? "conv--active" : ""}`}
-            onClick={() => select(key)}
-          >
-            <InlineEdit
-              className="conv__title"
-              value={displayTitle}
-              ariaLabel="Task title"
-              onCommit={(title) => setTaskTitle(serviceId, c.task.id, title)}
-            />
-            <span className="conv__meta">
-              <span className={`badge badge--${c.task.status.state}`}>
-                {c.task.status.state}
-              </span>
-              <Menu
-                triggerClassName="icon-btn icon-btn--sm row-menu"
-                title="Task actions"
-                items={[
-                  {
-                    label: "Delete task",
-                    confirm: "Click again to delete",
-                    danger: true,
-                    onClick: () => pool.deleteTask(serviceId, c.task.id),
-                  },
-                ]}
-              />
-            </span>
-          </li>
-        );
-      })}
+      {conversations.map((c) => (
+        <TaskRow
+          key={convKey(serviceId, c.task.id)}
+          serviceId={serviceId}
+          workspaceId={workspaceId}
+          conversation={c}
+          ids={ids}
+        />
+      ))}
     </ul>
+  );
+}
+
+function TaskRow({
+  serviceId,
+  workspaceId,
+  conversation,
+  ids,
+}: {
+  serviceId: string;
+  workspaceId?: string;
+  conversation: Conversation;
+  /** Sibling task ids in display order — the scope a drag may reorder within. */
+  ids: string[];
+}) {
+  const key = convKey(serviceId, conversation.task.id);
+  const selected = useStore((s) => s.selectedKey === key);
+  const title = useStore((s) => s.titles[key]);
+  const select = useStore((s) => s.select);
+  const setTaskTitle = useStore((s) => s.setTaskTitle);
+  const moveTask = useStore((s) => s.moveTask);
+  const drag = useReorderDrag(
+    {
+      kind: "task",
+      id: conversation.task.id,
+      group: `${serviceId}::${workspaceId ?? ""}`,
+    },
+    ids,
+    (from, to) => moveTask(serviceId, from, to),
+  );
+
+  return (
+    <li
+      className={`conv ${selected ? "conv--active" : ""} ${drag.dragClass}`}
+      onClick={() => select(key)}
+      {...drag.handlers}
+    >
+      <InlineEdit
+        className="conv__title"
+        value={title ?? conversation.task.title}
+        ariaLabel="Task title"
+        onCommit={(next) => setTaskTitle(serviceId, conversation.task.id, next)}
+      />
+      <span className="conv__meta">
+        <span className={`badge badge--${conversation.task.status.state}`}>
+          {conversation.task.status.state}
+        </span>
+        <Menu
+          triggerClassName="icon-btn icon-btn--sm row-menu"
+          title="Task actions"
+          items={[
+            {
+              label: "Delete task",
+              confirm: "Click again to delete",
+              danger: true,
+              onClick: () => pool.deleteTask(serviceId, conversation.task.id),
+            },
+          ]}
+        />
+      </span>
+    </li>
   );
 }
 

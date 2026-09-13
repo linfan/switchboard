@@ -155,4 +155,25 @@ export function convKey(serviceId: string, taskId: string): string {
   return `${serviceId}::${taskId}`;
 }
 
+/**
+ * A service's tasks in display order: those named by `order` first (in that
+ * order), then any the list doesn't mention, keeping their relative order. The
+ * list is a local override — tasks themselves arrive from the server in creation
+ * order and are held in an in-memory record, so one created since the last
+ * reorder simply lands at the end.
+ */
+export function sortConversations(
+  conversations: Conversation[],
+  order?: string[],
+): Conversation[] {
+  if (!order || order.length === 0) return conversations;
+  const rank = new Map(order.map((id, i) => [id, i]));
+  // Array#sort is stable, so unranked tasks keep their server order.
+  return [...conversations].sort(
+    (a, b) =>
+      (rank.get(a.task.id) ?? Number.MAX_SAFE_INTEGER) -
+      (rank.get(b.task.id) ?? Number.MAX_SAFE_INTEGER),
+  );
+}
+
 export type { ServiceInfo, TaskInfo, TaskStatus };

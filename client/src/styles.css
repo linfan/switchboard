@@ -372,6 +372,25 @@ body {
   padding-left: 14px;
 }
 
+/* --- sidebar drag-to-reorder --- */
+/* Applies to all three row levels: services, workspaces, and tasks. */
+.service__head.is-dragging,
+.workspace__head.is-dragging,
+.conv.is-dragging {
+  opacity: 0.4;
+}
+/* Insertion indicator: the edge the dragged row will land on. */
+.service__head.is-drop-top,
+.workspace__head.is-drop-top,
+.conv.is-drop-top {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.service__head.is-drop-bottom,
+.workspace__head.is-drop-bottom,
+.conv.is-drop-bottom {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
 /* --- inline edit --- */
 .inline-edit {
   background: var(--bg);

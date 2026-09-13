@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { applyMsg } from "./reducer";
 import { useStore, type AppState } from "./store";
-import { convKey } from "./types";
+import { convKey, sortConversations } from "./types";
 
 function baseState(): AppState {
   return useStore.getState();
@@ -15,6 +15,7 @@ beforeEach(() => {
     portForwards: [],
     portForwardRuntime: {},
     taskWorkspace: {},
+    taskOrder: {},
     titles: {},
     pendingWorkspace: {},
     sidebarCollapsed: false,
@@ -400,6 +401,119 @@ describe("workspaces", () => {
     const s = useStore.getState();
     expect(s.taskWorkspace[convKey("s1", "t1")]).toBeUndefined();
     expect(s.titles[convKey("s1", "t1")]).toBeUndefined();
+  });
+});
+
+describe("sidebar ordering", () => {
+  function seedService(id: string) {
+    useStore.getState().addService({
+      id,
+      name: id.toUpperCase(),
+      url: `http://${id}`,
+      token: "t",
+    });
+  }
+
+  /** Task ids of one service as the sidebar renders them. */
+  function orderedTaskIds(svc: string): string[] {
+    const s = useStore.getState();
+    return sortConversations(
+      Object.values(s.conversations).filter((c) => c.serviceId === svc),
+      s.taskOrder[svc],
+    ).map((c) => c.task.id);
+  }
+
+  function workspaceIds(svc: string): string[] {
+    return useStore
+      .getState()
+      .workspaces.filter((w) => w.serviceId === svc)
+      .map((w) => w.id);
+  }
+
+  it("moveService reorders the service list", () => {
+    seedService("s1");
+    seedService("s2");
+    seedService("s3");
+
+    useStore.getState().moveService("s3", "s1");
+
+    expect(useStore.getState().services.map((sv) => sv.id)).toEqual([
+      "s3",
+      "s1",
+      "s2",
+    ]);
+  });
+
+  it("moveWorkspace reorders one service's workspaces and leaves the others alone", () => {
+    const st = useStore.getState();
+    seedService("s1");
+    seedService("s2");
+    st.addWorkspace({ id: "a", serviceId: "s1", name: "A", cwd: "/a" });
+    st.addWorkspace({ id: "b", serviceId: "s2", name: "B", cwd: "/b" });
+    st.addWorkspace({ id: "c", serviceId: "s1", name: "C", cwd: "/c" });
+
+    st.moveWorkspace("c", "a");
+
+    expect(workspaceIds("s1")).toEqual(["c", "a"]);
+    expect(workspaceIds("s2")).toEqual(["b"]);
+  });
+
+  it("moveTask seeds the order from the current display order", () => {
+    seedService("s1");
+    seedTask("s1", "t1");
+    seedTask("s1", "t2");
+    seedTask("s1", "t3");
+    expect(useStore.getState().taskOrder["s1"]).toBeUndefined();
+
+    useStore.getState().moveTask("s1", "t3", "t1");
+
+    expect(useStore.getState().taskOrder["s1"]).toEqual(["t3", "t1", "t2"]);
+    expect(orderedTaskIds("s1")).toEqual(["t3", "t1", "t2"]);
+  });
+
+  it("keeps a task created after the last reorder at the end", () => {
+    seedService("s1");
+    seedTask("s1", "t1");
+    seedTask("s1", "t2");
+    useStore.getState().moveTask("s1", "t2", "t1");
+
+    seedTask("s1", "t3");
+
+    expect(orderedTaskIds("s1")).toEqual(["t2", "t1", "t3"]);
+  });
+
+  it("task_deleted drops the task from its service's order", () => {
+    seedService("s1");
+    seedTask("s1", "t1");
+    seedTask("s1", "t2");
+    seedTask("s1", "t3");
+    const st = useStore.getState();
+    st.moveTask("s1", "t3", "t1");
+
+    st.applyServerMsg("s1", { type: "task_deleted", task_id: "t3" });
+
+    expect(useStore.getState().taskOrder["s1"]).toEqual(["t1", "t2"]);
+  });
+
+  it("removeService drops that service's task order", () => {
+    seedService("s1");
+    seedTask("s1", "t1");
+    seedTask("s1", "t2");
+    useStore.getState().moveTask("s1", "t2", "t1");
+
+    useStore.getState().removeService("s1");
+
+    expect(useStore.getState().taskOrder["s1"]).toBeUndefined();
+  });
+
+  it("leaves state untouched when a move would change nothing", () => {
+    seedService("s1");
+    const before = useStore.getState().services;
+
+    useStore.getState().moveService("s1", "s1");
+
+    expect(useStore.getState().services).toBe(before);
+    expect(useStore.getState().taskOrder["s1"]).toBeUndefined();
   });
 });
 

@@ -15,6 +15,7 @@ import {
 import { persistStorage } from "./storage";
 import {
   convKey,
+  sortConversations,
   tabKey,
   type Conversation,
   type OpenFile,
@@ -38,6 +39,14 @@ export interface AppState {
   portForwardRuntime: Record<string, PortForwardRuntime>;
   /** Which workspace a task belongs to, keyed by `serviceId::taskId` (persisted). */
   taskWorkspace: Record<string, string>;
+  /**
+   * Task display order per service, as a list of task ids (persisted). Tasks
+   * themselves arrive from the server in creation order and live in an in-memory
+   * record, so a drag-to-reorder in the sidebar has to be recorded separately to
+   * survive a reconnect or restart. Ids the list doesn't mention sort after the
+   * ones it does — see `sortConversations`.
+   */
+  taskOrder: Record<string, string[]>;
   /** Local task-title overrides, keyed by `serviceId::taskId` (persisted). */
   titles: Record<string, string>;
   /**
@@ -108,6 +117,8 @@ export interface AppState {
   addService: (svc: Omit<Service, "id"> & { id?: string }) => string;
   updateService: (id: string, patch: Partial<Omit<Service, "id">>) => void;
   removeService: (id: string) => void;
+  /** Reorder the service list: move `fromId` into `toId`'s slot. */
+  moveService: (fromId: string, toId: string) => void;
   setRuntime: (id: string, patch: Partial<ServiceRuntime>) => void;
   /** Record a command used to launch a task on a service (dedup, cap 5). */
   addRecentTool: (serviceId: string, cmd: string) => void;
@@ -127,10 +138,14 @@ export interface AppState {
   updateWorkspace: (id: string, patch: Partial<Omit<Workspace, "id">>) => void;
   /** Remove a workspace and forget its task mappings/titles (does not touch the server). */
   removeWorkspace: (id: string) => void;
+  /** Reorder workspaces inside one service: move `fromId` into `toId`'s slot. */
+  moveWorkspace: (fromId: string, toId: string) => void;
   /** Queue a workspace to receive the next `task_created` on a service. */
   enqueuePendingWorkspace: (serviceId: string, workspaceId: string) => void;
   /** Set (or clear, when blank) a local title override for a task. */
   setTaskTitle: (serviceId: string, taskId: string, title: string) => void;
+  /** Reorder tasks inside one service: move `fromTaskId` into `toTaskId`'s slot. */
+  moveTask: (serviceId: string, fromTaskId: string, toTaskId: string) => void;
 
   // --- port forwarding -----------------------------------------------------
   addPortForward: (
@@ -210,6 +225,27 @@ function emptyEditorState(): WorkspaceEditorState {
   return { expandedDirs: [], openTabs: [] };
 }
 
+/**
+ * Move the item with `fromId` into `toId`'s slot — the semantics the sidebar's
+ * drag-to-reorder shares across its three levels (and the editor's tabs). Returns
+ * `items` unchanged when either id is missing or the move would be a no-op, so
+ * callers can skip writing state.
+ */
+function moveTo<T>(
+  items: T[],
+  fromId: string,
+  toId: string,
+  idOf: (item: T) => string,
+): T[] {
+  const from = items.findIndex((item) => idOf(item) === fromId);
+  const to = items.findIndex((item) => idOf(item) === toId);
+  if (from === -1 || to === -1 || from === to) return items;
+  const next = [...items];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  return next;
+}
+
 function clampFontSize(px: number): number {
   const { min, max } = FONT_SIZE_BOUNDS;
   return Math.min(max, Math.max(min, Math.round(px)));
@@ -223,6 +259,7 @@ export const useStore = create<AppState>()(
       portForwards: [],
       portForwardRuntime: {},
       taskWorkspace: {},
+      taskOrder: {},
       titles: {},
       pendingWorkspace: {},
       sidebarCollapsed: false,
@@ -290,6 +327,8 @@ export const useStore = create<AppState>()(
           const titles = dropPrefixed(s.titles ?? {});
           const pendingWorkspace = { ...(s.pendingWorkspace ?? {}) };
           delete pendingWorkspace[id];
+          const taskOrder = { ...(s.taskOrder ?? {}) };
+          delete taskOrder[id];
           const selectedKey = s.selectedKey?.startsWith(prefix)
             ? undefined
             : s.selectedKey;
@@ -313,6 +352,7 @@ export const useStore = create<AppState>()(
             conversations,
             cursors,
             taskWorkspace,
+            taskOrder,
             titles,
             pendingWorkspace,
             selectedKey,
@@ -321,6 +361,11 @@ export const useStore = create<AppState>()(
             selectedServiceId,
           };
         }),
+
+      moveService: (fromId, toId) =>
+        set((s) => ({
+          services: moveTo(s.services, fromId, toId, (sv) => sv.id),
+        })),
 
       setRuntime: (id, patch) =>
         set((s) => ({
@@ -392,6 +437,14 @@ export const useStore = create<AppState>()(
           };
         }),
 
+      // Every service's workspaces share this one array and the sidebar renders a
+      // service's slice in array order, so moving one entry into another's slot
+      // reorders that slice and leaves the other services' order intact.
+      moveWorkspace: (fromId, toId) =>
+        set((s) => ({
+          workspaces: moveTo(s.workspaces, fromId, toId, (w) => w.id),
+        })),
+
       enqueuePendingWorkspace: (serviceId, workspaceId) =>
         set((s) => ({
           pendingWorkspace: {
@@ -414,6 +467,22 @@ export const useStore = create<AppState>()(
           if (value === "" || value === conv?.task.title) delete titles[key];
           else titles[key] = value;
           return { titles };
+        }),
+
+      moveTask: (serviceId, fromTaskId, toTaskId) =>
+        set((s) => {
+          // Seed the list from the current on-screen order the first time, so the
+          // move is relative to what the user sees rather than to an empty list
+          // that would leave every other task unranked.
+          const current = sortConversations(
+            Object.values(s.conversations).filter(
+              (c) => c.serviceId === serviceId,
+            ),
+            s.taskOrder?.[serviceId],
+          ).map((c) => c.task.id);
+          const order = moveTo(current, fromTaskId, toTaskId, (id) => id);
+          if (order === current) return {};
+          return { taskOrder: { ...s.taskOrder, [serviceId]: order } };
         }),
 
       addPortForward: (forward) => {
@@ -693,6 +762,7 @@ export const useStore = create<AppState>()(
         workspaces: s.workspaces,
         portForwards: s.portForwards,
         taskWorkspace: s.taskWorkspace,
+        taskOrder: s.taskOrder,
         titles: s.titles,
         recentTools: s.recentTools,
         sidebarCollapsed: s.sidebarCollapsed,

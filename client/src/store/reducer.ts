@@ -101,8 +101,23 @@ export function applyMsg(
       delete taskWorkspace[key];
       const titles = { ...(s.titles ?? {}) };
       delete titles[key];
+      // The order list names task ids, so forget this one there too.
+      const order = s.taskOrder?.[serviceId];
+      const taskOrder = order
+        ? {
+            ...s.taskOrder,
+            [serviceId]: order.filter((id) => id !== msg.task_id),
+          }
+        : s.taskOrder;
       const selectedKey = s.selectedKey === key ? undefined : s.selectedKey;
-      return { conversations, cursors, taskWorkspace, titles, selectedKey };
+      return {
+        conversations,
+        cursors,
+        taskWorkspace,
+        taskOrder,
+        titles,
+        selectedKey,
+      };
     }
     case "error": {
       if (msg.code === "create_failed") {

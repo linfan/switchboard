@@ -11,6 +11,7 @@ function persisted(): {
   cursors?: unknown;
   editorState?: Record<string, unknown>;
   selectedWorkspaceId?: string;
+  taskOrder?: Record<string, string[]>;
 } {
   return JSON.parse(localStorage.getItem(KEY) ?? '{"state":{"services":[]}}')
     .state;
@@ -62,6 +63,35 @@ describe("persist round-trip through localStorage", () => {
       openTabs: [{ path: "/w/a.ts", mode: "edit" }],
       activeTab: "edit::/w/a.ts",
     });
+  });
+
+  it("persists the sidebar's task order (conversations are rebuilt from the server on restart)", () => {
+    useStore.getState().applyServerMsg("s1", {
+      type: "welcome",
+      service: { name: "h", version: "1", tools: [] },
+      tasks: [
+        {
+          id: "t1",
+          tool: "claude",
+          title: "T1",
+          status: { state: "running" },
+          created_at: 0,
+          last_seq: 0,
+        },
+        {
+          id: "t2",
+          tool: "claude",
+          title: "T2",
+          status: { state: "running" },
+          created_at: 0,
+          last_seq: 0,
+        },
+      ],
+    });
+
+    useStore.getState().moveTask("s1", "t2", "t1");
+
+    expect(persisted().taskOrder).toEqual({ s1: ["t2", "t1"] });
   });
 
   it("persists only port-forward mapping specs", () => {
