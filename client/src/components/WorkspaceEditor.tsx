@@ -501,6 +501,12 @@ interface TreeActions {
   onContextMenu: (entry: FsEntry, e: React.MouseEvent) => void;
   onRename: (entry: FsEntry, newName: string) => void;
   onCreate: (dir: string, name: string, isDir: boolean) => void;
+  /**
+   * Reports the canonical path the host listed for the workspace root. Every
+   * entry path is built from it, while the stored `cwd` may be a symlinked or
+   * unnormalized spelling of the same directory.
+   */
+  onRootListed: (canonical: string) => void;
 }
 
 /** Run `fn`s with at most `max` in flight at once. */
@@ -581,6 +587,18 @@ async function scanMatches(
   return dirs;
 }
 
+/**
+ * `path` expressed relative to the workspace root, for the tree's
+ * "copy relative path" action. Hosts can be Windows, so either separator
+ * counts, and a path outside the root comes back unchanged rather than
+ * mangled.
+ */
+function relativeTo(path: string, root: string): string {
+  const base = root.replace(/[\\/]+$/, "");
+  const rest = path.startsWith(base) ? path.slice(base.length) : "";
+  return /^[\\/]/.test(rest) ? rest.slice(1) : path;
+}
+
 function FileTree({
   service,
   root,
@@ -624,6 +642,12 @@ function FileTree({
   const [creating, setCreating] = useState<{
     dir: string;
     isDir: boolean;
+  } | null>(null);
+  // Canonical spelling of the workspace root as the host reported it, tagged
+  // with the `root` it belongs to: switching workspace must not reuse it.
+  const [canonRoot, setCanonRoot] = useState<{
+    root: string;
+    path: string;
   } | null>(null);
   const treeRef = useRef<HTMLDivElement>(null);
   // Path the last reveal landed on, flashed briefly so the eye can find it.
@@ -712,6 +736,7 @@ function FileTree({
       setCreating(null);
       onCreate(dir, name, isDir);
     },
+    onRootListed: (path) => setCanonRoot({ root, path }),
   };
 
   // Show the inline "new entry" input inside `dir`, expanding it if collapsed.
@@ -721,6 +746,11 @@ function FileTree({
   };
 
   const menuItems = (entry: FsEntry, isRoot?: boolean): MenuItem[] => {
+    // Entry paths hang off the canonical root the host listed, so measure
+    // against that when known rather than the possibly-different stored cwd.
+    // The root itself (a background right-click) has nothing below it, so ".".
+    const base = canonRoot?.root === root ? canonRoot.path : root;
+    const relPath = entry.path === root ? "." : relativeTo(entry.path, base);
     const newFile: MenuItem = {
       label: "New file\u2026",
       onClick: () => startCreate(entry.path, false),
@@ -735,9 +765,20 @@ function FileTree({
     };
     const copyPath: MenuItem = {
       label: entry.is_dir ? "Copy folder path" : "Copy file path",
-      onClick: () => {
-        navigator.clipboard.writeText(entry.path).catch(() => {});
-      },
+      submenu: [
+        {
+          label: "Absolute path",
+          onClick: () => {
+            navigator.clipboard.writeText(entry.path).catch(() => {});
+          },
+        },
+        {
+          label: "Relative path",
+          onClick: () => {
+            navigator.clipboard.writeText(relPath).catch(() => {});
+          },
+        },
+      ],
     };
     if (isRoot) return [newFile, newFolder, upload, copyPath];
     const rename: MenuItem = {
@@ -852,7 +893,11 @@ function DirNode({
     setLoading(true);
     setError(null);
     listDir(service, path)
-      .then((l) => !cancelled && setListing(l))
+      .then((l) => {
+        if (cancelled) return;
+        if (isRoot) actions.onRootListed(l.path);
+        setListing(l);
+      })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       })
@@ -860,8 +905,10 @@ function DirNode({
     return () => {
       cancelled = true;
     };
-    // refreshKey re-lists after a filesystem op (rename/delete/upload).
-  }, [open, path, service, actions.refreshKey]);
+    // refreshKey re-lists after a filesystem op (rename/delete/upload). The rest
+    // of `actions` is rebuilt on every render, so it must stay out of the deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, path, service, isRoot, actions.refreshKey]);
 
   const indent = { paddingLeft: `${depth * 12 + 8}px` };
 

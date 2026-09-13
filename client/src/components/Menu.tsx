@@ -10,7 +10,13 @@ import { createPortal } from "react-dom";
 /** One entry in a {@link Menu} or {@link ContextMenu}. */
 export interface MenuItem {
   label: ReactNode;
-  onClick: () => void;
+  /** Leaf action. Omitted on a row whose only job is opening a `submenu`. */
+  onClick?: () => void;
+  /**
+   * Second-level items: hovering (or clicking, for touch) the row slides this
+   * menu out beside it, and only its items fire an action.
+   */
+  submenu?: MenuItem[];
   /** Render in the danger colour (destructive action). */
   danger?: boolean;
   disabled?: boolean;
@@ -28,6 +34,13 @@ type Anchor =
 
 const MENU_MIN_WIDTH = 168;
 const VIEWPORT_MARGIN = 8;
+/** Horizontal gap between a row and the submenu that slides out of it. */
+const SUBMENU_GAP = 4;
+/**
+ * Grace period before an abandoned submenu closes, so crossing the gap between
+ * the row and its panel doesn't dismiss it.
+ */
+const SUBMENU_CLOSE_DELAY = 220;
 
 /**
  * A dropdown menu: a `⋯` trigger that opens a floating list of actions. The
@@ -112,6 +125,9 @@ function MenuPopup({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  // Row whose submenu is showing, plus that row's rect to anchor the panel to.
+  const [sub, setSub] = useState<{ index: number; rect: DOMRect } | null>(null);
+  const subTimer = useRef<ReturnType<typeof setTimeout>>();
 
   // Position after mount so we can measure the popup and clamp it on-screen.
   useLayoutEffect(() => {
@@ -143,6 +159,16 @@ function MenuPopup({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  useEffect(() => () => clearTimeout(subTimer.current), []);
+
+  const holdSub = () => clearTimeout(subTimer.current);
+  const releaseSub = () => {
+    clearTimeout(subTimer.current);
+    subTimer.current = setTimeout(() => setSub(null), SUBMENU_CLOSE_DELAY);
+  };
+
+  const subItems = sub === null ? undefined : items[sub.index]?.submenu;
+
   return createPortal(
     <div
       className="menu__backdrop"
@@ -163,29 +189,133 @@ function MenuPopup({
           visibility: pos ? "visible" : "hidden",
         }}
         onClick={(e) => e.stopPropagation()}
+        onMouseLeave={releaseSub}
       >
         {items.map((item, i) => (
-          <MenuItemRow key={i} item={item} onClose={onClose} />
+          <MenuItemRow
+            key={i}
+            item={item}
+            onClose={onClose}
+            subOpen={sub?.index === i}
+            onSubEnter={(rect) => {
+              holdSub();
+              setSub({ index: i, rect });
+            }}
+            onSubLeave={releaseSub}
+          />
         ))}
       </div>
+      {/* Inside the backdrop, not a second portal: it must paint above the
+          parent menu to stay clickable. */}
+      {sub && subItems && (
+        <SubmenuPanel
+          items={subItems}
+          rowRect={sub.rect}
+          onClose={onClose}
+          onEnter={holdSub}
+          onLeave={releaseSub}
+        />
+      )}
     </div>,
     document.body,
+  );
+}
+
+/**
+ * The second level of a {@link MenuPopup}: a panel sliding out beside the row
+ * that opened it, flipping to the left when the right side has no room.
+ */
+function SubmenuPanel({
+  items,
+  rowRect,
+  onClose,
+  onEnter,
+  onLeave,
+}: {
+  items: MenuItem[];
+  rowRect: DOMRect;
+  onClose: () => void;
+  onEnter: () => void;
+  onLeave: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    let left = rowRect.right + SUBMENU_GAP;
+    if (left + width > window.innerWidth - VIEWPORT_MARGIN) {
+      left = rowRect.left - width - SUBMENU_GAP;
+    }
+    // Nudge up by the parent's padding so the first row lines up with its opener.
+    let top = rowRect.top - 5;
+    left = Math.max(
+      VIEWPORT_MARGIN,
+      Math.min(left, window.innerWidth - width - VIEWPORT_MARGIN),
+    );
+    top = Math.max(
+      VIEWPORT_MARGIN,
+      Math.min(top, window.innerHeight - height - VIEWPORT_MARGIN),
+    );
+    setPos({ left, top });
+  }, [rowRect]);
+
+  return (
+    <div
+      ref={ref}
+      className="menu menu--sub"
+      role="menu"
+      style={{
+        left: pos?.left ?? -9999,
+        top: pos?.top ?? -9999,
+        minWidth: MENU_MIN_WIDTH,
+        visibility: pos ? "visible" : "hidden",
+      }}
+      onClick={(e) => e.stopPropagation()}
+      onMouseEnter={onEnter}
+      onMouseLeave={onLeave}
+    >
+      {items.map((item, i) => (
+        <MenuItemRow key={i} item={item} onClose={onClose} />
+      ))}
+    </div>
   );
 }
 
 function MenuItemRow({
   item,
   onClose,
+  subOpen,
+  onSubEnter,
+  onSubLeave,
 }: {
   item: MenuItem;
   onClose: () => void;
+  /** This row's submenu is currently showing. */
+  subOpen?: boolean;
+  onSubEnter?: (rowRect: DOMRect) => void;
+  onSubLeave?: () => void;
 }) {
   const [armed, setArmed] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>();
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const hasSub = !!item.submenu?.length;
 
   useEffect(() => () => clearTimeout(timer.current), []);
 
+  const openSub = () => {
+    const el = btnRef.current;
+    if (el) onSubEnter?.(el.getBoundingClientRect());
+  };
+
   const run = () => {
+    // A submenu row never fires an action itself — it only reveals its items.
+    if (hasSub) {
+      openSub();
+      return;
+    }
     if (item.confirm !== undefined && !armed) {
       setArmed(true);
       timer.current = setTimeout(() => setArmed(false), 3000);
@@ -193,17 +323,32 @@ function MenuItemRow({
     }
     clearTimeout(timer.current);
     onClose();
-    item.onClick();
+    item.onClick?.();
   };
 
   return (
     <button
-      className={`menu__item${item.danger ? " menu__item--danger" : ""}`}
+      ref={btnRef}
+      className={`menu__item${item.danger ? " menu__item--danger" : ""}${
+        hasSub ? " menu__item--sub" : ""
+      }${subOpen ? " is-sub-open" : ""}`}
       role="menuitem"
+      aria-haspopup={hasSub ? "menu" : undefined}
+      aria-expanded={hasSub ? subOpen : undefined}
       disabled={item.disabled}
       onClick={(e) => {
         e.stopPropagation();
         run();
+      }}
+      onMouseEnter={() => {
+        if (hasSub) openSub();
+        else onSubLeave?.();
+      }}
+      onMouseLeave={() => {
+        if (hasSub) onSubLeave?.();
+      }}
+      onFocus={() => {
+        if (hasSub) openSub();
       }}
     >
       {armed ? item.confirm : item.label}

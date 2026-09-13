@@ -538,6 +538,30 @@ body {
 .menu__item--danger:hover:not(:disabled) {
   background: rgba(248, 81, 73, 0.14);
 }
+/* A row that opens a second level: chevron on the right, lit while it's open. */
+.menu__item--sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.menu__item--sub::after {
+  content: "▸";
+  margin-left: auto;
+  font-size: 10px;
+  opacity: 0.55;
+}
+.menu__item.is-sub-open {
+  background: rgba(255, 255, 255, 0.06);
+}
+.menu--sub {
+  animation: menu-sub-in 0.12s ease-out;
+}
+@keyframes menu-sub-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+}
 
 /* --- panel header --- */
 .panel__spacer {
