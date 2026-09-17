@@ -32,8 +32,11 @@ function baseUrl(service: ServiceRef): string {
   return service.url.replace(/\/+$/, "");
 }
 
-/** Base name of a path, tolerating both `/` and `\` separators. */
-function basename(path: string): string {
+/**
+ * Base name of a path, tolerating both `/` and `\` separators. Hosts can be
+ * Windows, so a name is whatever follows the last separator either way.
+ */
+export function basename(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 

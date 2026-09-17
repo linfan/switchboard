@@ -12,10 +12,10 @@ import {
 } from "../net/rest";
 import { formatBytes } from "../net/media";
 import {
+  basename,
   cancelTransfer,
   downloadFiles,
   uploadFiles,
-  type BatchOutcome,
   type TransferHooks,
 } from "../net/transfer";
 import type {
@@ -227,15 +227,29 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
     }
   };
 
-  const handleDelete = async (entry: FsEntry) => {
+  // The host deletes one path per request, so a batch goes one at a time and a
+  // path it refuses — busy, already gone — costs only itself. Deleting a folder
+  // is a single pick: folders don't join a selection.
+  const handleDelete = async (paths: string[]) => {
     setFsError(null);
-    try {
-      await deletePath(service, entry.path);
-      dropTabsUnder(entry.path);
-      setRefreshKey((k) => k + 1);
-    } catch (e) {
-      setFsError(errMsg(e));
+    const failed: { name: string; message: string }[] = [];
+    let deleted = 0;
+    for (const path of paths) {
+      try {
+        await deletePath(service, path);
+      } catch (e) {
+        failed.push({
+          name: basename(path),
+          message: errMsg(e),
+        });
+        continue;
+      }
+      // Only a path that really went away invalidates the tabs open on it.
+      dropTabsUnder(path);
+      deleted++;
     }
+    if (deleted > 0) setRefreshKey((k) => k + 1);
+    if (failed.length > 0) setFsError(batchMessage("Deleted", deleted, failed));
   };
 
   // Feed a transfer's progress into the store so the strip under the tree can
@@ -271,7 +285,14 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
     try {
       const outcome = await downloadFiles(service, paths, hooks);
       if (outcome.failed.length > 0)
-        setFsError(batchMessage("Downloaded", outcome));
+        setFsError(
+          batchMessage(
+            "Downloaded",
+            outcome.done.length,
+            outcome.failed,
+            outcome.cancelled,
+          ),
+        );
     } catch (e) {
       setFsError(errMsg(e));
     } finally {
@@ -292,7 +313,14 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
       // Partial success is still a change to the host worth re-listing for.
       if (outcome.done.length > 0) setRefreshKey((k) => k + 1);
       if (outcome.failed.length > 0)
-        setFsError(batchMessage("Uploaded", outcome));
+        setFsError(
+          batchMessage(
+            "Uploaded",
+            outcome.done.length,
+            outcome.failed,
+            outcome.cancelled,
+          ),
+        );
     } catch (e) {
       setFsError(errMsg(e));
     } finally {
@@ -436,16 +464,21 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
 /**
  * One line accounting for a batch that didn't carry everything: how many made
  * it, then up to three of the failures by name. Only shown when something
- * failed, so a clean run stays silent.
+ * failed, so a clean run stays silent. `skipped` counts what neither succeeded
+ * nor failed — a transfer the user stopped part way.
  */
-function batchMessage(verb: string, outcome: BatchOutcome): string {
-  const { done, failed, cancelled } = outcome;
+function batchMessage(
+  verb: string,
+  done: number,
+  failed: { name: string; message: string }[],
+  skipped = 0,
+): string {
   const shown = failed
     .slice(0, 3)
     .map((f) => `${f.name}: ${f.message}`)
     .join(", ");
   const rest = failed.length - Math.min(3, failed.length);
-  return `${verb} ${done.length} of ${done.length + failed.length + cancelled}${
+  return `${verb} ${done} of ${done + failed.length + skipped}${
     shown ? ` — ${shown}${rest > 0 ? ` (+${rest} more)` : ""}` : ""
   }`;
 }
@@ -671,9 +704,10 @@ function FileTree({
   onToggleDir: (path: string) => void;
   onOpenFile: (path: string) => void;
   onRename: (entry: FsEntry, newName: string) => void;
-  onDelete: (entry: FsEntry) => void;
   /** Download every selected file at once; a plain row is a one-file batch. */
   onDownload: (paths: string[]) => void;
+  /** Delete the given paths; a multi-selection deletes as a batch. */
+  onDelete: (paths: string[]) => void;
   onUpload: (entry: FsEntry) => void;
   onCreate: (dir: string, name: string, isDir: boolean) => void;
 }) {
@@ -850,14 +884,21 @@ function FileTree({
   };
 
   const menuItems = (entry: FsEntry, isRoot?: boolean): MenuItem[] => {
-    // More than one file picked is a download batch: rename, delete and the
-    // new-entry prompts are per-row operations that say nothing about a set.
+    // More than one file picked: the menu acts on the set, so the per-row
+    // prompts (rename, new file/folder, this row's own path) drop out.
     if (!isRoot && !entry.is_dir && selection.paths.size > 1) {
-      const count = selection.paths.size;
+      const paths = [...selection.paths];
+      const count = paths.length;
       return [
         {
           label: `Download ${count} files`,
-          onClick: () => onDownload([...selection.paths]),
+          onClick: () => onDownload(paths),
+        },
+        {
+          label: `Delete ${count} files`,
+          danger: true,
+          confirm: `Click again to delete ${count} files`,
+          onClick: () => onDelete(paths),
         },
         {
           label: "Clear selection",
@@ -910,7 +951,7 @@ function FileTree({
       confirm: entry.is_dir
         ? "Click again to delete folder"
         : "Click again to delete",
-      onClick: () => onDelete(entry),
+      onClick: () => onDelete([entry.path]),
     };
     return entry.is_dir
       ? [newFile, newFolder, rename, upload, copyPath, del]
