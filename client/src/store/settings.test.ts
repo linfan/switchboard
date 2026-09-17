@@ -36,6 +36,17 @@ describe("clampSettings", () => {
       probeTimeoutMs: 2000,
     });
   });
+
+  it("ships a 50-file batch cap and never lets it reach zero", () => {
+    expect(DEFAULT_SETTINGS.uploadMaxFiles).toBe(50);
+    expect(DEFAULT_SETTINGS.downloadMaxFiles).toBe(50);
+    // A zero cap would take the tree's download action and the upload picker
+    // away entirely, so the form floors it at one file.
+    expect(clampSettings({ uploadMaxFiles: 0 }).uploadMaxFiles).toBe(1);
+    expect(clampSettings({ downloadMaxFiles: 9e9 }).downloadMaxFiles).toBe(
+      SETTING_BOUNDS.downloadMaxFiles.max,
+    );
+  });
 });
 
 describe("withSettingDefaults", () => {

@@ -98,6 +98,24 @@ const GROUPS: { legend: string; hint?: string; fields: Field[] }[] = [
     ],
   },
   {
+    legend: "Batch file transfers",
+    hint: "How many files one upload or download may carry. An upload picker left over its limit transfers nothing; the file tree stops adding to a selection at its limit.",
+    fields: [
+      {
+        key: "uploadMaxFiles",
+        label: "Max files per upload",
+        scale: 1,
+        unit: "",
+      },
+      {
+        key: "downloadMaxFiles",
+        label: "Max files per download",
+        scale: 1,
+        unit: "",
+      },
+    ],
+  },
+  {
     legend: "Fonts",
     fields: [
       { key: "terminalFontSize", label: "Terminal", scale: 1, unit: "px" },

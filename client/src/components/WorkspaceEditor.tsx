@@ -13,8 +13,9 @@ import {
 import { formatBytes } from "../net/media";
 import {
   cancelTransfer,
-  downloadFile,
-  uploadFile,
+  downloadFiles,
+  uploadFiles,
+  type BatchOutcome,
   type TransferHooks,
 } from "../net/transfer";
 import type {
@@ -36,6 +37,13 @@ import {
 import { EditorArea } from "./EditorArea";
 import { InlineEdit } from "./InlineEdit";
 import { ContextMenu, type MenuItem } from "./Menu";
+import {
+  emptySelection,
+  nextSelection,
+  selectOnly,
+  visibleFilePaths,
+  type Selection,
+} from "./treeSelection";
 
 type ServiceRef = { url: string; token: string };
 
@@ -98,6 +106,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
   const startTransfer = useStore((s) => s.startTransfer);
   const progressTransfer = useStore((s) => s.progressTransfer);
   const endTransfer = useStore((s) => s.endTransfer);
+  const uploadMaxFiles = useStore((s) => s.settings.uploadMaxFiles);
 
   const [git, setGit] = useState<GitInfo | null>(null);
   const [gitError, setGitError] = useState<string | null>(null);
@@ -230,14 +239,15 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
   };
 
   // Feed a transfer's progress into the store so the strip under the tree can
-  // follow it; `ended` clears the row however the transfer finished.
+  // follow it; `ended` clears the rows however the transfers finished. A batch
+  // runs one transfer per file, so every id it starts has to be remembered.
   const transferHooks = (
     kind: Transfer["kind"],
   ): TransferHooks & { ended: () => void } => {
-    let started: number | null = null;
+    const ids: number[] = [];
     return {
       onStart: ({ id, name, total }) => {
-        started = id;
+        ids.push(id);
         startTransfer({
           id,
           kind,
@@ -248,15 +258,20 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
         });
       },
       onProgress: progressTransfer,
-      ended: () => started !== null && endTransfer(started),
+      // Each row leaves the moment its own transfer ends; `ended` is the net for
+      // ids that never got that far (the batch throwing part-way through).
+      onEnd: endTransfer,
+      ended: () => ids.forEach((id) => endTransfer(id)),
     };
   };
 
-  const handleDownload = async (entry: FsEntry) => {
+  const handleDownload = async (paths: string[]) => {
     setFsError(null);
     const hooks = transferHooks("download");
     try {
-      await downloadFile(service, entry.path, entry.name, hooks);
+      const outcome = await downloadFiles(service, paths, hooks);
+      if (outcome.failed.length > 0)
+        setFsError(batchMessage("Downloaded", outcome));
     } catch (e) {
       setFsError(errMsg(e));
     } finally {
@@ -268,9 +283,16 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
     setFsError(null);
     const hooks = transferHooks("upload");
     try {
-      if (await uploadFile(service, entry.path, hooks)) {
-        setRefreshKey((k) => k + 1);
-      }
+      const outcome = await uploadFiles(
+        service,
+        entry.path,
+        uploadMaxFiles,
+        hooks,
+      );
+      // Partial success is still a change to the host worth re-listing for.
+      if (outcome.done.length > 0) setRefreshKey((k) => k + 1);
+      if (outcome.failed.length > 0)
+        setFsError(batchMessage("Uploaded", outcome));
     } catch (e) {
       setFsError(errMsg(e));
     } finally {
@@ -412,6 +434,23 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
 // --- transfers --------------------------------------------------------------
 
 /**
+ * One line accounting for a batch that didn't carry everything: how many made
+ * it, then up to three of the failures by name. Only shown when something
+ * failed, so a clean run stays silent.
+ */
+function batchMessage(verb: string, outcome: BatchOutcome): string {
+  const { done, failed, cancelled } = outcome;
+  const shown = failed
+    .slice(0, 3)
+    .map((f) => `${f.name}: ${f.message}`)
+    .join(", ");
+  const rest = failed.length - Math.min(3, failed.length);
+  return `${verb} ${done.length} of ${done.length + failed.length + cancelled}${
+    shown ? ` — ${shown}${rest > 0 ? ` (+${rest} more)` : ""}` : ""
+  }`;
+}
+
+/**
  * Progress for this workspace's in-flight downloads/uploads, pinned below the
  * file tree so it stays visible however far the tree is scrolled. Absent while
  * nothing is transferring.
@@ -497,7 +536,10 @@ interface TreeActions {
   creating: { dir: string; isDir: boolean } | null;
   setCreating: (c: { dir: string; isDir: boolean } | null) => void;
   onToggleDir: (path: string) => void;
-  onOpenFile: (path: string) => void;
+  /** A click on a file row, which may also be a selection gesture. */
+  onFileClick: (entry: FsEntry, e: React.MouseEvent) => void;
+  /** Files currently picked out for a batch download. */
+  selected: Set<string>;
   onContextMenu: (entry: FsEntry, e: React.MouseEvent) => void;
   onRename: (entry: FsEntry, newName: string) => void;
   onCreate: (dir: string, name: string, isDir: boolean) => void;
@@ -599,6 +641,11 @@ function relativeTo(path: string, root: string): string {
   return /^[\\/]/.test(rest) ? rest.slice(1) : path;
 }
 
+/** Why a click couldn't add another file to a download selection. */
+function capMessage(max: number): string {
+  return `At most ${max} ${max === 1 ? "file" : "files"} per download`;
+}
+
 function FileTree({
   service,
   root,
@@ -625,10 +672,12 @@ function FileTree({
   onOpenFile: (path: string) => void;
   onRename: (entry: FsEntry, newName: string) => void;
   onDelete: (entry: FsEntry) => void;
-  onDownload: (entry: FsEntry) => void;
+  /** Download every selected file at once; a plain row is a one-file batch. */
+  onDownload: (paths: string[]) => void;
   onUpload: (entry: FsEntry) => void;
   onCreate: (dir: string, name: string, isDir: boolean) => void;
 }) {
+  const downloadMaxFiles = useStore((s) => s.settings.downloadMaxFiles);
   const [ctxMenu, setCtxMenu] = useState<{
     x: number;
     y: number;
@@ -650,6 +699,12 @@ function FileTree({
     path: string;
   } | null>(null);
   const treeRef = useRef<HTMLDivElement>(null);
+  // Files picked out for a batch download. Local rather than in the persisted
+  // editor state: a selection is about the rows on screen now, and absolute
+  // paths kept across a restart would be a trap.
+  const [selection, setSelection] = useState<Selection>(emptySelection);
+  // Explains a click that couldn't add another file because it hit the cap.
+  const [capNote, setCapNote] = useState<string | null>(null);
   // Path the last reveal landed on, flashed briefly so the eye can find it.
   const [flashPath, setFlashPath] = useState<string | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout>>();
@@ -708,6 +763,49 @@ function FileTree({
 
   useEffect(() => () => clearTimeout(flashTimer.current), []);
 
+  // A filesystem change — or a workspace switch — can retire the very paths a
+  // selection was made of, so start over rather than act on a row that is gone.
+  useEffect(() => {
+    setSelection(emptySelection());
+    setCapNote(null);
+  }, [root, refreshKey]);
+
+  // A cap lowered from the settings panel retires the picks that no longer fit.
+  useEffect(() => {
+    if (selection.paths.size <= downloadMaxFiles) return;
+    setSelection((prev) => ({
+      ...prev,
+      paths: new Set([...prev.paths].slice(0, downloadMaxFiles)),
+    }));
+  }, [downloadMaxFiles, selection]);
+
+  useEffect(() => {
+    if (selection.paths.size === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setSelection(emptySelection());
+      setCapNote(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selection]);
+
+  // A click on a file row. Plain opens it and makes it the whole selection;
+  // ⌘/Ctrl toggles membership; Shift extends from the anchor row.
+  const clickFile = (entry: FsEntry, e: React.MouseEvent) => {
+    const mods = { toggle: e.metaKey || e.ctrlKey, range: e.shiftKey };
+    const next = nextSelection(
+      selection,
+      entry.path,
+      visibleFilePaths(treeRef.current ?? e.currentTarget),
+      mods,
+      downloadMaxFiles,
+    );
+    setSelection(next);
+    setCapNote(next.hitCap ? capMessage(downloadMaxFiles) : null);
+    if (!mods.toggle && !mods.range) onOpenFile(entry.path);
+  };
+
   const actions: TreeActions = {
     service,
     expanded,
@@ -722,10 +820,16 @@ function FileTree({
     creating,
     setCreating,
     onToggleDir,
-    onOpenFile,
+    onFileClick: clickFile,
+    selected: selection.paths,
     onContextMenu: (entry, e) => {
       e.preventDefault();
       e.stopPropagation();
+      // Right-clicking a row that's part of the selection acts on the whole
+      // selection; anywhere else it acts on just the row under the cursor.
+      if (entry.is_dir) setSelection(emptySelection());
+      else if (!selection.paths.has(entry.path))
+        setSelection(selectOnly(entry.path));
       setCtxMenu({ x: e.clientX, y: e.clientY, entry });
     },
     onRename: (entry, newName) => {
@@ -746,6 +850,21 @@ function FileTree({
   };
 
   const menuItems = (entry: FsEntry, isRoot?: boolean): MenuItem[] => {
+    // More than one file picked is a download batch: rename, delete and the
+    // new-entry prompts are per-row operations that say nothing about a set.
+    if (!isRoot && !entry.is_dir && selection.paths.size > 1) {
+      const count = selection.paths.size;
+      return [
+        {
+          label: `Download ${count} files`,
+          onClick: () => onDownload([...selection.paths]),
+        },
+        {
+          label: "Clear selection",
+          onClick: () => setSelection(emptySelection()),
+        },
+      ];
+    }
     // Entry paths hang off the canonical root the host listed, so measure
     // against that when known rather than the possibly-different stored cwd.
     // The root itself (a background right-click) has nothing below it, so ".".
@@ -760,7 +879,7 @@ function FileTree({
       onClick: () => startCreate(entry.path, true),
     };
     const upload: MenuItem = {
-      label: "Upload file\u2026",
+      label: "Upload files\u2026",
       onClick: () => onUpload(entry),
     };
     const copyPath: MenuItem = {
@@ -797,7 +916,7 @@ function FileTree({
       ? [newFile, newFolder, rename, upload, copyPath, del]
       : [
           rename,
-          { label: "Download", onClick: () => onDownload(entry) },
+          { label: "Download", onClick: () => onDownload([entry.path]) },
           copyPath,
           del,
         ];
@@ -810,6 +929,8 @@ function FileTree({
       onContextMenu={(e) => {
         // Right-click on the tree background targets the workspace root.
         e.preventDefault();
+        setSelection(emptySelection());
+        setCapNote(null);
         setCtxMenu({
           x: e.clientX,
           y: e.clientY,
@@ -839,6 +960,9 @@ function FileTree({
           </button>
         )}
       </div>
+      {capNote && (
+        <div className="weditor__row weditor__row--hint">{capNote}</div>
+      )}
       <DirNode
         service={service}
         path={root}
@@ -1008,13 +1132,13 @@ function DirNode({
               data-path={e.path}
               className={`weditor__row weditor__row--file ${
                 actions.activePath === e.path ? "is-active" : ""
-              } ${actions.contextPath === e.path ? "is-context" : ""} ${
-                actions.revealPath === e.path ? "is-reveal" : ""
-              }`}
+              } ${actions.selected.has(e.path) ? "is-selected" : ""} ${
+                actions.contextPath === e.path ? "is-context" : ""
+              } ${actions.revealPath === e.path ? "is-reveal" : ""}`}
               style={{ paddingLeft: `${(depth + 1) * 12 + 8}px` }}
               title={e.name}
-              onClick={() => {
-                if (actions.renamingPath !== e.path) actions.onOpenFile(e.path);
+              onClick={(ev) => {
+                if (actions.renamingPath !== e.path) actions.onFileClick(e, ev);
               }}
               onContextMenu={(ev) => actions.onContextMenu(e, ev)}
             >
@@ -1118,13 +1242,17 @@ ${c.short} · ${c.author} · ${c.date}`}
             {
               label: "Copy commit ID",
               onClick: () => {
-                navigator.clipboard.writeText(ctxMenu.commit.hash).catch(() => {});
+                navigator.clipboard
+                  .writeText(ctxMenu.commit.hash)
+                  .catch(() => {});
               },
             },
             {
               label: "Copy message",
               onClick: () => {
-                navigator.clipboard.writeText(ctxMenu.commit.subject).catch(() => {});
+                navigator.clipboard
+                  .writeText(ctxMenu.commit.subject)
+                  .catch(() => {});
               },
             },
           ]}

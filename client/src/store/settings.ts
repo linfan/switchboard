@@ -15,6 +15,10 @@ import {
   DEFAULT_RECONNECT,
 } from "../net/connection";
 import { DEFAULT_MAX_PREVIEW_BYTES } from "../net/media";
+import {
+  DEFAULT_MAX_DOWNLOAD_FILES,
+  DEFAULT_MAX_UPLOAD_FILES,
+} from "../net/transfer";
 import { DEFAULT_PROBE_TIMEOUT_MS } from "../net/rest";
 
 export interface Settings {
@@ -40,6 +44,12 @@ export interface Settings {
   scanMaxDirs: number;
   scanMaxDepth: number;
   scanTimeBudgetMs: number;
+
+  // --- batch file transfers (files) -----------------------------------------
+  /** How many files one upload may pick. */
+  uploadMaxFiles: number;
+  /** How many files the file tree can select for one download. */
+  downloadMaxFiles: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -61,6 +71,9 @@ export const DEFAULT_SETTINGS: Settings = {
   scanMaxDirs: 4000, // total directories read before giving up
   scanMaxDepth: 32, // nesting levels to descend
   scanTimeBudgetMs: 5000, // wall-clock ceiling for the whole scan
+
+  uploadMaxFiles: DEFAULT_MAX_UPLOAD_FILES,
+  downloadMaxFiles: DEFAULT_MAX_DOWNLOAD_FILES,
 };
 
 /**
@@ -107,6 +120,11 @@ export const SETTING_BOUNDS: Record<
   scanMaxDirs: { min: 100, max: 100_000 },
   scanMaxDepth: { min: 1, max: 256 },
   scanTimeBudgetMs: { min: 500, max: 120_000 },
+
+  // At least one file each, or the actions disappear. The ceiling keeps a batch
+  // within a scrollable progress strip and a queue the host tolerates.
+  uploadMaxFiles: { min: 1, max: 200 },
+  downloadMaxFiles: { min: 1, max: 200 },
 };
 
 const KEYS = Object.keys(SETTING_BOUNDS) as (keyof Settings)[];

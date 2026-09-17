@@ -25,6 +25,23 @@ test("edits persist across a reload", async ({ page }) => {
   await expect(field(dialog, "Terminal")).toHaveValue("17");
 });
 
+// Both default to 50; the tree's selection cap and the upload picker read them.
+test("the batch transfer caps are editable and ship at 50", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  let dialog = await open(page);
+  await expect(field(dialog, "Max files per upload")).toHaveValue("50");
+  await expect(field(dialog, "Max files per download")).toHaveValue("50");
+  await field(dialog, "Max files per upload").fill("8");
+  await dialog.getByRole("button", { name: "Save" }).click();
+
+  await page.reload();
+  dialog = await open(page);
+  await expect(field(dialog, "Max files per upload")).toHaveValue("8");
+});
+
 test("Cancel discards edits", async ({ page }) => {
   await page.goto("/");
 
