@@ -4,7 +4,8 @@
 //! URL lives alongside [`validate_binary`] here.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::error::{AppError, AppResult};
 
@@ -215,13 +216,49 @@ pub fn verify_sha256(bytes: &[u8], want_hex: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Trim the literal `" (deleted)"` markers `/proc/self/exe` appends once the
+/// binary's file has been renamed over. Repeated upgrades stack them, so peel
+/// until the real name is back.
+fn strip_deleted_suffix(path: &Path) -> PathBuf {
+    let Some(s) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let mut trimmed = s;
+    while let Some(next) = trimmed.strip_suffix(" (deleted)") {
+        trimmed = next;
+    }
+    if trimmed.len() == s.len() {
+        path.to_path_buf()
+    } else {
+        PathBuf::from(trimmed)
+    }
+}
+
+/// Our own executable's path, resolved once per process and reused for every
+/// swap and re-exec.
+///
+/// `std::env::current_exe()` reads `/proc/self/exe`, which grows a literal
+/// `" (deleted)"` suffix the moment the file is renamed over — exactly what the
+/// swap in `replace_at` does on every upgrade. Re-resolving after a swap hands
+/// the re-exec a name that no longer exists (a retry then stages the next build
+/// into a file literally named `switchboard-server (deleted)`, stacking one
+/// suffix per upgrade cycle). Resolve before the first swap can unlink the name.
+pub fn exe_path() -> AppResult<&'static Path> {
+    static EXE: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(p) = EXE.get() {
+        return Ok(p);
+    }
+    let raw = std::env::current_exe()
+        .map_err(|e| AppError::Other(anyhow::anyhow!("cannot resolve current exe: {e}")))?;
+    Ok(EXE.get_or_init(|| strip_deleted_suffix(&raw)))
+}
+
 /// Replace the currently-running executable's file with `bytes`, returning the
 /// executable path.
 pub fn replace_current_exe(bytes: &[u8]) -> AppResult<PathBuf> {
-    let exe = std::env::current_exe()
-        .map_err(|e| AppError::Other(anyhow::anyhow!("cannot resolve current exe: {e}")))?;
-    replace_at(&exe, bytes)?;
-    Ok(exe)
+    let exe = exe_path()?;
+    replace_at(exe, bytes)?;
+    Ok(exe.to_path_buf())
 }
 
 /// Stage `bytes` beside `exe` and swap it in. Both files live in the same
@@ -336,6 +373,18 @@ fn reap_stale(dir: &std::path::Path, file_name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strips_stacked_deleted_suffixes() {
+        let clean = Path::new("/opt/switchboard/switchboard-server");
+        assert_eq!(strip_deleted_suffix(clean), clean.to_path_buf());
+        assert_eq!(
+            strip_deleted_suffix(Path::new(
+                "/opt/switchboard/switchboard-server (deleted) (deleted)"
+            )),
+            clean.to_path_buf()
+        );
+    }
 
     #[test]
     fn rejects_empty_and_tiny() {

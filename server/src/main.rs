@@ -43,6 +43,15 @@ use crate::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // The std runtime already sets SIGPIPE to SIG_IGN; pin it as an explicit
+    // contract so it survives any later reset (std's own `Command::exec` setup
+    // performs one in this process before an execve) — otherwise the next write
+    // to a broken pipe or socket becomes a fatal signal.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
     // `switchboard-server pty-host` is not a mode a human invokes: the server
     // re-executes itself this way to put a task's PTY in its own process. Handle
     // it before any server setup, since a host opens no port and no database.

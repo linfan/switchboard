@@ -414,8 +414,10 @@ impl DialFailure {
 /// sever the parent chain instead.
 #[cfg(unix)]
 fn spawn_detached(spec: &HostSpec) -> AppResult<u32> {
-    let exe = std::env::current_exe()
-        .map_err(|e| AppError::Other(anyhow::anyhow!("cannot locate our own binary: {e}")))?;
+    // Via `exe_path()`: `current_exe()` returns `/proc/self/exe` with a
+    // " (deleted)" suffix once an upgrade has replaced our file, and spawning a
+    // host from that name fails outright.
+    let exe = crate::upgrade::exe_path()?;
     let payload = serde_json::to_string(spec)
         .map_err(|e| AppError::Other(anyhow::anyhow!("cannot encode host spec: {e}")))?;
 

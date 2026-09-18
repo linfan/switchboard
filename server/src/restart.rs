@@ -17,14 +17,20 @@ pub fn exec_replacement() -> AppResult<()> {
     use crate::error::AppError;
     use std::os::unix::process::CommandExt;
 
-    let exe = std::env::current_exe()
-        .map_err(|e| AppError::Other(anyhow::anyhow!("cannot resolve current exe: {e}")))?;
+    let exe = crate::upgrade::exe_path()?;
     tracing::info!(exe = %exe.display(), "re-exec for self-upgrade");
 
     // exec() replaces the process image on success; it returns only on failure.
-    let err = std::process::Command::new(&exe)
+    let err = std::process::Command::new(exe)
         .args(std::env::args_os().skip(1))
         .exec();
+    // std performs its process setup in *this* process before the exec — including
+    // resetting SIGPIPE to SIG_DFL — and does not roll that back when execvp
+    // fails. Without this, a failed upgrade would leave the still-running old
+    // server killable by the next write to a broken socket or pipe.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     Err(AppError::Other(anyhow::anyhow!("execve failed: {err}")))
 }
 

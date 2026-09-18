@@ -177,7 +177,7 @@ The server is a single self-contained binary; only the binary and its state
 ## Registering as a system service
 
 All three platforms follow the same shape: put configuration in environment
-variables, point the service manager at the binary, and enable restart-on-failure.
+variables, point the service manager at the binary, and enable auto-restart.
 Logs go to stdout by default; under a service manager either read them from the
 manager's journal/event log, or set `SWITCHBOARD_LOG` for size-based rolling
 files — see [Log file rotation](README.md#log-file-rotation-switchboard_log).
@@ -219,12 +219,17 @@ User=switchboard
 WorkingDirectory=/opt/switchboard
 EnvironmentFile=/etc/switchboard/switchboard.env
 ExecStart=/opt/switchboard/switchboard-server
-Restart=on-failure
+Restart=always
 RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+> `Restart=always`, not `on-failure`: systemd counts `SIGHUP`, `SIGINT`,
+> `SIGTERM`, and `SIGPIPE` as *successful* termination for non-oneshot
+> services, so a service killed by SIGPIPE would never be restarted by
+> `on-failure`.
 
 Enable and control it:
 
