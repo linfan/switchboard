@@ -202,7 +202,7 @@ SWITCHBOARD_TLS_KEY=/opt/switchboard/data/switchboard-key.pem
 SWITCHBOARD_LOG=/opt/switchboard/logs/switchboard.log|100mb*5
 RUST_LOG=info
 # must include the directories holding claude / qodercli
-PATH=/usr/local/bin:/usr/bin:/bin:/opt/switchboard/bin
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/switchboard/bin
 ```
 
 Register the unit, `/etc/systemd/system/switchboard.service`:
@@ -261,7 +261,7 @@ configure the working directory, environment, and restart policy:
 ```bat
 nssm install Switchboard "C:\Program Files\Switchboard\switchboard-server.exe"
 nssm set Switchboard AppDirectory "C:\Program Files\Switchboard"
-nssm set Switchboard AppEnvironmentExtra SWITCHBOARD_ADDR=0.0.0.0:8787 SWITCHBOARD_TOKEN=choose-a-strong-token SWITCHBOARD_DB="C:\ProgramData\Switchboard\switchboard.db" SWITCHBOARD_TLS_CERT="C:\ProgramData\Switchboard\switchboard-cert.pem" SWITCHBOARD_TLS_KEY="C:\ProgramData\Switchboard\switchboard-key.pem" "SWITCHBOARD_LOG=C:\ProgramData\Switchboard\logs\switchboard.log|100mb*5" RUST_LOG=info "PATH=C:\Program Files\Switchboard;C:\Program Files\nodejs;%SystemRoot%\System32;%SystemRoot%"
+nssm set Switchboard AppEnvironmentExtra SWITCHBOARD_ADDR=0.0.0.0:8787 SWITCHBOARD_TOKEN=choose-a-strong-token SWITCHBOARD_DB="C:\ProgramData\Switchboard\switchboard.db" SWITCHBOARD_TLS_CERT="C:\ProgramData\Switchboard\switchboard-cert.pem" SWITCHBOARD_TLS_KEY="C:\ProgramData\Switchboard\switchboard-key.pem" "SWITCHBOARD_LOG=C:\ProgramData\Switchboard\logs\switchboard.log|100mb*5" RUST_LOG=info "PATH=C:\Program Files\Git;%SystemRoot%\System32;%SystemRoot%"
 nssm set Switchboard AppExit Default Restart
 nssm set Switchboard AppRestartDelay 3000
 ```
@@ -342,7 +342,7 @@ directories, then write a daemon plist,
         <key>RUST_LOG</key>
         <string>info</string>
         <key>PATH</key>
-        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
