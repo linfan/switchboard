@@ -198,6 +198,8 @@ export function EditorArea({
   const [wraps, setWraps] = useState<Record<string, boolean>>({});
   // Per-tab markdown rendered-vs-source choices, mirrored the same way.
   const [mdPrev, setMdPrev] = useState<Record<string, boolean>>({});
+  // Per-tab image preview zoom factors, mirrored from the registry the same way.
+  const [zooms, setZooms] = useState<Record<string, number>>({});
   // The active tab's rendered HTML, or null while no preview is on screen.
   // `for` keys it to the tab so a switch never paints the previous tab's body.
   const [mdHtml, setMdHtml] = useState<{ for: string; html: string } | null>(
@@ -791,6 +793,11 @@ export function EditorArea({
       keys.forEach((k) => delete next[k]);
       return next;
     });
+    setZooms((m) => {
+      const next = { ...m };
+      keys.forEach((k) => delete next[k]);
+      return next;
+    });
   };
 
   const closeTab = (k: string) => {
@@ -848,6 +855,29 @@ export function EditorArea({
     setMdPrev((m) => ({ ...m, [k]: rendered }));
   };
 
+  // Preview zoom stops for image tabs: the fitted view plus a couple of
+  // enlargements each way. `nextZoom` steps to the neighbour above/below the
+  // current factor, so the label always reads a round percentage.
+  const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3];
+  const imageZoom = (k: string) =>
+    zooms[k] ?? editors.getZoom(workspaceId, k) ?? 1;
+  const nextZoom = (cur: number, dir: 1 | -1) => {
+    const above = ZOOM_STEPS.find((s) => s > cur + 1e-9);
+    const below = [...ZOOM_STEPS].reverse().find((s) => s < cur - 1e-9);
+    return (dir > 0 ? above : below) ?? cur;
+  };
+  /** Zoom this image tab one step in/out, or snap it back to the fitted 100%. */
+  const stepZoom = (k: string, dir: 1 | -1) => {
+    const next = nextZoom(imageZoom(k), dir);
+    if (next === imageZoom(k)) return;
+    editors.setZoom(workspaceId, k, next);
+    setZooms((m) => ({ ...m, [k]: next }));
+  };
+  const resetZoom = (k: string) => {
+    editors.setZoom(workspaceId, k, 1);
+    setZooms((m) => ({ ...m, [k]: 1 }));
+  };
+
   /**
    * Route a plain click inside the rendered pane. Nothing here may navigate
    * the app itself: external links open a new window, `#anchor` links scroll
@@ -882,6 +912,10 @@ export function EditorArea({
   };
 
   const wrapped = !!key && isWrapped(key);
+  const isImage = media?.kind === "image" && !!key;
+  const zoom = key ? imageZoom(key) : 1;
+  const canZoomIn = ZOOM_STEPS.some((s) => s > zoom + 1e-9);
+  const canZoomOut = ZOOM_STEPS.some((s) => s < zoom - 1e-9);
 
   return (
     <div className="weditor__area">
@@ -1013,6 +1047,39 @@ export function EditorArea({
                     }}
                   >
                     Source
+                  </button>
+                </div>
+              )}
+              {isImage && key && (
+                <div
+                  className="weditor__seg"
+                  role="group"
+                  aria-label="Image zoom"
+                >
+                  <button
+                    className="weditor__seg-opt"
+                    title="Zoom out"
+                    aria-label="Zoom out"
+                    disabled={!canZoomOut}
+                    onClick={() => stepZoom(key, -1)}
+                  >
+                    −
+                  </button>
+                  <button
+                    className="weditor__seg-opt weditor__zoom-pct"
+                    title="Reset to fit (100%)"
+                    onClick={() => resetZoom(key)}
+                  >
+                    {Math.round(zoom * 100)}%
+                  </button>
+                  <button
+                    className="weditor__seg-opt"
+                    title="Zoom in"
+                    aria-label="Zoom in"
+                    disabled={!canZoomIn}
+                    onClick={() => stepZoom(key, 1)}
+                  >
+                    +
                   </button>
                 </div>
               )}

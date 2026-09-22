@@ -275,6 +275,63 @@ const wraps = new Map<string, boolean>();
 const mdPreviews = new Map<string, boolean>();
 
 /**
+ * Each image tab's preview zoom factor, keyed like {@link entries}. A recorded
+ * choice mirrored onto the live `<img>`'s width; `undefined` means "no zoom
+ * yet", which renders at the fitted 100%. Destroying a tab's view forgets its
+ * zoom, so a file closed and reopened starts fitted again.
+ */
+const zooms = new Map<string, number>();
+
+/** The tab's image zoom factor, or `undefined` if it has never been zoomed. */
+export function getZoom(
+  workspaceId: string,
+  tabKey: string,
+): number | undefined {
+  return zooms.get(mapKey(workspaceId, tabKey));
+}
+
+/**
+ * Set a tab's image zoom and apply it to the live `<img>`.
+ *
+ * The pane fits an image with `object-fit: contain` under `max-width/height:
+ * 100%`, so 100% is "as large as the pane allows". Zooming is expressed in
+ * pixels relative to that fitted size, and the max clamp is lifted so an
+ * enlarged image can overflow the pane and scroll (the wrapper's `overflow:
+ * auto`). A CSS `zoom`/`transform: scale` can't do this here — the percentage
+ * max-clamp resolves against the un-zoomed box and re-shrinks the image, which
+ * is why scaling looked like a no-op. At exactly 100% the inline sizing is
+ * cleared so the image returns to the CSS-driven fit.
+ */
+export function setZoom(
+  workspaceId: string,
+  tabKey: string,
+  zoom: number,
+): void {
+  const k = mapKey(workspaceId, tabKey);
+  zooms.set(k, zoom);
+  const wrap = entries.get(k)?.dom;
+  const img = wrap?.querySelector("img");
+  if (!wrap || !img) return;
+  if (zoom === 1) {
+    img.style.width = "";
+    img.style.height = "";
+    img.style.maxWidth = "";
+    img.style.maxHeight = "";
+    return;
+  }
+  const { naturalWidth: nw, naturalHeight: nh } = img;
+  if (!nw || !nh) return; // not decoded yet: keep the CSS fit, retry on load
+  // The fitted (100%) box: shrink-only contain, matching object-fit's behaviour.
+  const availW = Math.max(1, wrap.clientWidth - 16); // 8px padding each side
+  const availH = Math.max(1, wrap.clientHeight - 16);
+  const fit = Math.min(availW / nw, availH / nh, 1);
+  img.style.maxWidth = "none";
+  img.style.maxHeight = "none";
+  img.style.height = "auto";
+  img.style.width = `${Math.round(nw * fit * zoom)}px`;
+}
+
+/**
  * The tab's rendered-vs-source choice for markdown, or `undefined` if the tab
  * never toggled it (callers apply the rendered default themselves).
  */
@@ -335,6 +392,7 @@ export function remeasureAll(): void {
 function destroy(key: string): void {
   wraps.delete(key);
   mdPreviews.delete(key);
+  zooms.delete(key);
   const e = entries.get(key);
   if (!e) return;
   if (e.dom.parentElement) {

@@ -1361,6 +1361,21 @@ body {
   background: var(--accent);
   color: #fff;
 }
+.weditor__seg-opt:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+.weditor__seg-opt:disabled:hover {
+  background: transparent;
+  color: var(--fg-dim);
+}
+/* Image zoom: fixed-width percentage read-out, so stepping zoom doesn't
+   shift the +/− buttons around it. */
+.weditor__zoom-pct {
+  min-width: 44px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
 .weditor__cm {
   flex: 1;
   min-height: 0;
@@ -1388,12 +1403,14 @@ body {
   height: 100%;
   overflow: auto;
   display: flex;
-  align-items: center;
-  justify-content: center;
   padding: 8px;
   box-sizing: border-box;
 }
+/* `margin: auto` centres on both axes while staying scrollable to every edge
+   when a zoomed image overflows — flex `align/justify-content: center` clips
+   the overflowing top/left out of reach. */
 .weditor__media {
+  margin: auto;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
