@@ -1,9 +1,10 @@
 # Switchboard — Quick Start & Deployment
 
-How to run Switchboard locally, build release binaries of the hosting service,
-and register it as a system service on **Linux (systemd)**, **Windows (`sc`)**,
-and **macOS (launchd)**. For the full environment-variable reference see
-[Configuration](README.md#configuration).
+How to configure and run Switchboard, install the hosting service on a host,
+and register it as a system service on **Linux (systemd)**, **Windows (nssm)**,
+and **macOS (launchd)**. For release builds, cross-compiles, and the test suites
+see [BUILD.md](BUILD.md); the full environment-variable reference is in
+[Configuration](#configuration) below.
 
 ## Prerequisites
 - Rust (stable) + Cargo
@@ -80,81 +81,172 @@ run the server with `SWITCHBOARD_TLS=0` and select the **http** protocol in the
 dialog, or trust the generated `server/data/switchboard-cert.pem` in your OS
 keychain.
 
-## Building release binaries
+## Configuration
+
+### Server (worker) environment variables
+
+The default role: binds a client-facing address, serves the API + WS, and runs
+PTYs locally.
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `SWITCHBOARD_MODE` | `worker` | Role selector: `worker` or `repeater` |
+| `SWITCHBOARD_ADDR` | `127.0.0.1:8787` | Client-facing listen address |
+| `SWITCHBOARD_TOKEN` | `dev-token` | Shared client token (never transmitted; proven via HMAC) |
+| `SWITCHBOARD_DB` | `server/data/switchboard.db` | SQLite path |
+| `SWITCHBOARD_NAME` | host name | Service display name |
+| `SWITCHBOARD_PERMISSION_MODE` | `default` | Passed to the agent's `--permission-mode` |
+| `SWITCHBOARD_TLS` | `1` (on) | HTTPS/WSS; set `0` to serve plain HTTP |
+| `SWITCHBOARD_TLS_CERT` | `server/data/switchboard-cert.pem` | PEM cert path (auto-generated if missing) |
+| `SWITCHBOARD_TLS_KEY` | `server/data/switchboard-key.pem` | PEM key path (auto-generated if missing) |
+| `SWITCHBOARD_TLS_SAN` | — | Extra SANs (comma-separated IPs/hostnames) for the generated cert |
+| `SWITCHBOARD_LOG` | — | Rolling log file, `<path>\|<max-size>*<max-archives>` (see [Log file rotation](#log-file-rotation-switchboard_log)) |
+
+To run a worker **behind a repeater** (worker-repeater-client), leave
+`SWITCHBOARD_ADDR` / `SWITCHBOARD_TOKEN` unset and set the vars in
+[Worker behind a repeater (dial-out)](#worker-behind-a-repeater-dial-out);
+it dials out and needs no client-facing bind.
+
+### Repeater environment variables
+
+Set `SWITCHBOARD_MODE=repeater` to run the relay. It binds a client-facing **and**
+a worker-facing HTTPS listener, forwards opaque bytes to the one paired worker,
+and runs no tasks itself.
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `SWITCHBOARD_MODE` | `worker` | Must be `repeater` to select this role |
+| `SWITCHBOARD_ADDR` | `127.0.0.1:8787` | Client-facing HTTPS listen address |
+| `SWITCHBOARD_TOKEN` | `dev-token` | Client token validated at ingress (never transmitted) |
+| `SWITCHBOARD_REPEATER_ADDR` | — | Worker-facing HTTPS bind that the dialing worker connects to |
+| `SWITCHBOARD_REPEATER_TOKEN` | — | Shared secret for the worker↔repeater tunnel |
+| `SWITCHBOARD_TLS` / `_CERT` / `_KEY` / `_SAN` | as above | TLS for both listeners (same semantics as the server table) |
+| `SWITCHBOARD_NAME` | host name | Service display name |
+| `SWITCHBOARD_LOG` | — | Rolling log file, `<path>\|<max-size>*<max-archives>` (see [Log file rotation](#log-file-rotation-switchboard_log)) |
+
+### Worker behind a repeater (dial-out)
+
+A worker-repeater-client sets no `SWITCHBOARD_ADDR` / `SWITCHBOARD_TOKEN`; it only
+dials out to the repeater. Note that `SWITCHBOARD_REPEATER_CA` is read **only**
+by this role — the repeater itself never uses it.
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `SWITCHBOARD_REPEATER_ADDR` | — | Repeater address to dial |
+| `SWITCHBOARD_REPEATER_TOKEN` | — | Shared secret for the worker↔repeater tunnel |
+| `SWITCHBOARD_REPEATER_CA` | — | PEM whose leaf cert the worker pins on the tunnel |
+| `SWITCHBOARD_DB` / `SWITCHBOARD_NAME` / `SWITCHBOARD_LOG` | as above | Same semantics as the server table |
+
+### Log file rotation (`SWITCHBOARD_LOG`)
+
+Logs go to stdout by default. Set `SWITCHBOARD_LOG` to write to a **size-based
+rolling file** instead, in the format
+`<file-path>|<max-size><unit>*<max-archive-count>`:
 
 ```bash
-make build             # build server (release) + client (with fresh TS bindings)
-make package-server    # stage the server binary in ./dist
-make package-client    # Tauri desktop bundles
+SWITCHBOARD_LOG='logs/switchboard.log|100mb*5'
 ```
 
-### Cross-compiling the hosting service
-The server cross-builds to Linux and Windows from any dev machine using `zig` as
-the C compiler/linker (`brew install zig`) — no mingw-w64, MSVC, or musl toolchain
-to install:
+This writes to `logs/switchboard.log`, rolls it once a write would push it past
+100 MiB, and keeps at most **5** archived generations (`switchboard.log.1` …
+`switchboard.log.5`, newest first; the oldest is discarded on roll). Parent
+directories are created if missing. Size units are case-insensitive — `b`, `kb`,
+`mb`, `gb` (or the bare `k` / `m` / `g`); a plain number is bytes. Applies to
+every role (worker, repeater, worker-repeater-client), and `RUST_LOG` still
+controls the level/filter. A `count` of `0` keeps no archives (the file is
+truncated in place on roll). Quote the spec in shells where `|` is a pipe —
+`set "SWITCHBOARD_LOG=…|100mb*5"` in `cmd.exe`, single quotes in POSIX shells —
+otherwise the value arrives truncated and is ignored with a warning.
+
+Stdout logs are colorized only when stdout is a terminal that renders ANSI
+escapes (on Windows the console's virtual-terminal mode is switched on for this,
+and pre-1809 consoles that reject it get plain text). Redirected output and log
+files are never colorized; set `NO_COLOR=1` to turn color off everywhere.
+
+Role selection: `SWITCHBOARD_MODE=repeater` → **repeater**. Otherwise a worker
+with **no** `SWITCHBOARD_ADDR`/`SWITCHBOARD_TOKEN` but a `SWITCHBOARD_REPEATER_ADDR`
++ `SWITCHBOARD_REPEATER_TOKEN` becomes a **worker-repeater-client** (dials out);
+any other worker is **worker-direct** (binds and serves).
+
+Auth (`SWB-v1`): the token is **never sent**. REST requests carry `X-Swb-Ts` /
+`X-Swb-Nonce` / `X-Swb-Mac` (a per-request HMAC over method, path+query,
+`SHA-256(body)`, timestamp, nonce, and the channel's cert fingerprint); the
+WebSocket runs a nonce challenge-response at connect. See
+[Transport security (`SWB-v1`)](ARCHITECTURE.md#transport-security-swb-v1).
+
+### TLS & certificates
+
+HTTPS is on by default. When the cert/key files are absent the server
+generates a self-signed certificate (ECDSA P-256, ~13-month validity); the
+`SWITCHBOARD_TLS_SAN` entries (plus `localhost` and local interface addresses)
+become its SANs, which matters only if you later trust it in a browser. The
+desktop client **pins** the self-signed leaf on first add (hostname ignored), so
+no CA trust step is needed there. To terminate TLS yourself (reverse proxy, real
+CA cert), set `SWITCHBOARD_TLS=0` and run the proxy in front.
+
+Networking: the desktop client performs REST and WebSocket I/O in its native
+(Rust) layer rather than the webview, using **rustls with a pinning verifier** —
+it reaches self-signed hosts (which the webview's fetch/WebSocket would reject)
+while still authenticating the channel by the captured leaf-cert fingerprint, so
+an active MITM is rejected on pin mismatch.
+
+To supply your own self-signed key pair instead of letting the server generate
+one, create a `tls/` directory and run:
+
 ```bash
-make setup-server-linux      # rustup target + zig check
-make package-server-linux    # -> dist/switchboard-server-linux (static musl)
-make setup-server-windows
-make package-server-windows  # -> dist/switchboard-server.exe
+mkdir -p tls
+openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout tls/private.key -out tls/certificate.pem -days 397 \
+    -subj "/O=Switchboard/CN=Switchboard" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:192.168.1.50" \
+    -addext "extendedKeyUsage=serverAuth"
 ```
-The Windows build targets `x86_64-pc-windows-gnullvm` (zig's bundled mingw is
-ucrt/lld-based) and imports only system DLLs. Terminal tasks there run on a
-**ConPTY**, so `cmd`, `powershell`, and `pwsh` all work as a task's command —
-which needs Windows 10 1809 or newer. Bare names resolve through `PATHEXT`, and
-CLIs installed as `.cmd` shims (npm's `claude`) are launched via `%COMSPEC%`.
-Self-upgrade works here too — see [Upgrading](#upgrading); it needs the service
-to be registered so the manager restarts it, because Windows cannot re-exec.
 
-### Cross-compiling the desktop client
-The Tauri shell also cross-builds to Windows, but needs one extra tool:
-mingw-w64's `windres`, the only resource compiler `tauri-build` drives on a
-non-Windows host (it embeds `icons/icon.ico` and the version metadata).
+Replace `192.168.1.50` with the address clients dial (add one `IP:`/`DNS:` entry
+per address). Then point `SWITCHBOARD_TLS_CERT` / `SWITCHBOARD_TLS_KEY` at the
+generated files. `-days 397` stays under the 398-day cap macOS/Safari enforce, so
+the same cert can also be trusted in a browser.
+
+Two encoding details are **not** optional — rustls (the desktop client's pinning
+verifier, the worker's outbound leg to a repeater, and the server's own key
+loader) is stricter than OpenSSL's defaults:
+
+- **`-addext` — the cert must be X.509 v3.** `openssl req -x509` with no
+  extensions at all emits a **v1** certificate, which rustls rejects at handshake
+  time with `invalid peer certificate: Other(OtherError(UnsupportedCertVersion))`.
+  Any one `-addext` forces v3, so `subjectAltName` already covers it. Whether the
+  older extension-less command happened to work depended entirely on the local
+  OpenSSL: OpenSSL 3.x with a config that sets `x509_extensions` adds extensions
+  (→ v3) on its own, while LibreSSL (macOS's `/usr/bin/openssl`) and any build
+  running without a usable `openssl.cnf` produce v1.
+- **EC keys need `-pkeyopt ec_param_enc:named_curve`.** If you prefer ECDSA
+  P-256 over RSA, use
+  `-newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -pkeyopt ec_param_enc:named_curve`.
+  Without the second `-pkeyopt`, OpenSSL/LibreSSL write the curve as *explicit*
+  parameters, which rustls can't read — the server then fails to start with
+  `failed to parse private key as RSA, ECDSA, or EdDSA`. RSA has no equivalent
+  trap, hence the default above.
+
+Verify both before deploying:
+
 ```bash
-brew install zig mingw-w64
-make setup-client-windows
-make package-client-windows  # -> dist/Switchboard.exe + WebView2Loader.dll
+openssl x509 -in tls/certificate.pem -noout -text | grep -E "Version|DNS:|IP Address"
+#         Version: 3 (0x2)     <- must say 3, not 1
+head -1 tls/private.key        # BEGIN PRIVATE KEY (PKCS#8) or BEGIN RSA PRIVATE KEY
 ```
-The frontend bundle is compiled into the binary, so the staged pair is the whole
-app — copy both files to the Windows machine and run the `.exe`. Three caveats:
-- **`WebView2Loader.dll` must sit next to the .exe.** `webview2-com-sys` links
-  the loader statically only under MSVC; every other target (including this one)
-  imports it from the DLL, so `package-client-windows` stages it alongside.
-- **No installer off-Windows.** The NSIS and MSI bundlers only exist in the
-  Tauri CLI's Windows build (`tauri build --bundles` offers just `app`/`dmg`/`ios`
-  on macOS), so the target passes `--no-bundle`. Run `make package-client` on a
-  Windows host, or in CI, if you need an `.msi`/`-setup.exe`.
-- **WebView2 itself is a runtime dependency.** Tauri renders through it rather
-  than shipping a browser engine. Windows 11 and current Windows 10 include it;
-  older installs need Microsoft's Evergreen bootstrapper once.
 
-#### "Could not find the WebView2 Runtime"
-The DLL is not what's missing. `WebView2Loader.dll` is only a lookup shim — were
-it absent the process would die at load time ("code execution cannot proceed"),
-not show a dialog. This dialog means the loader ran and found no **runtime**: a
-separate ~150 MB Edge install under `C:\Program Files (x86)\Microsoft\EdgeWebView\`.
-Common on Windows Server, LTSC, and N editions. Check it:
-```powershell
-Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -Name pv -EA 0
-Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -Name pv -EA 0
-```
-A missing key, or `pv = 0.0.0.0` (leftover from a broken uninstall), both trigger
-it. Fix with the Evergreen bootstrapper from
-https://developer.microsoft.com/en-us/microsoft-edge/webview2:
-`MicrosoftEdgeWebview2Setup.exe /silent /install` — as admin for machine-wide,
-otherwise per-user (which also works). A portable `.exe` can never self-install
-the runtime; `webviewInstallMode` only applies to the NSIS/MSI bundlers we skip.
-
-For a fully self-contained drop, use the **Fixed Version** runtime instead:
-download the CAB from that page, extract it beside `Switchboard.exe`, and set
-`WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` to the extracted folder — the loader honors
-that variable when the app passes a null browser folder, which is what wry does.
-Costs ~180 MB and you own the patch cadence.
+On Windows, use the OpenSSL that ships with Git for Windows
+(`C:\Program Files\Git\usr\bin\openssl.exe`); from Git Bash the command above works
+verbatim. If OpenSSL isn't available, **omit the cert/key files entirely and let the
+server generate the pair on startup** — it emits a correct v3 ECDSA P-256 cert with
+the right SANs, and the desktop client pins it on first add, so this is the
+recommended path on every platform.
 
 ## Installing on a server host
 
-The server is a single self-contained binary; only the binary and its state
-(SQLite DB, generated TLS cert/key, logs) need a home.
+The server is a single self-contained binary (see [BUILD.md](BUILD.md) for
+building one); only the binary and its state (SQLite DB, generated TLS cert/key,
+logs) need a home.
 
 1. **Copy the binary.**
    - Linux: `dist/switchboard-server-linux` → `/opt/switchboard/switchboard-server` (chmod +x)
@@ -180,7 +272,7 @@ All three platforms follow the same shape: put configuration in environment
 variables, point the service manager at the binary, and enable auto-restart.
 Logs go to stdout by default; under a service manager either read them from the
 manager's journal/event log, or set `SWITCHBOARD_LOG` for size-based rolling
-files — see [Log file rotation](README.md#log-file-rotation-switchboard_log).
+files — see [Log file rotation](#log-file-rotation-switchboard_log).
 
 ### Linux — systemd
 
@@ -242,7 +334,7 @@ journalctl -u switchboard -f                 # follow logs
 
 To repeat the same for a **repeater** or a **dial-out worker**, register a second
 unit with that role's variables instead (see
-[Configuration](README.md#configuration)).
+[Configuration](#configuration)).
 
 ### Windows — nssm
 
