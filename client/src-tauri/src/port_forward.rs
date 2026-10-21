@@ -27,6 +27,12 @@ const ACCEPT_BUF: usize = 64;
 const OUT_BUF: usize = 512;
 const STREAM_BUF: usize = 64;
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+/// Bound the TCP/TLS/WS dial plus both auth rounds. A link that accepts the
+/// socket but never answers must not leave the session forever "connecting".
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound how long a local connection waits for `OpenOk`/`OpenErr`. Covers the
+/// server's own 10s remote-connect timeout plus tunnel/RTT headroom.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -207,7 +213,16 @@ async fn run_session_manager(
             return;
         }
 
-        let mut connecting = tokio::spawn(connect_forward(config.clone()));
+        let connect_config = config.clone();
+        let mut connecting = tokio::spawn(async move {
+            match tokio::time::timeout(CONNECT_TIMEOUT, connect_forward(connect_config)).await {
+                Ok(result) => result,
+                Err(_) => Err(format!(
+                    "connect timed out after {}s",
+                    CONNECT_TIMEOUT.as_secs()
+                )),
+            }
+        });
         let socket = loop {
             tokio::select! {
                 connected = &mut connecting => match connected {
@@ -395,8 +410,19 @@ async fn bridge_local(
         return;
     }
 
+    let open_timeout = tokio::time::sleep(OPEN_TIMEOUT);
+    tokio::pin!(open_timeout);
+
     while !(opened && local_finished && remote_finished) {
         tokio::select! {
+            _ = &mut open_timeout, if !opened => {
+                tracing::warn!(
+                    stream = stream_id,
+                    "port-forward open timed out; resetting the local connection"
+                );
+                let _ = out_tx.send(PortForwardFrame::Rst { stream_id }).await;
+                break;
+            }
             remote = remote_rx.recv() => match remote {
                 Some(PortForwardFrame::OpenOk { .. }) => opened = true,
                 Some(PortForwardFrame::OpenErr { .. }) | Some(PortForwardFrame::Rst { .. }) => break,
