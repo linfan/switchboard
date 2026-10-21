@@ -10,6 +10,7 @@
 //! task handles inbound text control + binary INPUT frames.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use axum::{
     extract::{
@@ -41,6 +42,14 @@ const SNAPSHOT_THRESHOLD: u64 = 256;
 const OUT_BUF: usize = 512;
 /// Buffer for inbound frames handed from the transport bridge to the session.
 const IN_BUF: usize = 64;
+/// Bound the whole pre-session handshake: a peer that connects, reads the
+/// challenge, and then goes silent must not pin a task (and, on the repeater
+/// legs, a socket) indefinitely.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Garbage frames tolerated before abandoning the handshake early. Together with
+/// [`AUTH_TIMEOUT`] this stops a peer from staying alive by feeding junk just
+/// under the deadline.
+const MAX_INVALID_AUTH_FRAMES: usize = 8;
 
 /// A transport-neutral inbound frame. The direct-mode bridge produces these from
 /// an axum `WebSocket`; the repeater tunnel produces them from tunnel frames.
@@ -258,6 +267,27 @@ pub(crate) async fn ws_handshake(
     token: Option<&str>,
     cert_fp: &[u8],
 ) -> bool {
+    match tokio::time::timeout(
+        AUTH_TIMEOUT,
+        ws_handshake_inner(sink, stream, token, cert_fp),
+    )
+    .await
+    {
+        Ok(ok) => ok,
+        Err(_) => {
+            tracing::warn!("websocket authentication timed out");
+            let _ = send_raw(sink, &auth_error("authentication timed out")).await;
+            false
+        }
+    }
+}
+
+async fn ws_handshake_inner(
+    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    stream: &mut futures::stream::SplitStream<WebSocket>,
+    token: Option<&str>,
+    cert_fp: &[u8],
+) -> bool {
     let server_nonce = random_nonce::<NONCE_LEN>();
     let challenge = AuthMsg::AuthChallenge {
         server_nonce: hex(&server_nonce),
@@ -266,19 +296,32 @@ pub(crate) async fn ws_handshake(
         return false;
     }
 
+    let mut invalid = 0usize;
     let resp = loop {
         match stream.next().await {
             Some(Ok(Message::Text(t))) => match serde_json::from_str::<AuthMsg>(t.as_str()) {
                 Ok(m) => break m,
-                Err(_) => continue,
+                Err(_) => {
+                    invalid += 1;
+                    if invalid > MAX_INVALID_AUTH_FRAMES {
+                        tracing::warn!(invalid, "too many invalid authentication frames");
+                        let _ = send_raw(sink, &auth_error("too many invalid auth frames")).await;
+                        return false;
+                    }
+                }
             },
             Some(Ok(Message::Close(_))) | None => return false,
             // A keystroke typed before the handshake completes cannot be applied
             // (there is no session yet), but dropping it silently made an entire
-            // class of "missing characters" reports undiagnosable.
+            // class of "missing characters" reports undiagnosable. It is still a
+            // protocol violation at this stage, so it counts toward the cap.
             Some(Ok(Message::Binary(_))) => {
                 tracing::warn!("discarding a data-plane frame sent before authentication");
-                continue;
+                invalid += 1;
+                if invalid > MAX_INVALID_AUTH_FRAMES {
+                    let _ = send_raw(sink, &auth_error("too many invalid auth frames")).await;
+                    return false;
+                }
             }
             Some(Ok(_)) => continue,
             Some(Err(_)) => return false,

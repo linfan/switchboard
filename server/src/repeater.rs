@@ -14,6 +14,7 @@
 //! tunnel with `SWITCHBOARD_REPEATER_TOKEN` — **no client credential ever crosses
 //! the tunnel**, and the payload it forwards is opaque application bytes.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -275,12 +276,12 @@ async fn wait_for_tunnel(st: &Shared) -> Option<Arc<Tunnel>> {
 struct StreamGuard {
     tunnel: Arc<Tunnel>,
     id: u64,
-    armed: bool,
+    armed: Cell<bool>,
 }
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        if self.armed {
+        if self.armed.get() {
             let _ = self
                 .tunnel
                 .tx
@@ -335,7 +336,7 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
     let guard = StreamGuard {
         tunnel: tunnel.clone(),
         id,
-        armed: true,
+        armed: Cell::new(true),
     };
 
     let headers: Vec<(String, String)> = parts
@@ -391,7 +392,7 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
     // unregisters, stopping the worker's producer at the source.
     let body = Body::from_stream(futures::stream::unfold(
         (rx, guard),
-        |(mut rx, mut guard)| async move {
+        |(mut rx, guard)| async move {
             loop {
                 match rx.recv().await {
                     Some(f) if f.kind == KIND_RESP_BODY => {
@@ -401,7 +402,7 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
                         ));
                     }
                     Some(f) if f.kind == KIND_RESP_END => {
-                        guard.armed = false; // response complete; no cancel needed
+                        guard.armed.set(false); // response complete; no cancel needed
                         return None;
                     }
                     Some(_) => continue,
@@ -466,7 +467,7 @@ async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
     let guard = StreamGuard {
         tunnel: tunnel.clone(),
         id,
-        armed: true,
+        armed: Cell::new(true),
     };
 
     let open = serde_json::to_vec(&WsOpen { uri: uri.into() }).unwrap_or_default();

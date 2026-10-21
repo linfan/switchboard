@@ -602,3 +602,32 @@ async fn rest_missing_signature_rejected() {
     let resp = crate::http::router(state, true).oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn garbage_auth_frames_get_the_connection_closed() {
+    let (addr, _state) = start_server().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    // Consume the challenge, then feed junk without ever answering it.
+    let _ = ws.next().await;
+    for _ in 0..12 {
+        if ws.send(WsMessage::Text("not-json".into())).await.is_err() {
+            break;
+        }
+    }
+
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the server must abandon a handshake fed only garbage"
+    );
+}
