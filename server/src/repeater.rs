@@ -390,7 +390,7 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
         return (StatusCode::BAD_GATEWAY, "tunnel closed").into_response();
     }
 
-    // Await RESP_HEAD, then accumulate RESP_BODY until RESP_END.
+    // Await RESP_HEAD, then stream RESP_BODY frames until RESP_END.
     let resp_head = loop {
         match rx.recv().await {
             Some(f) if f.kind == KIND_RESP_HEAD => {
