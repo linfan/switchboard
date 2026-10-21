@@ -28,6 +28,7 @@ use switchboard_shared::{
     frame::Frame,
     now_millis,
     port_forward::PortForwardFrame,
+    tunnel::{TunnelFrame, WorkerHello, KIND_HELLO, PROTO},
     ClientMsg, ServerMsg, ServiceInfo, TaskInfo, TaskStatus,
 };
 use tokio::{
@@ -369,6 +370,16 @@ async fn connect_endpoint(addr: &str, cb: &[u8], path: &str) -> WsStream {
 /// cert `cb`). Returns the authenticated socket without running the worker app —
 /// enough to occupy the single slot and exercise pairing/eviction.
 async fn dial_worker_leg(worker_addr: &str, cb: &[u8]) -> WsStream {
+    dial_worker_leg_with_caps(worker_addr, cb, None).await
+}
+
+/// Same, but optionally announces capabilities as a current worker does. With
+/// `None` the socket stays silent, modeling a legacy worker.
+async fn dial_worker_leg_with_caps(
+    worker_addr: &str,
+    cb: &[u8],
+    features: Option<&[&str]>,
+) -> WsStream {
     let url = format!("wss://{worker_addr}/repeater");
     let connector = Connector::Rustls(client_tls());
     let (mut ws, _) = connect_async_tls_with_config(&url, None, false, Some(connector))
@@ -402,7 +413,25 @@ async fn dial_worker_leg(worker_addr: &str, cb: &[u8]) -> WsStream {
             }
         }
     }
+    if let Some(features) = features {
+        let hello = WorkerHello {
+            proto: PROTO,
+            version: "9.9.9-test".into(),
+            features: features.iter().map(|f| (*f).into()).collect(),
+        };
+        let frame = TunnelFrame::new(KIND_HELLO, 0, serde_json::to_vec(&hello).unwrap());
+        ws.send(WsMessage::Binary(frame.encode())).await.unwrap();
+    }
     ws
+}
+
+/// Attempt the client-facing `/forward` upgrade and return the HTTP rejection.
+async fn forward_upgrade_error(addr: &str) -> tokio_tungstenite::tungstenite::Error {
+    let url = format!("wss://{addr}/forward");
+    let connector = Connector::Rustls(client_tls());
+    connect_async_tls_with_config(&url, None, false, Some(connector))
+        .await
+        .expect_err("the upgrade should be refused before the handshake")
 }
 
 // ---- WS protocol helpers (mirror ws_test) ----------------------------------
@@ -741,6 +770,56 @@ async fn health_answered_locally_by_repeater() {
 }
 
 #[tokio::test]
+async fn health_reports_worker_capabilities() {
+    let h = boot().await;
+    let (status, body) = https_request(&h.client_addr, "GET", "/health", None, b"")
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["worker_version"], env!("CARGO_PKG_VERSION"));
+    let features = v["worker_features"].as_array().expect("features array");
+    assert!(features.iter().any(|f| f == "forward"));
+    assert!(features.iter().any(|f| f == "ws"));
+}
+
+#[tokio::test]
+async fn legacy_worker_is_refused_for_forward() {
+    let r = boot_repeater().await;
+    // A worker that never sends HELLO: the repeater must still pair it (after
+    // the grace) but refuse port forwarding instead of hanging the client.
+    let _worker = dial_worker_leg(&r.worker_addr, &r.cb).await;
+    wait_paired(&r.client_addr, &r.cb).await;
+
+    match forward_upgrade_error(&r.client_addr).await {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), 503);
+            let body = String::from_utf8_lossy(response.body().as_deref().unwrap_or_default())
+                .into_owned();
+            assert!(
+                body.contains("upgrade the worker"),
+                "unexpected rejection body: {body}"
+            );
+        }
+        other => panic!("expected an HTTP rejection, got {other}"),
+    }
+}
+
+#[tokio::test]
+async fn worker_without_forward_capability_is_refused() {
+    let r = boot_repeater().await;
+    let _worker = dial_worker_leg_with_caps(&r.worker_addr, &r.cb, Some(&["ws"])).await;
+    wait_paired(&r.client_addr, &r.cb).await;
+
+    match forward_upgrade_error(&r.client_addr).await {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), 503);
+        }
+        other => panic!("expected an HTTP rejection, got {other}"),
+    }
+}
+
+#[tokio::test]
 async fn large_upload_chunked_through_repeater() {
     let h = boot().await;
     let upload_dir = tempfile::tempdir().unwrap();
@@ -776,7 +855,7 @@ async fn worker_replacement_closes_idle_client_bridges() {
     // would leave it parked on a receiver that never closes. The tunnel's
     // teardown must wake it so the client reconnects at once.
     let r = boot_repeater().await;
-    let _first = dial_worker_leg(&r.worker_addr, &r.cb).await;
+    let _first = dial_worker_leg_with_caps(&r.worker_addr, &r.cb, Some(&["ws", "forward"])).await;
     wait_paired(&r.client_addr, &r.cb).await;
 
     let mut client = connect_forward(&r.client_addr, &r.cb).await;
@@ -801,7 +880,7 @@ async fn worker_replacement_closes_idle_client_bridges() {
 #[tokio::test]
 async fn worker_disconnect_closes_idle_client_bridges() {
     let r = boot_repeater().await;
-    let first = dial_worker_leg(&r.worker_addr, &r.cb).await;
+    let first = dial_worker_leg_with_caps(&r.worker_addr, &r.cb, Some(&["ws", "forward"])).await;
     wait_paired(&r.client_addr, &r.cb).await;
 
     let mut client = connect_forward(&r.client_addr, &r.cb).await;

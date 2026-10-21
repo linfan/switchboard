@@ -38,9 +38,9 @@ use switchboard_shared::{
     auth::{H_MAC, H_NONCE, H_TS},
     now_millis,
     tunnel::{
-        ReqHead, RespHead, TunnelFrame, WsOpen, BODY_CHUNK, KIND_PING, KIND_PONG, KIND_REQ_BODY,
-        KIND_REQ_END, KIND_REQ_HEAD, KIND_RESP_BODY, KIND_RESP_END, KIND_RESP_HEAD, KIND_RST,
-        KIND_WS_BIN, KIND_WS_CLOSE, KIND_WS_OPEN, KIND_WS_TEXT,
+        ReqHead, RespHead, TunnelFrame, WorkerHello, WsOpen, BODY_CHUNK, KIND_HELLO, KIND_PING,
+        KIND_PONG, KIND_REQ_BODY, KIND_REQ_END, KIND_REQ_HEAD, KIND_RESP_BODY, KIND_RESP_END,
+        KIND_RESP_HEAD, KIND_RST, KIND_WS_BIN, KIND_WS_CLOSE, KIND_WS_OPEN, KIND_WS_TEXT,
     },
 };
 use tokio::sync::mpsc;
@@ -57,6 +57,9 @@ const GRACE: Duration = Duration::from_secs(5);
 const HEARTBEAT: Duration = Duration::from_secs(15);
 /// Tear the tunnel down (freeing the slot) after this long with no worker frame.
 const IDLE_MS: i64 = 45_000;
+/// How long a freshly authenticated worker gets to announce itself before it is
+/// treated as a legacy build that predates the HELLO frame.
+const HELLO_GRACE: Duration = Duration::from_secs(1);
 /// Largest client REST body the repeater buffers to sign-check + forward.
 const MAX_BODY: usize = 128 * 1024 * 1024;
 
@@ -79,6 +82,9 @@ pub struct Tunnel {
     tx: mpsc::Sender<Vec<u8>>,
     next_stream: AtomicU64,
     routes: StdMutex<HashMap<u64, mpsc::Sender<TunnelFrame>>>,
+    /// What the worker announced after auth; `None` for legacy builds that
+    /// never send a HELLO.
+    caps: Option<WorkerHello>,
     /// Fired when a newer worker evicts this tunnel from the single slot, so its
     /// session task tears down at once rather than lingering until the idle
     /// timeout. `notify_one` (not `notify_waiters`) so the signal is not lost if
@@ -248,12 +254,23 @@ pub(crate) async fn serve(
 
 /// Unauthenticated liveness: always answered locally so it works with no worker.
 async fn health(State(st): State<Shared>) -> Json<serde_json::Value> {
+    let tunnel = st.tunnel();
+    let worker_version = tunnel
+        .as_ref()
+        .and_then(|t| t.caps.as_ref())
+        .map(|h| h.version.clone());
+    let worker_features = tunnel
+        .as_ref()
+        .and_then(|t| t.caps.as_ref())
+        .map(|h| h.features.clone());
     Json(json!({
         "status": "ok",
         "role": "repeater",
         "name": st.config.service_name,
         "version": env!("CARGO_PKG_VERSION"),
-        "paired": st.tunnel().is_some(),
+        "paired": tunnel.is_some(),
+        "worker_version": worker_version,
+        "worker_features": worker_features,
     }))
 }
 
@@ -441,6 +458,26 @@ async fn client_ws(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {
 }
 
 async fn client_forward(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {
+    // Refuse fast when the paired worker cannot serve port forwarding. Without
+    // this, an old worker silently treats the tunneled frames as terminal data
+    // and the client waits forever for OpenOk. No worker yet keeps the existing
+    // grace behavior in `bridge_client_ws`.
+    if let Some(tunnel) = st.tunnel() {
+        let unsupported = match &tunnel.caps {
+            Some(caps) => !caps.features.iter().any(|f| f == "forward"),
+            None => true, // legacy worker: predates capability negotiation
+        };
+        if unsupported {
+            tracing::warn!("paired worker does not support /forward; refusing the upgrade");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "message": "the paired worker does not support port forwarding; upgrade the worker"
+                })),
+            )
+                .into_response();
+        }
+    }
     ws.on_upgrade(move |socket| bridge_client_ws(socket, st, "/forward"))
 }
 
@@ -557,11 +594,54 @@ async fn install_worker(socket: WebSocket, st: Shared) {
         return;
     }
 
+    // Read the capability announcement before claiming the slot. Bounded by
+    // HELLO_GRACE: a worker that sends nothing is a legacy build, but a socket
+    // that closes during the wait must not be paired at all.
+    let caps = match tokio::time::timeout(HELLO_GRACE, stream.next()).await {
+        Ok(Some(Ok(Message::Binary(bytes)))) => match TunnelFrame::decode(&bytes) {
+            Ok(frame) if frame.kind == KIND_HELLO => {
+                match serde_json::from_slice::<WorkerHello>(&frame.payload) {
+                    Ok(hello) => Some(hello),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "malformed worker hello; assuming legacy");
+                        None
+                    }
+                }
+            }
+            Ok(frame) => {
+                tracing::warn!(
+                    kind = frame.kind,
+                    "first worker frame is not a hello; assuming legacy"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "bad first worker frame; assuming legacy");
+                None
+            }
+        },
+        Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) | Ok(None) => return,
+        Ok(Some(Ok(_))) => None, // ping/pong before hello; treat as legacy
+        Err(_) => {
+            tracing::info!("worker sent no hello within {HELLO_GRACE:?}; assuming legacy");
+            None
+        }
+    };
+    if let Some(hello) = &caps {
+        tracing::info!(
+            version = %hello.version,
+            proto = hello.proto,
+            features = ?hello.features,
+            "worker capabilities received"
+        );
+    }
+
     let (tx, mut mux_rx) = mpsc::channel::<Vec<u8>>(MUX_BUF);
     let tunnel = Arc::new(Tunnel {
         tx,
         next_stream: AtomicU64::new(1),
         routes: StdMutex::new(HashMap::new()),
+        caps,
         evicted: tokio::sync::Notify::new(),
     });
 
@@ -671,6 +751,7 @@ mod tests {
             tx,
             next_stream: AtomicU64::new(1),
             routes: StdMutex::new(HashMap::new()),
+            caps: None,
             evicted: tokio::sync::Notify::new(),
         };
 

@@ -25,9 +25,10 @@ use rustls::ClientConfig;
 use switchboard_shared::{
     auth::{from_hex, hex, random_nonce, ws_mac, AuthMsg, NONCE_LEN},
     tunnel::{
-        ReqHead, RespHead, TunnelFrame, WsOpen, BODY_CHUNK, KIND_PING, KIND_PONG, KIND_REQ_BODY,
-        KIND_REQ_END, KIND_REQ_HEAD, KIND_RESP_BODY, KIND_RESP_END, KIND_RESP_HEAD, KIND_RST,
-        KIND_WS_BIN, KIND_WS_CLOSE, KIND_WS_OPEN, KIND_WS_TEXT,
+        ReqHead, RespHead, TunnelFrame, WorkerHello, WsOpen, BODY_CHUNK, FEATURES, KIND_HELLO,
+        KIND_PING, KIND_PONG, KIND_REQ_BODY, KIND_REQ_END, KIND_REQ_HEAD, KIND_RESP_BODY,
+        KIND_RESP_END, KIND_RESP_HEAD, KIND_RST, KIND_WS_BIN, KIND_WS_CLOSE, KIND_WS_OPEN,
+        KIND_WS_TEXT, PROTO,
     },
 };
 use tokio::sync::mpsc;
@@ -150,6 +151,19 @@ async fn serve_once(
     // SWB-WS-v1 handshake (worker is the "client" proving the tunnel token).
     tunnel_auth(&mut sink, &mut stream, token, cb).await?;
     tracing::info!(%repeater_addr, "repeater tunnel authenticated");
+
+    // Announce capabilities before any other frame so the repeater can route
+    // only endpoints this worker actually serves. Older repeaters ignore the
+    // unknown kind with a warning; older workers never send it.
+    let hello = WorkerHello {
+        proto: PROTO,
+        version: env!("CARGO_PKG_VERSION").into(),
+        features: FEATURES.iter().map(|f| (*f).into()).collect(),
+    };
+    let hello = TunnelFrame::new(KIND_HELLO, 0, serde_json::to_vec(&hello)?);
+    sink.send(WsMessage::Binary(hello.encode()))
+        .await
+        .context("sending worker hello")?;
 
     // Single writer task owns the socket sink; every stream funnels encoded
     // frames through this one bounded channel. When the channel drains (the

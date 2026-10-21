@@ -17,8 +17,8 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_tungstenite::{
-    connect_async_tls_with_config, tungstenite::protocol::Message, Connector, MaybeTlsStream,
-    WebSocketStream,
+    connect_async_tls_with_config, tungstenite, tungstenite::protocol::Message, Connector,
+    MaybeTlsStream, WebSocketStream,
 };
 
 use crate::net::forwarding_tls_config;
@@ -627,7 +627,22 @@ async fn connect_forward(
     let (mut socket, _) =
         connect_async_tls_with_config(&url, None, false, Some(Connector::Rustls(tls)))
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match error {
+                tungstenite::Error::Http(response) => {
+                    let status = response.status();
+                    let body = response
+                        .body()
+                        .as_deref()
+                        .map(String::from_utf8_lossy)
+                        .unwrap_or_default();
+                    if body.is_empty() {
+                        format!("server refused the forward link: HTTP {status}")
+                    } else {
+                        format!("server refused the forward link: HTTP {status}: {body}")
+                    }
+                }
+                other => other.to_string(),
+            })?;
 
     let server_nonce = loop {
         match socket.next().await {

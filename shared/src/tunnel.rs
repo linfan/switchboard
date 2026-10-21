@@ -40,6 +40,8 @@ pub const KIND_WS_CLOSE: u8 = 0x24;
 pub const KIND_RST: u8 = 0x30;
 pub const KIND_PING: u8 = 0x31;
 pub const KIND_PONG: u8 = 0x32;
+/// Worker → repeater capability announcement, sent immediately after auth.
+pub const KIND_HELLO: u8 = 0x40;
 
 const STREAM_LEN: usize = 8;
 
@@ -80,6 +82,25 @@ pub struct WsOpen {
     pub uri: String,
 }
 
+/// A worker's capabilities (`HELLO` payload). Feature names, not a version
+/// comparison, decide what the repeater may route: `version` is informational.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerHello {
+    /// Tunnel protocol revision.
+    pub proto: u32,
+    /// Worker crate version, for diagnostics.
+    pub version: String,
+    /// Endpoints the worker serves, e.g. `["ws", "forward"]`.
+    pub features: Vec<String>,
+}
+
+/// The protocol revision this build speaks.
+pub const PROTO: u32 = 1;
+
+/// Features this build advertises. The repeater routes `/ws` and `/forward`
+/// only when the paired worker lists them.
+pub const FEATURES: [&str; 2] = ["ws", "forward"];
+
 /// Why a byte slice could not be decoded into a [`TunnelFrame`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TunnelError {
@@ -116,6 +137,7 @@ fn known_kind(kind: u8) -> bool {
             | KIND_RST
             | KIND_PING
             | KIND_PONG
+            | KIND_HELLO
     )
 }
 
@@ -186,6 +208,7 @@ mod tests {
             KIND_RST,
             KIND_PING,
             KIND_PONG,
+            KIND_HELLO,
         ] {
             let f = TunnelFrame::new(kind, 0xdead_beef_0011_2233, b"payload\x00\xff".to_vec());
             assert_eq!(TunnelFrame::decode(&f.encode()).unwrap(), f);
@@ -256,6 +279,21 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<WsOpen>(&serde_json::to_vec(&open).unwrap()).unwrap(),
             open
+        );
+
+        let hello = WorkerHello {
+            proto: PROTO,
+            version: "0.6.0".into(),
+            features: FEATURES.iter().map(|f| (*f).into()).collect(),
+        };
+        assert_eq!(
+            serde_json::from_slice::<WorkerHello>(&serde_json::to_vec(&hello).unwrap()).unwrap(),
+            hello
+        );
+        let frame = TunnelFrame::new(KIND_HELLO, 0, serde_json::to_vec(&hello).unwrap());
+        assert_eq!(
+            TunnelFrame::decode(&frame.encode()).unwrap().kind,
+            KIND_HELLO
         );
     }
 }
