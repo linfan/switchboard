@@ -541,7 +541,8 @@ async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
                             if sink.send(Message::Text(t.into())).await.is_err() { break; }
                         }
                         KIND_WS_BIN => {
-                            if sink.send(Message::Binary(f.payload.into())).await.is_err() { break; }
+                            let message = Message::Binary(f.payload.into());
+                            if sink.send(message).await.is_err() { break; }
                         }
                         KIND_WS_CLOSE => break,
                         _ => {}

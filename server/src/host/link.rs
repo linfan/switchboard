@@ -421,7 +421,7 @@ fn spawn_detached(spec: &HostSpec) -> AppResult<u32> {
     let payload = serde_json::to_string(spec)
         .map_err(|e| AppError::Other(anyhow::anyhow!("cannot encode host spec: {e}")))?;
 
-    let mut cmd = tokio::process::Command::new(&exe);
+    let mut cmd = tokio::process::Command::new(exe);
     cmd.arg(super::HOST_ARG)
         .env(SPEC_ENV, payload)
         .stdin(std::process::Stdio::null())
