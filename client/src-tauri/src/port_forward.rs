@@ -286,6 +286,20 @@ async fn run_session_manager(
     }
 }
 
+/// How often the forward link sends a WS Ping.
+const HEARTBEAT: Duration = Duration::from_secs(15);
+/// Tear the forward link down after this long without any inbound frame. The
+/// repeater pings on the same cadence, so three missed beats mean a half-open
+/// socket the OS still reports as open.
+const LINK_IDLE: Duration = Duration::from_secs(45);
+
+/// What the writer task puts on the wire: either a port-forward frame or a
+/// protocol-level Ping used purely to detect a dead link.
+enum Outbound {
+    Frame(PortForwardFrame),
+    Ping,
+}
+
 async fn run_connected(
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     accepted_rx: &mut mpsc::Receiver<TcpStream>,
@@ -294,11 +308,15 @@ async fn run_connected(
     active_connections: Arc<AtomicUsize>,
 ) {
     let (mut sink, mut source) = socket.split();
-    let (out_tx, mut out_rx) = mpsc::channel::<PortForwardFrame>(OUT_BUF);
+    let (out_tx, mut out_rx) = mpsc::channel::<Outbound>(OUT_BUF);
     let (writer_done_tx, mut writer_done_rx) = oneshot::channel();
     let writer = tokio::spawn(async move {
-        while let Some(frame) = out_rx.recv().await {
-            if sink.send(Message::Binary(frame.encode())).await.is_err() {
+        while let Some(out) = out_rx.recv().await {
+            let message = match out {
+                Outbound::Frame(frame) => Message::Binary(frame.encode()),
+                Outbound::Ping => Message::Ping(Default::default()),
+            };
+            if sink.send(message).await.is_err() {
                 break;
             }
         }
@@ -308,6 +326,9 @@ async fn run_connected(
     let (ended_tx, mut ended_rx) = mpsc::channel::<u64>(STREAM_BUF);
     let mut streams = HashMap::<u64, LocalStream>::new();
     let mut next_stream_id = 1u64;
+    let mut heartbeat = tokio::time::interval(HEARTBEAT);
+    heartbeat.tick().await; // burn the immediate first tick; then every HEARTBEAT
+    let mut last_rx = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -317,6 +338,18 @@ async fn run_connected(
                 }
             }
             _ = &mut writer_done_rx => break,
+            _ = heartbeat.tick() => {
+                if last_rx.elapsed() > LINK_IDLE {
+                    tracing::warn!(
+                        forward = remote_port,
+                        "forward link silent past timeout; reconnecting"
+                    );
+                    break;
+                }
+                if out_tx.send(Outbound::Ping).await.is_err() {
+                    break;
+                }
+            }
             accepted = accepted_rx.recv() => match accepted {
                 Some(stream) => {
                     let stream_id = next_stream_id;
@@ -344,25 +377,32 @@ async fn run_connected(
                 }
             }
             incoming = source.next() => match incoming {
-                Some(Ok(Message::Binary(bytes))) => {
-                    let frame = match PortForwardFrame::decode(&bytes) {
-                        Ok(frame) => frame,
-                        Err(error) => {
-                            tracing::warn!(%error, "invalid port-forward response");
-                            continue;
-                        }
-                    };
-                    let stream_id = frame.stream_id();
-                    if let Some(stream) = streams.get(&stream_id) {
-                        if stream.in_tx.send(frame).await.is_err() {
-                            if let Some(stream) = streams.remove(&stream_id) {
-                                stream.task.abort();
+                Some(Ok(message)) => {
+                    // Any inbound frame — including Pong — proves the link alive.
+                    last_rx = tokio::time::Instant::now();
+                    match message {
+                        Message::Binary(bytes) => {
+                            let frame = match PortForwardFrame::decode(&bytes) {
+                                Ok(frame) => frame,
+                                Err(error) => {
+                                    tracing::warn!(%error, "invalid port-forward response");
+                                    continue;
+                                }
+                            };
+                            let stream_id = frame.stream_id();
+                            if let Some(stream) = streams.get(&stream_id) {
+                                if stream.in_tx.send(frame).await.is_err() {
+                                    if let Some(stream) = streams.remove(&stream_id) {
+                                        stream.task.abort();
+                                    }
+                                }
                             }
                         }
+                        Message::Close(_) => break,
+                        _ => {}
                     }
                 }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                Some(Ok(_)) => {}
+                None | Some(Err(_)) => break,
             },
         }
     }
@@ -385,7 +425,7 @@ async fn bridge_local(
     stream_id: u64,
     remote_port: u16,
     mut remote_rx: mpsc::Receiver<PortForwardFrame>,
-    out_tx: mpsc::Sender<PortForwardFrame>,
+    out_tx: mpsc::Sender<Outbound>,
     ended_tx: mpsc::Sender<u64>,
     active_connections: Arc<AtomicUsize>,
 ) {
@@ -398,10 +438,10 @@ async fn bridge_local(
     let mut reset = false;
 
     if out_tx
-        .send(PortForwardFrame::Open {
+        .send(Outbound::Frame(PortForwardFrame::Open {
             stream_id,
             remote_port,
-        })
+        }))
         .await
         .is_err()
     {
@@ -420,7 +460,9 @@ async fn bridge_local(
                     stream = stream_id,
                     "port-forward open timed out; resetting the local connection"
                 );
-                let _ = out_tx.send(PortForwardFrame::Rst { stream_id }).await;
+                let _ = out_tx
+                    .send(Outbound::Frame(PortForwardFrame::Rst { stream_id }))
+                    .await;
                 break;
             }
             remote = remote_rx.recv() => match remote {
@@ -444,16 +486,24 @@ async fn bridge_local(
             },
             local = read.read(&mut buffer), if opened && !local_finished => match local {
                 Ok(0) => {
-                    if out_tx.send(PortForwardFrame::Fin { stream_id }).await.is_err() {
+                    if out_tx
+                        .send(Outbound::Frame(PortForwardFrame::Fin { stream_id }))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     local_finished = true;
                 }
                 Ok(count) => {
-                    if out_tx.send(PortForwardFrame::Data {
-                        stream_id,
-                        data: buffer[..count].to_vec(),
-                    }).await.is_err() {
+                    if out_tx
+                        .send(Outbound::Frame(PortForwardFrame::Data {
+                            stream_id,
+                            data: buffer[..count].to_vec(),
+                        }))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -466,7 +516,9 @@ async fn bridge_local(
     }
 
     if reset {
-        let _ = out_tx.send(PortForwardFrame::Rst { stream_id }).await;
+        let _ = out_tx
+            .send(Outbound::Frame(PortForwardFrame::Rst { stream_id }))
+            .await;
     }
     active_connections.fetch_sub(1, Ordering::Relaxed);
     let _ = ended_tx.send(stream_id).await;

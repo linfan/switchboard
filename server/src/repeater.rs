@@ -440,33 +440,55 @@ async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
         return;
     }
 
+    // The client-facing leg crosses the public internet (repeater mode) and is
+    // otherwise the one long-lived socket with no liveness check: a dropped NAT
+    // entry or a slept host leaves a half-open link whose writes vanish. Ping on
+    // the tunnel heartbeat cadence and reap a session that has been silent for
+    // three beats in either direction, freeing its worker stream and remote TCP.
+    let mut heartbeat = tokio::time::interval(HEARTBEAT);
+    heartbeat.tick().await;
+    let idle_limit = Duration::from_millis(IDLE_MS as u64);
+    let mut last_activity = tokio::time::Instant::now();
+
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                if last_activity.elapsed() > idle_limit {
+                    tracing::warn!(uri, "client websocket silent past timeout; closing");
+                    break;
+                }
+                if sink.send(Message::Ping(Default::default())).await.is_err() { break; }
+            }
             // Worker → client.
             inbound = rx.recv() => match inbound {
-                Some(f) => match f.kind {
-                    KIND_WS_TEXT => {
-                        let t = String::from_utf8_lossy(&f.payload).into_owned();
-                        if sink.send(Message::Text(t.into())).await.is_err() { break; }
+                Some(f) => {
+                    last_activity = tokio::time::Instant::now();
+                    match f.kind {
+                        KIND_WS_TEXT => {
+                            let t = String::from_utf8_lossy(&f.payload).into_owned();
+                            if sink.send(Message::Text(t.into())).await.is_err() { break; }
+                        }
+                        KIND_WS_BIN => {
+                            if sink.send(Message::Binary(f.payload.into())).await.is_err() { break; }
+                        }
+                        KIND_WS_CLOSE => break,
+                        _ => {}
                     }
-                    KIND_WS_BIN => {
-                        if sink.send(Message::Binary(f.payload.into())).await.is_err() { break; }
-                    }
-                    KIND_WS_CLOSE => break,
-                    _ => {}
-                },
+                }
                 None => break, // stream torn down (tunnel died)
             },
             // Client → worker.
             outbound = stream.next() => match outbound {
                 Some(Ok(Message::Text(t))) => {
+                    last_activity = tokio::time::Instant::now();
                     if !tunnel.send(TunnelFrame::new(KIND_WS_TEXT, id, t.as_bytes().to_vec())).await { break; }
                 }
                 Some(Ok(Message::Binary(b))) => {
+                    last_activity = tokio::time::Instant::now();
                     if !tunnel.send(TunnelFrame::new(KIND_WS_BIN, id, b.to_vec())).await { break; }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
-                Some(Ok(_)) => {} // ping/pong handled by axum
+                Some(Ok(_)) => last_activity = tokio::time::Instant::now(), // ping/pong handled by axum
                 Some(Err(_)) => break,
             },
         }
