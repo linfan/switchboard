@@ -101,6 +101,16 @@ impl Tunnel {
         self.routes.lock().unwrap().remove(&id);
     }
 
+    /// End every stream on this tunnel. Each client bridge holds an `Arc<Tunnel>`,
+    /// so the registered senders would otherwise outlive the worker connection
+    /// and keep `bridge_client_ws` parked on `rx.recv()` forever — a client that
+    /// looks connected but has no peer, until its next write fails. Dropping the
+    /// senders wakes every bridge at once so they can close their client socket
+    /// and let the client reconnect.
+    fn close(&self) {
+        self.routes.lock().unwrap().clear();
+    }
+
     /// Send one frame to the worker. `false` if the tunnel writer is gone.
     async fn send(&self, frame: TunnelFrame) -> bool {
         self.tx.send(frame.encode()).await.is_ok()
@@ -495,6 +505,10 @@ async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
     }
 
     // Tell the worker the session ended; guard's drop sends RST + unregisters.
+    // Also close the client socket explicitly: a tunnel teardown wakes us with
+    // no inbound close, and the client should learn immediately rather than
+    // wait for its own heartbeat to notice.
+    let _ = sink.send(Message::Close(None)).await;
     let _ = tunnel.send(TunnelFrame::control(KIND_WS_CLOSE, id)).await;
     drop(guard);
 }
@@ -602,6 +616,11 @@ async fn install_worker(socket: WebSocket, st: Shared) {
             tracing::info!("worker tunnel evicted by a newer worker; tearing down");
         }
     }
+
+    // The worker leg is gone (disconnect, idle timeout, eviction, or writer
+    // failure). Wake every bridge now; otherwise each idle `/forward` and `/ws`
+    // client would stay "connected" to a dead tunnel until its next write.
+    tunnel.close();
 
     // Free the slot only if it still holds *this* tunnel. After an eviction the
     // slot already points at the newer worker, so this `Arc::ptr_eq` guard leaves

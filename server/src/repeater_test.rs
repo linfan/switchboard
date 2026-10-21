@@ -748,6 +748,59 @@ async fn large_upload_chunked_through_repeater() {
 }
 
 #[tokio::test]
+async fn worker_replacement_closes_idle_client_bridges() {
+    // An idle client bridge holds an `Arc<Tunnel>`, so clearing the slot alone
+    // would leave it parked on a receiver that never closes. The tunnel's
+    // teardown must wake it so the client reconnects at once.
+    let r = boot_repeater().await;
+    let _first = dial_worker_leg(&r.worker_addr, &r.cb).await;
+    wait_paired(&r.client_addr, &r.cb).await;
+
+    let mut client = connect_forward(&r.client_addr, &r.cb).await;
+
+    let _second = dial_worker_leg(&r.worker_addr, &r.cb).await;
+
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match client.next().await {
+                Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => continue, // heartbeat PING may arrive first
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "replacing the worker must close an idle forward bridge"
+    );
+}
+
+#[tokio::test]
+async fn worker_disconnect_closes_idle_client_bridges() {
+    let r = boot_repeater().await;
+    let first = dial_worker_leg(&r.worker_addr, &r.cb).await;
+    wait_paired(&r.client_addr, &r.cb).await;
+
+    let mut client = connect_forward(&r.client_addr, &r.cb).await;
+
+    drop(first); // the worker's socket dies without a graceful tunnel close
+
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match client.next().await {
+                Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "losing the worker must close an idle forward bridge"
+    );
+}
+
+#[tokio::test]
 async fn newer_worker_evicts_incumbent() {
     // Two raw worker legs against a lone repeater (no auto-reconnecting real
     // worker that would fight the newcomer for the slot). This models a
