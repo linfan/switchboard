@@ -25,6 +25,11 @@ const OUT_BUF: usize = 512;
 const STREAM_BUF: usize = 64;
 const EVENT_BUF: usize = 256;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Per-session cap on concurrent TCP streams. Each stream owns a worker-side
+/// socket and a bridge task, so an unbounded map lets a local process (or a
+/// buggy client) exhaust the worker's fds. 256 covers browsers and connection
+/// pools over a loopback forward with plenty of headroom.
+const MAX_STREAMS: usize = 256;
 
 pub async fn handler(State(state): State<SharedState>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -100,6 +105,20 @@ pub async fn run_session(mut rx: mpsc::Receiver<Vec<u8>>, out_tx: mpsc::Sender<V
                         }
                         if streams.contains_key(&stream_id) {
                             if !send(&out_tx, PortForwardFrame::Rst { stream_id }).await {
+                                break;
+                            }
+                            continue;
+                        }
+                        if streams.len() >= MAX_STREAMS {
+                            tracing::warn!(
+                                stream = stream_id,
+                                max = MAX_STREAMS,
+                                "forward stream limit reached; rejecting open"
+                            );
+                            if !send(&out_tx, PortForwardFrame::OpenErr {
+                                stream_id,
+                                message: format!("too many streams (max {MAX_STREAMS})"),
+                            }).await {
                                 break;
                             }
                             continue;
@@ -693,5 +712,86 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), finished.notified())
             .await
             .expect("tearing down the stream must abort the blocked bridge");
+    }
+
+    #[tokio::test]
+    async fn rejects_opens_past_the_stream_limit() {
+        // Accept and hold every connection so the streams stay live.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let session = tokio::spawn(run_session(in_rx, out_tx));
+
+        for stream_id in 1..=MAX_STREAMS as u64 {
+            in_tx
+                .send(
+                    PortForwardFrame::Open {
+                        stream_id,
+                        remote_port: port,
+                    }
+                    .encode(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                next_frame(&mut out_rx).await,
+                PortForwardFrame::OpenOk { stream_id }
+            );
+        }
+
+        let rejected = MAX_STREAMS as u64 + 1;
+        in_tx
+            .send(
+                PortForwardFrame::Open {
+                    stream_id: rejected,
+                    remote_port: port,
+                }
+                .encode(),
+            )
+            .await
+            .unwrap();
+        match next_frame(&mut out_rx).await {
+            PortForwardFrame::OpenErr { stream_id, message } => {
+                assert_eq!(stream_id, rejected);
+                assert!(
+                    message.contains("too many streams"),
+                    "unexpected: {message}"
+                );
+            }
+            other => panic!("expected OpenErr, got {other:?}"),
+        }
+
+        // Releasing a stream frees a slot.
+        in_tx
+            .send(PortForwardFrame::Rst { stream_id: 1 }.encode())
+            .await
+            .unwrap();
+        in_tx
+            .send(
+                PortForwardFrame::Open {
+                    stream_id: rejected + 1,
+                    remote_port: port,
+                }
+                .encode(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            next_frame(&mut out_rx).await,
+            PortForwardFrame::OpenOk {
+                stream_id: rejected + 1
+            }
+        );
+
+        drop(in_tx);
+        session.await.unwrap();
     }
 }
