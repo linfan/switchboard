@@ -106,11 +106,37 @@ impl Tunnel {
         self.tx.send(frame.encode()).await.is_ok()
     }
 
-    /// Deliver an inbound frame to its stream's receiver (awaits for backpressure).
-    async fn route(&self, frame: TunnelFrame) {
-        let tx = self.routes.lock().unwrap().get(&frame.stream_id).cloned();
-        if let Some(tx) = tx {
-            let _ = tx.send(frame).await;
+    /// Best-effort control send: drops the frame when the writer queue is full
+    /// instead of stalling the caller (which is the shared demux for PONGs).
+    fn send_lossy(&self, kind: u8, stream_id: u64) {
+        let _ = self
+            .tx
+            .try_send(TunnelFrame::control(kind, stream_id).encode());
+    }
+
+    /// Deliver an inbound frame to its stream's receiver without ever waiting.
+    ///
+    /// The demux loop is shared by every multiplexed stream: awaiting here would
+    /// let one slow consumer (a stalled terminal client, a target that stopped
+    /// reading) freeze the whole tunnel. A full queue therefore resets just that
+    /// stream — the client reconnects (`/ws` replays from its cursor, `/forward`
+    /// rebuilds per local connection) — and every other stream keeps flowing.
+    fn route(&self, frame: TunnelFrame) {
+        let id = frame.stream_id;
+        let tx = self.routes.lock().unwrap().get(&id).cloned();
+        let Some(tx) = tx else { return };
+        match tx.try_send(frame) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(frame)) => {
+                tracing::warn!(
+                    stream = frame.stream_id,
+                    kind = frame.kind,
+                    "stream queue full; resetting the stream"
+                );
+                self.send_lossy(KIND_RST, frame.stream_id);
+                self.unregister(frame.stream_id);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => self.unregister(id),
         }
     }
 }
@@ -536,12 +562,10 @@ async fn install_worker(socket: WebSocket, st: Shared) {
                 last_activity.store(now_millis(), Ordering::Relaxed);
                 match TunnelFrame::decode(&bytes) {
                     Ok(f) if f.kind == KIND_PING => {
-                        let _ = tunnel
-                            .send(TunnelFrame::control(KIND_PONG, f.stream_id))
-                            .await;
+                        tunnel.send_lossy(KIND_PONG, f.stream_id);
                     }
                     Ok(f) if f.kind == KIND_PONG => {}
-                    Ok(f) => tunnel.route(f).await,
+                    Ok(f) => tunnel.route(f),
                     Err(e) => tracing::warn!(error = %e, "bad tunnel frame from worker"),
                 }
             }
@@ -568,4 +592,42 @@ async fn install_worker(socket: WebSocket, st: Shared) {
     }
     writer.abort();
     tracing::info!("worker unpaired");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_full_stream_queue_resets_only_that_stream() {
+        let (tx, mut mux_rx) = mpsc::channel(8);
+        let tunnel = Tunnel {
+            tx,
+            next_stream: AtomicU64::new(1),
+            routes: StdMutex::new(HashMap::new()),
+            evicted: tokio::sync::Notify::new(),
+        };
+
+        let stalled = tunnel.alloc_stream();
+        let mut stalled_rx = tunnel.register(stalled);
+        for _ in 0..STREAM_BUF {
+            tunnel.route(TunnelFrame::new(KIND_WS_BIN, stalled, b"x".to_vec()));
+        }
+        assert!(tunnel.routes.lock().unwrap().contains_key(&stalled));
+
+        // One frame past the queue bound must reset only this stream: no await,
+        // no impact on any other stream multiplexed on the same tunnel.
+        tunnel.route(TunnelFrame::new(KIND_WS_BIN, stalled, b"x".to_vec()));
+        assert!(!tunnel.routes.lock().unwrap().contains_key(&stalled));
+        let reset = TunnelFrame::decode(&mux_rx.try_recv().expect("no RST sent")).unwrap();
+        assert_eq!((reset.kind, reset.stream_id), (KIND_RST, stalled));
+
+        let healthy = tunnel.alloc_stream();
+        let mut healthy_rx = tunnel.register(healthy);
+        tunnel.route(TunnelFrame::control(KIND_WS_CLOSE, healthy));
+        assert_eq!(healthy_rx.try_recv().unwrap().stream_id, healthy);
+        // The drained-but-abandoned stream's receiver still holds its backlog;
+        // the router has already forgotten it, so late frames are dropped.
+        assert_eq!(stalled_rx.try_recv().unwrap().stream_id, stalled);
+    }
 }

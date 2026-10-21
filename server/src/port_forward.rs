@@ -116,22 +116,46 @@ pub async fn run_session(mut rx: mpsc::Receiver<Vec<u8>>, out_tx: mpsc::Sender<V
                         ));
                     }
                     PortForwardFrame::Data { stream_id, data } => {
-                        if let Some(entry) = streams.get(&stream_id) {
-                            if entry.tx.send(ClientEvent::Data(data)).await.is_err() {
+                        let Some(entry) = streams.get(&stream_id) else { continue };
+                        match entry.tx.try_send(ClientEvent::Data(data)) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                streams.remove(&stream_id);
+                                tracing::warn!(
+                                    stream = stream_id,
+                                    "forward stream queue full; resetting"
+                                );
+                                if !send(&out_tx, PortForwardFrame::Rst { stream_id }).await {
+                                    break;
+                                }
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
                                 streams.remove(&stream_id);
                             }
                         }
                     }
                     PortForwardFrame::Fin { stream_id } => {
-                        if let Some(entry) = streams.get(&stream_id) {
-                            if entry.tx.send(ClientEvent::Fin).await.is_err() {
+                        let Some(entry) = streams.get(&stream_id) else { continue };
+                        match entry.tx.try_send(ClientEvent::Fin) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                streams.remove(&stream_id);
+                                tracing::warn!(
+                                    stream = stream_id,
+                                    "forward stream queue full; resetting"
+                                );
+                                if !send(&out_tx, PortForwardFrame::Rst { stream_id }).await {
+                                    break;
+                                }
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
                                 streams.remove(&stream_id);
                             }
                         }
                     }
                     PortForwardFrame::Rst { stream_id } => {
                         if let Some(entry) = streams.remove(&stream_id) {
-                            let _ = entry.tx.send(ClientEvent::Rst).await;
+                            let _ = entry.tx.try_send(ClientEvent::Rst);
                         }
                     }
                     PortForwardFrame::OpenOk { .. } | PortForwardFrame::OpenErr { .. } => {
@@ -453,6 +477,136 @@ mod tests {
         assert_eq!(
             next_frame(&mut out_rx).await,
             PortForwardFrame::Fin { stream_id }
+        );
+
+        drop(in_tx);
+        session.await.unwrap();
+        echo.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stalled_stream_does_not_block_the_session() {
+        // A target that accepts but never reads: its bridge eventually wedges in
+        // `write_all` and its 64-slot inbound queue fills.
+        let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stalled_port = stalled.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = stalled.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(stream);
+        });
+
+        let echo_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_port = echo_listener.local_addr().unwrap().port();
+        let echo = tokio::spawn(async move {
+            let (mut stream, _) = echo_listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.unwrap();
+            stream.write_all(&bytes).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let session = tokio::spawn(run_session(in_rx, out_tx));
+
+        let stalled_id = 7;
+        in_tx
+            .send(
+                PortForwardFrame::Open {
+                    stream_id: stalled_id,
+                    remote_port: stalled_port,
+                }
+                .encode(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            next_frame(&mut out_rx).await,
+            PortForwardFrame::OpenOk {
+                stream_id: stalled_id
+            }
+        );
+
+        // More data than the queue plus the kernel socket buffers can absorb.
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut reset_seen = false;
+            for _ in 0..512 {
+                in_tx
+                    .send(
+                        PortForwardFrame::Data {
+                            stream_id: stalled_id,
+                            data: vec![0u8; MAX_DATA_LEN.min(32 * 1024)],
+                        }
+                        .encode(),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            // A brand-new stream must still open and carry data on the same
+            // session while the first one is wedged.
+            let healthy_id = 8;
+            in_tx
+                .send(
+                    PortForwardFrame::Open {
+                        stream_id: healthy_id,
+                        remote_port: echo_port,
+                    }
+                    .encode(),
+                )
+                .await
+                .unwrap();
+            loop {
+                match next_frame(&mut out_rx).await {
+                    PortForwardFrame::OpenOk { stream_id } if stream_id == healthy_id => break,
+                    PortForwardFrame::Rst { stream_id } if stream_id == stalled_id => {
+                        reset_seen = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                reset_seen,
+                "the stalled stream should have been reset once its queue filled"
+            );
+            in_tx
+                .send(
+                    PortForwardFrame::Data {
+                        stream_id: healthy_id,
+                        data: b"ping".to_vec(),
+                    }
+                    .encode(),
+                )
+                .await
+                .unwrap();
+            in_tx
+                .send(
+                    PortForwardFrame::Fin {
+                        stream_id: healthy_id,
+                    }
+                    .encode(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                next_frame(&mut out_rx).await,
+                PortForwardFrame::Data {
+                    stream_id: healthy_id,
+                    data: b"ping".to_vec(),
+                }
+            );
+            assert_eq!(
+                next_frame(&mut out_rx).await,
+                PortForwardFrame::Fin {
+                    stream_id: healthy_id
+                }
+            );
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "the stalled stream blocked the whole session"
         );
 
         drop(in_tx);

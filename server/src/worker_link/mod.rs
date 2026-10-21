@@ -269,13 +269,16 @@ async fn demux(
                 continue;
             }
         };
-        dispatch(frame, mux_tx, app, state, streams).await;
+        dispatch(frame, mux_tx, app, state, streams);
     }
     Ok(())
 }
 
-/// Handle one decoded tunnel frame.
-async fn dispatch(
+/// Handle one decoded tunnel frame. Deliberately synchronous: this runs on the
+/// shared demux loop, so awaiting a full per-session queue would stall every
+/// other multiplexed stream behind one slow consumer. Each path either
+/// completes immediately or enqueues with `try_send`.
+fn dispatch(
     frame: TunnelFrame,
     mux_tx: &mpsc::Sender<Vec<u8>>,
     app: &axum::Router,
@@ -285,9 +288,7 @@ async fn dispatch(
     let id = frame.stream_id;
     match frame.kind {
         KIND_PING => {
-            let _ = mux_tx
-                .send(TunnelFrame::control(KIND_PONG, id).encode())
-                .await;
+            let _ = mux_tx.try_send(TunnelFrame::control(KIND_PONG, id).encode());
         }
         KIND_PONG => {}
 
@@ -328,32 +329,38 @@ async fn dispatch(
                 if let Some(entry) = entry {
                     streams.insert(id, entry);
                 } else {
-                    let _ = mux_tx
-                        .send(TunnelFrame::control(KIND_WS_CLOSE, id).encode())
-                        .await;
+                    let _ = mux_tx.try_send(TunnelFrame::control(KIND_WS_CLOSE, id).encode());
                 }
             }
             Err(e) => tracing::warn!(stream = id, error = %e, "bad WS_OPEN"),
         },
         KIND_WS_TEXT => {
-            if let Some(Stream::Ws { in_tx, .. }) = streams.get(&id) {
-                if let Ok(t) = String::from_utf8(frame.payload) {
-                    let _ = in_tx.send(WsIn::Text(t)).await;
-                }
+            let full = match streams.get(&id) {
+                Some(Stream::Ws { in_tx, .. }) => match String::from_utf8(frame.payload) {
+                    Ok(t) => in_tx.try_send(WsIn::Text(t)).is_err(),
+                    Err(_) => false,
+                },
+                _ => false,
+            };
+            if full {
+                reset_stream(streams, mux_tx, id, "text queue full");
             }
         }
-        KIND_WS_BIN => match streams.get(&id) {
-            Some(Stream::Ws { in_tx, .. }) => {
-                let _ = in_tx.send(WsIn::Binary(frame.payload)).await;
+        KIND_WS_BIN => {
+            let full = match streams.get(&id) {
+                Some(Stream::Ws { in_tx, .. }) => {
+                    in_tx.try_send(WsIn::Binary(frame.payload)).is_err()
+                }
+                Some(Stream::Forward { in_tx, .. }) => in_tx.try_send(frame.payload).is_err(),
+                _ => false,
+            };
+            if full {
+                reset_stream(streams, mux_tx, id, "binary queue full");
             }
-            Some(Stream::Forward { in_tx, .. }) => {
-                let _ = in_tx.send(frame.payload).await;
-            }
-            _ => {}
-        },
+        }
         KIND_WS_CLOSE => {
             if let Some(Stream::Ws { in_tx, .. }) = streams.get(&id) {
-                let _ = in_tx.send(WsIn::Close).await;
+                let _ = in_tx.try_send(WsIn::Close);
             }
             if let Some(s) = streams.remove(&id) {
                 s.abort();
@@ -371,6 +378,25 @@ async fn dispatch(
             "unexpected tunnel frame on worker"
         ),
     }
+}
+
+/// Drop a session whose inbound queue overflowed and tell the repeater, so the
+/// client's socket closes and reconnects instead of silently losing frames.
+fn reset_stream(
+    streams: &mut HashMap<u64, Stream>,
+    mux_tx: &mpsc::Sender<Vec<u8>>,
+    id: u64,
+    reason: &str,
+) {
+    tracing::warn!(
+        stream = id,
+        reason,
+        "tunnel stream cannot keep up; resetting"
+    );
+    if let Some(s) = streams.remove(&id) {
+        s.abort();
+    }
+    let _ = mux_tx.try_send(TunnelFrame::control(KIND_WS_CLOSE, id).encode());
 }
 
 /// Reconstruct the buffered request, drive it through the local router, and stream
