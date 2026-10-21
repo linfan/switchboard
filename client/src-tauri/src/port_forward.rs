@@ -185,8 +185,20 @@ async fn run_listener(
             }
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
-                    if accepted_tx.send(stream).await.is_err() {
-                        break;
+                    // Keep the loop responsive to stop even while the session
+                    // queue is full: waiting to hand this socket over must not
+                    // delay shutdown.
+                    tokio::select! {
+                        changed = stop_rx.changed() => {
+                            if changed.is_err() || *stop_rx.borrow() {
+                                break;
+                            }
+                        }
+                        sent = accepted_tx.send(stream) => {
+                            if sent.is_err() {
+                                break;
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -209,7 +221,7 @@ async fn run_session_manager(
     active_connections: Arc<AtomicUsize>,
 ) {
     loop {
-        if *stop_rx.borrow() {
+        if *stop_rx.borrow() || accepted_rx.is_closed() {
             return;
         }
 
@@ -243,14 +255,10 @@ async fn run_session_manager(
                         return;
                     }
                 }
-                accepted = accepted_rx.recv() => match accepted {
-                    Some(_) => {}
-                    None => {
-                        connecting.abort();
-                        let _ = connecting.await;
-                        return;
-                    }
-                },
+                // Local connections are deliberately NOT drained here: leaving
+                // them in the bounded queue (and the kernel backlog) lets them
+                // be served once the tunnel comes up, instead of being reset
+                // during every startup/reconnect window.
             }
         };
 
@@ -273,11 +281,6 @@ async fn run_session_manager(
                 _ = &mut retry => break,
                 changed = stop_rx.changed() => {
                     if changed.is_err() || *stop_rx.borrow() {
-                        return;
-                    }
-                }
-                accepted = accepted_rx.recv() => {
-                    if accepted.is_none() {
                         return;
                     }
                 }
