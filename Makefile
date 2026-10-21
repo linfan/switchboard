@@ -4,6 +4,11 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
+# GNU sed (Linux) and BSD sed (macOS) both accept an attached backup suffix on
+# `-i` (they disagree on the empty-suffix form), so edit with `.bak` and clean
+# it up in the same recipe line.
+SED_INPLACE := sed -i.bak
+
 CARGO ?= cargo
 NPM ?= npm
 SERVER_BIN ?= switchboard-server
@@ -178,13 +183,13 @@ set-version: ## Align every component to one version: make set-version x.y.z
 	@echo "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+.-][0-9A-Za-z.+.-]*)?$$' \
 	  || { echo "error: '$(VERSION)' is not valid semver"; exit 1; }
 	@# Rust workspace (server + shared crates) + root Cargo.lock
-	sed -i '' '/^\[workspace\.package\]/,/^edition/s/^version = ".*"/version = "$(VERSION)"/' Cargo.toml
+	$(SED_INPLACE) '/^\[workspace\.package\]/,/^edition/s/^version = ".*"/version = "$(VERSION)"/' Cargo.toml && rm -f Cargo.toml.bak
 	$(CARGO) metadata --format-version=1 >/dev/null
 	@# Desktop client: package.json + package-lock.json
 	cd client && $(NPM) version $(VERSION) --no-git-tag-version --allow-same-version --silent >/dev/null
 	@# Tauri bundle version + shell crate + its Cargo.lock
-	sed -i '' 's/"version": "[^"]*"/"version": "$(VERSION)"/' client/src-tauri/tauri.conf.json
-	sed -i '' 's/^version = ".*"/version = "$(VERSION)"/' client/src-tauri/Cargo.toml
+	$(SED_INPLACE) 's/"version": "[^"]*"/"version": "$(VERSION)"/' client/src-tauri/tauri.conf.json && rm -f client/src-tauri/tauri.conf.json.bak
+	$(SED_INPLACE) 's/^version = ".*"/version = "$(VERSION)"/' client/src-tauri/Cargo.toml && rm -f client/src-tauri/Cargo.toml.bak
 	cd client/src-tauri && $(CARGO) metadata --format-version=1 >/dev/null
 	@echo "All components set to $(VERSION) — review with: git diff"
 
@@ -210,7 +215,7 @@ package-client: build-client ## Package the desktop client as a DMG
 	@# Tauri pass --skip-jenkins, skipping that step. tauri.conf.json sets no DMG
 	@# background, window size or icon positions, so nothing is lost.
 	cd client && CI=true $(NPM) run tauri build
-	@rm -fr find client/src-tauri/target/release/bundle/macos/*.app
+	@rm -fr client/src-tauri/target/release/bundle/macos/*.app
 	@mkdir -p ./dist && mv client/src-tauri/target/release/bundle/dmg/*.dmg ./dist/
 	@echo "Moved bundle to: $$(ls -t dist/*.dmg | head -1)"
 package-client-windows: build-client-windows ## Produce a portable Windows client artifact
