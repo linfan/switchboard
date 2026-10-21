@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -26,13 +26,25 @@ use crate::net::forwarding_tls_config;
 const ACCEPT_BUF: usize = 64;
 const OUT_BUF: usize = 512;
 const STREAM_BUF: usize = 64;
+/// First reconnect delay; doubled per consecutive failure up to the cap.
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 /// Bound the TCP/TLS/WS dial plus both auth rounds. A link that accepts the
 /// socket but never answers must not leave the session forever "connecting".
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound how long a local connection waits for `OpenOk`/`OpenErr`. Covers the
 /// server's own 10s remote-connect timeout plus tunnel/RTT headroom.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+
+type LastError = Arc<StdMutex<Option<String>>>;
+
+fn set_error(last_error: &LastError, message: impl Into<String>) {
+    *last_error.lock().unwrap() = Some(message.into());
+}
+
+fn clear_error(last_error: &LastError) {
+    *last_error.lock().unwrap() = None;
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +64,8 @@ pub struct PortForwardStatus {
     pub local_port: u16,
     pub remote_port: u16,
     pub active_connections: usize,
+    pub connected: bool,
+    pub last_error: Option<String>,
 }
 
 #[derive(Default)]
@@ -69,6 +83,8 @@ struct ForwardHandle {
     local_port: u16,
     remote_port: u16,
     active_connections: Arc<AtomicUsize>,
+    connected: Arc<AtomicBool>,
+    last_error: LastError,
     stop_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -90,11 +106,15 @@ pub async fn start_port_forward(
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let active_connections = Arc::new(AtomicUsize::new(0));
+    let connected = Arc::new(AtomicBool::new(false));
+    let last_error: LastError = Arc::new(StdMutex::new(None));
     let task = tokio::spawn(run_listener(
         listener,
         config.clone(),
         stop_rx,
         active_connections.clone(),
+        connected.clone(),
+        last_error.clone(),
     ));
     forwards.insert(
         config.id.clone(),
@@ -102,6 +122,8 @@ pub async fn start_port_forward(
             local_port: config.local_port,
             remote_port: config.remote_port,
             active_connections,
+            connected,
+            last_error,
             stop_tx,
             task,
         },
@@ -139,6 +161,8 @@ pub async fn list_port_forwards(
             local_port: handle.local_port,
             remote_port: handle.remote_port,
             active_connections: handle.active_connections.load(Ordering::Relaxed),
+            connected: handle.connected.load(Ordering::Relaxed),
+            last_error: handle.last_error.lock().unwrap().clone(),
         })
         .collect())
 }
@@ -167,6 +191,8 @@ async fn run_listener(
     config: PortForwardConfig,
     mut stop_rx: watch::Receiver<bool>,
     active_connections: Arc<AtomicUsize>,
+    connected: Arc<AtomicBool>,
+    last_error: LastError,
 ) {
     let (accepted_tx, accepted_rx) = mpsc::channel(ACCEPT_BUF);
     let session = tokio::spawn(run_session_manager(
@@ -174,6 +200,8 @@ async fn run_listener(
         config,
         stop_rx.clone(),
         active_connections,
+        connected,
+        last_error,
     ));
 
     loop {
@@ -219,7 +247,10 @@ async fn run_session_manager(
     config: PortForwardConfig,
     mut stop_rx: watch::Receiver<bool>,
     active_connections: Arc<AtomicUsize>,
+    connected: Arc<AtomicBool>,
+    last_error: LastError,
 ) {
+    let mut backoff = RECONNECT_DELAY;
     loop {
         if *stop_rx.borrow() || accepted_rx.is_closed() {
             return;
@@ -240,11 +271,14 @@ async fn run_session_manager(
                 connected = &mut connecting => match connected {
                     Ok(Ok(socket)) => break Some(socket),
                     Ok(Err(error)) => {
+                        set_error(&last_error, error.clone());
                         tracing::warn!(forward = %config.id, %error, "port-forward connection failed");
                         break None;
                     }
                     Err(error) => {
-                        tracing::warn!(forward = %config.id, %error, "port-forward connection task failed");
+                        let message = format!("connection task failed: {error}");
+                        set_error(&last_error, message.clone());
+                        tracing::warn!(forward = %config.id, %message);
                         break None;
                     }
                 },
@@ -263,18 +297,31 @@ async fn run_session_manager(
         };
 
         if let Some(socket) = socket {
+            connected.store(true, Ordering::Relaxed);
+            clear_error(&last_error);
+            backoff = RECONNECT_DELAY;
+            tracing::info!(forward = %config.id, "port-forward link connected");
             run_connected(
                 socket,
                 &mut accepted_rx,
                 &mut stop_rx,
                 config.remote_port,
                 active_connections.clone(),
+                last_error.clone(),
             )
             .await;
+            connected.store(false, Ordering::Relaxed);
+            tracing::info!(forward = %config.id, "port-forward link disconnected");
             continue;
         }
 
-        let retry = tokio::time::sleep(RECONNECT_DELAY);
+        let wait = with_jitter(backoff);
+        tracing::warn!(
+            forward = %config.id,
+            retry_in_ms = wait.as_millis(),
+            "port-forward link down; reconnecting"
+        );
+        let retry = tokio::time::sleep(wait);
         tokio::pin!(retry);
         loop {
             tokio::select! {
@@ -286,7 +333,17 @@ async fn run_session_manager(
                 }
             }
         }
+        backoff = (backoff * 2).min(MAX_RECONNECT_DELAY);
     }
+}
+
+fn with_jitter(base: Duration) -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let extra = (base.as_millis() as u64) * (nanos as u64 % 256) / 1024;
+    base + Duration::from_millis(extra)
 }
 
 /// How often the forward link sends a WS Ping.
@@ -309,6 +366,7 @@ async fn run_connected(
     stop_rx: &mut watch::Receiver<bool>,
     remote_port: u16,
     active_connections: Arc<AtomicUsize>,
+    last_error: LastError,
 ) {
     let (mut sink, mut source) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<Outbound>(OUT_BUF);
@@ -369,6 +427,7 @@ async fn run_connected(
                         in_rx,
                         out_tx.clone(),
                         ended_tx.clone(),
+                        last_error.clone(),
                     ));
                     streams.insert(stream_id, LocalStream { in_tx, task });
                 }
@@ -437,6 +496,7 @@ async fn bridge_local(
     mut remote_rx: mpsc::Receiver<PortForwardFrame>,
     out_tx: mpsc::Sender<Outbound>,
     ended_tx: mpsc::Sender<u64>,
+    last_error: LastError,
 ) {
     let (mut read, mut write) = stream.into_split();
     let mut buffer = vec![0; MAX_DATA_LEN.min(32 * 1024)];
@@ -463,18 +523,25 @@ async fn bridge_local(
     while !(opened && local_finished && remote_finished) {
         tokio::select! {
             _ = &mut open_timeout, if !opened => {
-                tracing::warn!(
-                    stream = stream_id,
-                    "port-forward open timed out; resetting the local connection"
-                );
+                let message = format!("open timed out after {}s", OPEN_TIMEOUT.as_secs());
+                set_error(&last_error, message.clone());
+                tracing::warn!(stream = stream_id, %message, "resetting the local connection");
                 let _ = out_tx
                     .send(Outbound::Frame(PortForwardFrame::Rst { stream_id }))
                     .await;
                 break;
             }
             remote = remote_rx.recv() => match remote {
-                Some(PortForwardFrame::OpenOk { .. }) => opened = true,
-                Some(PortForwardFrame::OpenErr { .. }) | Some(PortForwardFrame::Rst { .. }) => break,
+                Some(PortForwardFrame::OpenOk { .. }) => {
+                    opened = true;
+                    clear_error(&last_error);
+                }
+                Some(PortForwardFrame::OpenErr { message, .. }) => {
+                    tracing::warn!(stream = stream_id, %message, "remote open failed");
+                    set_error(&last_error, message);
+                    break;
+                }
+                Some(PortForwardFrame::Rst { .. }) => break,
                 Some(PortForwardFrame::Data { data, .. }) if opened => {
                     if write.write_all(&data).await.is_err() {
                         reset = true;
@@ -617,7 +684,15 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::{mpsc, oneshot, watch};
 
-    use super::run_connected;
+    use super::{run_connected, with_jitter};
+
+    #[test]
+    fn jitter_adds_at_most_a_quarter() {
+        for base in [Duration::from_secs(1), Duration::from_secs(30)] {
+            let delay = with_jitter(base);
+            assert!(delay >= base && delay <= base + base / 4);
+        }
+    }
 
     async fn wait_for(counter: &AtomicUsize, expected: usize) {
         for _ in 0..200 {
@@ -662,12 +737,21 @@ mod tests {
 
         let (stop_tx, mut stop_rx) = watch::channel(false);
         let counter = Arc::new(AtomicUsize::new(0));
+        let last_error = Arc::new(std::sync::Mutex::new(None));
         let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{ws_addr}"))
             .await
             .unwrap();
         let session_counter = counter.clone();
         let session = tokio::spawn(async move {
-            run_connected(socket, &mut accepted_rx, &mut stop_rx, 1, session_counter).await;
+            run_connected(
+                socket,
+                &mut accepted_rx,
+                &mut stop_rx,
+                1,
+                session_counter,
+                last_error,
+            )
+            .await;
         });
 
         let mut clients = Vec::new();

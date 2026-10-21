@@ -1786,6 +1786,24 @@ audio.weditor__media {
   background: #d29922;
   animation: forward-pulse 1.2s ease-in-out infinite;
 }
+.forward-row--reconnecting {
+  border-color: rgba(210, 153, 34, 0.45);
+}
+.forward-status--reconnecting {
+  color: #d29922;
+}
+.forward-status--reconnecting .forward-status__dot {
+  background: #d29922;
+  animation: forward-pulse 1.2s ease-in-out infinite;
+}
+.forward-row__error {
+  max-width: 220px;
+  overflow: hidden;
+  color: #f85149;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .forward-status--error {
   color: #f85149;
 }

@@ -48,6 +48,8 @@ function statusText(
       return "Listening";
     case "starting":
       return "Starting";
+    case "reconnecting":
+      return "Reconnecting";
     case "stopped":
       return "Stopped";
     case "error":
@@ -97,6 +99,11 @@ function ForwardRow({
         {connections > 0 && (
           <span className="forward-row__connections">
             {connections} {connections === 1 ? "connection" : "connections"}
+          </span>
+        )}
+        {runtime?.error && (
+          <span className="forward-row__error" title={runtime.error}>
+            {runtime.error}
           </span>
         )}
       </div>

@@ -60,7 +60,7 @@ export interface PortForward {
 }
 
 export type PortForwardStatus =
-  "starting" | "active" | "stopped" | "error" | "unavailable";
+  "starting" | "active" | "reconnecting" | "stopped" | "error" | "unavailable";
 
 /** Native listener state, refreshed at runtime and never persisted. */
 export interface PortForwardRuntime {

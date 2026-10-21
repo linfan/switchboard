@@ -65,6 +65,8 @@ describe("PortForwardCoordinator", () => {
           localPort: 5433,
           remotePort: 5432,
           activeConnections: 3,
+          connected: true,
+          lastError: null,
         },
       ]),
     };
@@ -153,6 +155,41 @@ describe("PortForwardCoordinator", () => {
     expect(useStore.getState().portForwardRuntime.f1).toEqual({
       status: "unavailable",
       activeConnections: 0,
+    });
+    coordinator.stop();
+  });
+
+  it("reports a live listener with a dropped link as reconnecting and surfaces the error", async () => {
+    const bridge: PortForwardBridge = {
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+      list: vi.fn(async () => [
+        {
+          id: "f1",
+          localPort: 5433,
+          remotePort: 5432,
+          activeConnections: 2,
+          connected: false,
+          lastError: "connect timed out after 10s",
+        },
+      ]),
+    };
+    const coordinator = new PortForwardCoordinator({
+      bridge,
+      desktop: () => true,
+      pollMs: 60_000,
+    });
+    const state = useStore.getState();
+    state.addService(service);
+    state.addPortForward(forward);
+
+    coordinator.start();
+    await settle();
+
+    expect(useStore.getState().portForwardRuntime.f1).toEqual({
+      status: "reconnecting",
+      activeConnections: 2,
+      error: "connect timed out after 10s",
     });
     coordinator.stop();
   });

@@ -18,6 +18,10 @@ export interface NativePortForwardStatus {
   localPort: number;
   remotePort: number;
   activeConnections: number;
+  /** True once the forward link's WS is authenticated and live. */
+  connected: boolean;
+  /** Last connect/open/auth failure, kept until the link recovers. */
+  lastError?: string | null;
 }
 
 export interface PortForwardBridge {
@@ -241,10 +245,12 @@ export class PortForwardCoordinator {
         restart = true;
         continue;
       }
-      useStore.getState().setPortForwardRuntime(id, {
-        status: "active",
+      const runtime: PortForwardRuntime = {
+        status: status.connected ? "active" : "reconnecting",
         activeConnections: status.activeConnections,
-      });
+      };
+      if (status.lastError) runtime.error = status.lastError;
+      useStore.getState().setPortForwardRuntime(id, runtime);
     }
     if (restart) this.requestSync();
   }
