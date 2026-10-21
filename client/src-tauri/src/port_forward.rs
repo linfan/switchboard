@@ -361,6 +361,7 @@ async fn run_connected(
                         break;
                     }
                     let (in_tx, in_rx) = mpsc::channel(STREAM_BUF);
+                    active_connections.fetch_add(1, Ordering::Relaxed);
                     let task = tokio::spawn(bridge_local(
                         stream,
                         stream_id,
@@ -368,7 +369,6 @@ async fn run_connected(
                         in_rx,
                         out_tx.clone(),
                         ended_tx.clone(),
-                        active_connections.clone(),
                     ));
                     streams.insert(stream_id, LocalStream { in_tx, task });
                 }
@@ -376,7 +376,9 @@ async fn run_connected(
             },
             ended = ended_rx.recv() => {
                 if let Some(stream_id) = ended {
-                    streams.remove(&stream_id);
+                    if streams.remove(&stream_id).is_some() {
+                        active_connections.fetch_sub(1, Ordering::Relaxed);
+                    }
                 }
             }
             incoming = source.next() => match incoming {
@@ -397,6 +399,7 @@ async fn run_connected(
                                 if stream.in_tx.send(frame).await.is_err() {
                                     if let Some(stream) = streams.remove(&stream_id) {
                                         stream.task.abort();
+                                        active_connections.fetch_sub(1, Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -410,6 +413,10 @@ async fn run_connected(
         }
     }
 
+    // Every stream still in the map is owned by this incarnation of the
+    // connection; aborting them skips `bridge_local`'s tail, so release their
+    // slots here — the counter must return to zero for the next reconnect.
+    active_connections.fetch_sub(streams.len(), Ordering::Relaxed);
     for stream in streams.into_values() {
         stream.task.abort();
     }
@@ -430,9 +437,7 @@ async fn bridge_local(
     mut remote_rx: mpsc::Receiver<PortForwardFrame>,
     out_tx: mpsc::Sender<Outbound>,
     ended_tx: mpsc::Sender<u64>,
-    active_connections: Arc<AtomicUsize>,
 ) {
-    active_connections.fetch_add(1, Ordering::Relaxed);
     let (mut read, mut write) = stream.into_split();
     let mut buffer = vec![0; MAX_DATA_LEN.min(32 * 1024)];
     let mut opened = false;
@@ -448,7 +453,6 @@ async fn bridge_local(
         .await
         .is_err()
     {
-        active_connections.fetch_sub(1, Ordering::Relaxed);
         let _ = ended_tx.send(stream_id).await;
         return;
     }
@@ -523,7 +527,6 @@ async fn bridge_local(
             .send(Outbound::Frame(PortForwardFrame::Rst { stream_id }))
             .await;
     }
-    active_connections.fetch_sub(1, Ordering::Relaxed);
     let _ = ended_tx.send(stream_id).await;
 }
 
@@ -603,4 +606,85 @@ fn forward_url(base: &str) -> Result<String, String> {
         return Ok(format!("wss://{rest}/forward"));
     }
     Err("service URL must start with http:// or https://".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::{mpsc, oneshot, watch};
+
+    use super::run_connected;
+
+    async fn wait_for(counter: &AtomicUsize, expected: usize) {
+        for _ in 0..200 {
+            if counter.load(Ordering::Relaxed) == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "active connection count stuck at {} (expected {expected})",
+            counter.load(Ordering::Relaxed)
+        );
+    }
+
+    /// Losing the WS aborts every `bridge_local` task; the counter must still
+    /// return to zero so the next reconnect starts clean.
+    #[tokio::test]
+    async fn aborting_the_link_releases_every_active_connection() {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_addr = ws_listener.local_addr().unwrap();
+        let (close_tx, close_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = ws_listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let _ = close_rx.await;
+            let _ = ws.close(None).await;
+        });
+
+        let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_port = local_listener.local_addr().unwrap().port();
+        let (accepted_tx, mut accepted_rx) = mpsc::channel(8);
+        let acceptor = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = local_listener.accept().await else {
+                    break;
+                };
+                if accepted_tx.send(stream).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{ws_addr}"))
+            .await
+            .unwrap();
+        let session_counter = counter.clone();
+        let session = tokio::spawn(async move {
+            run_connected(socket, &mut accepted_rx, &mut stop_rx, 1, session_counter).await;
+        });
+
+        let mut clients = Vec::new();
+        for _ in 0..3 {
+            clients.push(TcpStream::connect(("127.0.0.1", local_port)).await.unwrap());
+        }
+        wait_for(&counter, 3).await;
+
+        // The peer closes the WS: run_connected aborts the bridges instead of
+        // letting them finish, which used to strand their counter increments.
+        close_tx.send(()).unwrap();
+        session.await.unwrap();
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+        drop(stop_tx);
+        drop(clients);
+        acceptor.abort();
+        server.await.unwrap();
+    }
 }
