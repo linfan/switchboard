@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Request, State,
@@ -302,6 +302,8 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
         .unwrap_or_else(|| parts.uri.path())
         .to_string();
 
+    // The request body must be buffered whole: SWB-REST-v1 signs SHA-256(body),
+    // so the signature cannot be verified without seeing every byte.
     let bytes = match axum::body::to_bytes(body, MAX_BODY).await {
         Ok(b) => b,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
@@ -330,7 +332,7 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
     };
     let id = tunnel.alloc_stream();
     let mut rx = tunnel.register(id);
-    let mut guard = StreamGuard {
+    let guard = StreamGuard {
         tunnel: tunnel.clone(),
         id,
         armed: true,
@@ -383,21 +385,43 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
             None => return (StatusCode::BAD_GATEWAY, "worker aborted").into_response(),
         }
     };
-    let mut body_buf: Vec<u8> = Vec::new();
-    loop {
-        match rx.recv().await {
-            Some(f) if f.kind == KIND_RESP_BODY => body_buf.extend_from_slice(&f.payload),
-            Some(f) if f.kind == KIND_RESP_END => break,
-            Some(_) => continue,
-            None => break,
-        }
-    }
-
-    guard.armed = false; // response is complete; no cancel needed
-    build_response(resp_head, body_buf)
+    // RESP_HEAD is enough to start the response: pull body chunks lazily so a
+    // large download is never buffered whole in the repeater. The guard travels
+    // with the stream — dropping it early (client disconnect) sends RST and
+    // unregisters, stopping the worker's producer at the source.
+    let body = Body::from_stream(futures::stream::unfold(
+        (rx, guard),
+        |(mut rx, mut guard)| async move {
+            loop {
+                match rx.recv().await {
+                    Some(f) if f.kind == KIND_RESP_BODY => {
+                        return Some((
+                            Ok::<_, std::io::Error>(Bytes::from(f.payload)),
+                            (rx, guard),
+                        ));
+                    }
+                    Some(f) if f.kind == KIND_RESP_END => {
+                        guard.armed = false; // response complete; no cancel needed
+                        return None;
+                    }
+                    Some(_) => continue,
+                    None => {
+                        return Some((
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "worker aborted the response",
+                            )),
+                            (rx, guard),
+                        ));
+                    }
+                }
+            }
+        },
+    ));
+    build_response(resp_head, body)
 }
 
-fn build_response(head: RespHead, body: Vec<u8>) -> Response {
+fn build_response(head: RespHead, body: Body) -> Response {
     let mut builder = Response::builder().status(head.status);
     for (k, v) in &head.headers {
         if !is_stripped_header(k) {
@@ -405,7 +429,7 @@ fn build_response(head: RespHead, body: Vec<u8>) -> Response {
         }
     }
     builder
-        .body(Body::from(body))
+        .body(body)
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 

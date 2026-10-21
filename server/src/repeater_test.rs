@@ -284,7 +284,30 @@ async fn https_request(
         .unwrap()
         .parse()
         .unwrap();
-    Ok((status, raw[sep + 4..].to_vec()))
+    let chunked = String::from_utf8_lossy(&raw[..sep])
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked");
+    let body = raw[sep + 4..].to_vec();
+    Ok((status, if chunked { decode_chunked(&body) } else { body }))
+}
+
+/// Minimal `Transfer-Encoding: chunked` decoder for responses whose length is
+/// only known while streaming (the repeater no longer buffers REST bodies).
+fn decode_chunked(input: &[u8]) -> Vec<u8> {
+    let mut rest = input;
+    let mut out = Vec::new();
+    loop {
+        let line_end = find(rest, b"\r\n").expect("chunk size line");
+        let size_line = std::str::from_utf8(&rest[..line_end]).unwrap();
+        let size = usize::from_str_radix(size_line.split(';').next().unwrap().trim(), 16)
+            .expect("hex chunk size");
+        rest = &rest[line_end + 2..];
+        if size == 0 {
+            return out;
+        }
+        out.extend_from_slice(&rest[..size]);
+        rest = &rest[size + 2..];
+    }
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -797,6 +820,31 @@ async fn worker_disconnect_closes_idle_client_bridges() {
     assert!(
         closed.is_ok(),
         "losing the worker must close an idle forward bridge"
+    );
+}
+
+#[tokio::test]
+async fn large_download_streamed_through_repeater() {
+    let h = boot().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big-download.bin");
+    // Several RESP_BODY frames: the repeater must relay them lazily and intact.
+    let payload: Vec<u8> = (0..BODY_CHUNK * 4 + 7).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&path, &payload).unwrap();
+
+    let uri = format!("/api/fs/download?path={}", path.to_string_lossy());
+    let (status, body) = https_request(&h.client_addr, "GET", &uri, Some(&h.cb), b"")
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(
+        body.len(),
+        payload.len(),
+        "streamed download length mismatch"
+    );
+    assert!(
+        body == payload,
+        "streamed download must match the worker's file byte-for-byte"
     );
 }
 
