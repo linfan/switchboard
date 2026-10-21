@@ -14,6 +14,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::mpsc,
+    task::JoinHandle,
     time::timeout,
 };
 
@@ -106,14 +107,21 @@ pub async fn run_session(mut rx: mpsc::Receiver<Vec<u8>>, out_tx: mpsc::Sender<V
                         next_generation = next_generation.wrapping_add(1);
                         let generation = next_generation;
                         let (stream_tx, stream_rx) = mpsc::channel(STREAM_BUF);
-                        streams.insert(stream_id, StreamEntry { generation, tx: stream_tx });
-                        tokio::spawn(bridge_remote(
+                        // Keep the task handle so teardown can abort it: a bridge
+                        // stuck in `write_all` on a target that stopped reading
+                        // otherwise ignores RST/session close and pins the socket.
+                        let task = tokio::spawn(bridge_remote(
                             stream_id,
                             generation,
                             remote_port,
                             stream_rx,
                             event_tx.clone(),
                         ));
+                        streams.insert(stream_id, StreamEntry {
+                            generation,
+                            tx: stream_tx,
+                            task,
+                        });
                     }
                     PortForwardFrame::Data { stream_id, data } => {
                         let Some(entry) = streams.get(&stream_id) else { continue };
@@ -154,9 +162,8 @@ pub async fn run_session(mut rx: mpsc::Receiver<Vec<u8>>, out_tx: mpsc::Sender<V
                         }
                     }
                     PortForwardFrame::Rst { stream_id } => {
-                        if let Some(entry) = streams.remove(&stream_id) {
-                            let _ = entry.tx.try_send(ClientEvent::Rst);
-                        }
+                        // Dropping the entry aborts a bridge blocked on a write.
+                        streams.remove(&stream_id);
                     }
                     PortForwardFrame::OpenOk { .. } | PortForwardFrame::OpenErr { .. } => {
                         tracing::warn!("unexpected server-bound port-forward response");
@@ -182,9 +189,9 @@ pub async fn run_session(mut rx: mpsc::Receiver<Vec<u8>>, out_tx: mpsc::Sender<V
         }
     }
 
-    for entry in streams.into_values() {
-        let _ = entry.tx.try_send(ClientEvent::Rst);
-    }
+    // Dropping every entry aborts its bridge, including one wedged in a write
+    // to a target that stopped reading; the session must not leave sockets open.
+    streams.clear();
 }
 
 async fn send(tx: &mpsc::Sender<Vec<u8>>, frame: PortForwardFrame) -> bool {
@@ -194,12 +201,18 @@ async fn send(tx: &mpsc::Sender<Vec<u8>>, frame: PortForwardFrame) -> bool {
 struct StreamEntry {
     generation: u64,
     tx: mpsc::Sender<ClientEvent>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for StreamEntry {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 enum ClientEvent {
     Data(Vec<u8>),
     Fin,
-    Rst,
 }
 
 enum BridgeEvent {
@@ -347,7 +360,9 @@ async fn bridge_remote(
                         }
                         client_finished = true;
                     }
-                    Some(ClientEvent::Rst) | None => {
+                    // The entry was dropped (RST, session teardown, queue
+                    // overflow); its socket is gone with it.
+                    None => {
                         reset = true;
                         break;
                     }
@@ -402,12 +417,14 @@ fn bounded_error(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
         sync::mpsc,
+        sync::Notify,
     };
 
     use super::*;
@@ -612,5 +629,69 @@ mod tests {
         drop(in_tx);
         session.await.unwrap();
         echo.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_teardown_aborts_a_bridge_blocked_on_write() {
+        // A target that accepts but never reads: writes eventually wedge.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(stream);
+        });
+
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (stream_tx, stream_rx) = mpsc::channel(1);
+        let finished = Arc::new(Notify::new());
+        struct Probe(Arc<Notify>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        let probe = Probe(finished.clone());
+        let task = tokio::spawn(async move {
+            let _probe = probe;
+            bridge_remote(0, 0, port, stream_rx, event_tx).await;
+        });
+        assert!(matches!(
+            event_rx.recv().await.unwrap(),
+            BridgeEvent::OpenOk { .. }
+        ));
+
+        // Feed until the write queue stays full across a pause: the bridge is
+        // now parked in `write_all`, where no queued event can reach it.
+        let mut wedged = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if stream_tx
+                .try_send(ClientEvent::Data(vec![0u8; 32 * 1024]))
+                .is_ok()
+            {
+                continue;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if stream_tx
+                .try_send(ClientEvent::Data(vec![0u8; 32 * 1024]))
+                .is_err()
+            {
+                wedged = true;
+                break;
+            }
+        }
+        assert!(wedged, "the bridge never blocked on its write");
+
+        let entry = StreamEntry {
+            generation: 0,
+            tx: stream_tx,
+            task,
+        };
+        drop(entry);
+
+        tokio::time::timeout(Duration::from_secs(1), finished.notified())
+            .await
+            .expect("tearing down the stream must abort the blocked bridge");
     }
 }

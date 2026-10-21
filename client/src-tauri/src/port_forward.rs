@@ -454,6 +454,16 @@ async fn run_connected(
                                 }
                             };
                             let stream_id = frame.stream_id();
+                            if matches!(frame, PortForwardFrame::Rst { .. }) {
+                                // A reset must be actionable even while the
+                                // bridge is blocked writing to a local app that
+                                // stopped reading; abort instead of queueing.
+                                if let Some(stream) = streams.remove(&stream_id) {
+                                    stream.task.abort();
+                                    active_connections.fetch_sub(1, Ordering::Relaxed);
+                                }
+                                continue;
+                            }
                             if let Some(stream) = streams.get(&stream_id) {
                                 if stream.in_tx.send(frame).await.is_err() {
                                     if let Some(stream) = streams.remove(&stream_id) {
@@ -476,9 +486,7 @@ async fn run_connected(
     // connection; aborting them skips `bridge_local`'s tail, so release their
     // slots here — the counter must return to zero for the next reconnect.
     active_connections.fetch_sub(streams.len(), Ordering::Relaxed);
-    for stream in streams.into_values() {
-        stream.task.abort();
-    }
+    streams.clear();
     drop(out_tx);
     writer.abort();
     let _ = writer.await;
@@ -487,6 +495,14 @@ async fn run_connected(
 struct LocalStream {
     in_tx: mpsc::Sender<PortForwardFrame>,
     task: JoinHandle<()>,
+}
+
+impl Drop for LocalStream {
+    fn drop(&mut self) {
+        // Also covers an abrupt teardown of run_connected (stop, session abort):
+        // a bridge blocked in `write_all` must not keep its local socket alive.
+        self.task.abort();
+    }
 }
 
 async fn bridge_local(
