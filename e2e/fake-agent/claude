@@ -8,12 +8,34 @@ import readline from "node:readline";
 process.stdout.write("AGENT-READY\r\n");
 
 const rl = readline.createInterface({ input: process.stdin });
+let ticker = null;
 rl.on("line", (line) => {
   const t = line.trim();
   if (t === "") return;
   if (t === "quit") {
     process.exit(0);
   }
+  // `tick:<ms>:<count>` streams timed output, for scroll tests that need new
+  // lines to arrive while the user is scrolled up.
+  if (t.startsWith("tick:")) {
+    const [ms, count] = t
+      .slice(5)
+      .split(":")
+      .map((n) => parseInt(n, 10));
+    if (ticker) clearInterval(ticker);
+    let emitted = 0;
+    ticker = setInterval(() => {
+      process.stdout.write(`tick:${++emitted}\r\n`);
+      if (ticker && emitted >= (count || 10)) {
+        clearInterval(ticker);
+        ticker = null;
+      }
+    }, ms || 1000);
+    return;
+  }
   process.stdout.write(`reply:${t}\r\n`);
 });
-rl.on("close", () => process.exit(0));
+rl.on("close", () => {
+  if (ticker) clearInterval(ticker);
+  process.exit(0);
+});

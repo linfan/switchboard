@@ -247,6 +247,110 @@ test("re-selecting a conversation keeps the viewport pinned to the latest output
   await expect(rows).toContainText(last);
 });
 
+test("streaming output does not pull a scrolled-up viewport back to the bottom", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
+
+  await addWorkspace(page, "proj");
+  await openNewTask(page, "proj");
+  const dialog = page.getByRole("dialog", { name: "New task" });
+  await dialog.getByLabel("Title (optional)").fill("hold-scroll-task");
+  await dialog.getByRole("button", { name: "Create" }).click();
+  const conv = page.locator(".conv", { hasText: "hold-scroll-task" });
+  await expect(conv).toBeVisible({ timeout: 15000 });
+  await conv.click();
+
+  const rows = page.locator(".xterm-rows");
+  const screen = page.locator(".xterm-screen");
+  const jump = page.locator(".term-jump");
+  await expect(rows).toContainText("AGENT-READY", { timeout: 15000 });
+
+  // Fill the scrollback so the viewport can leave the last line.
+  await screen.click();
+  await page.keyboard.type(
+    Array.from({ length: 100 }, (_, i) => `filler${i}`).join("\n") + "\n",
+    { delay: 1 },
+  );
+  const last = "reply:filler99";
+  await expect(rows).toContainText(last, { timeout: 15000 });
+
+  // Start a short burst of output, then scroll up while it is still arriving.
+  await page.keyboard.type("tick:100:25");
+  await page.keyboard.press("Enter");
+  await expect(rows).toContainText("tick:1", { timeout: 10000 });
+  const box = await screen.boundingBox();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.wheel(0, -2000);
+  await expect(jump).toHaveClass(/term-jump--alert/);
+
+  // New output must not steal the viewport: the user stays in the history
+  // after several more ticks (the old write path scrolled on every chunk).
+  await page.waitForTimeout(1200);
+  await expect(jump).toHaveClass(/term-jump--alert/);
+  await expect
+    .poll(() =>
+      page
+        .locator(".xterm-viewport")
+        .evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop),
+    )
+    .toBeGreaterThan(100);
+  await expect(rows).not.toContainText(last);
+
+  // Jump back to the latest output and let the burst finish before the next
+  // test reuses the agent.
+  await jump.click();
+  await expect(rows).toContainText("tick:25", { timeout: 10000 });
+});
+
+test("resizing keeps a following terminal pinned to the latest output", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
+
+  await addWorkspace(page, "proj");
+  await openNewTask(page, "proj");
+  const dialog = page.getByRole("dialog", { name: "New task" });
+  await dialog.getByLabel("Title (optional)").fill("resize-pin-task");
+  await dialog.getByRole("button", { name: "Create" }).click();
+  const conv = page.locator(".conv", { hasText: "resize-pin-task" });
+  await expect(conv).toBeVisible({ timeout: 15000 });
+  await conv.click();
+
+  const rows = page.locator(".xterm-rows");
+  const jump = page.locator(".term-jump");
+  await expect(rows).toContainText("AGENT-READY", { timeout: 15000 });
+
+  await page.locator(".xterm-screen").click();
+  await page.keyboard.type(
+    Array.from({ length: 150 }, (_, i) => `filler${i}`).join("\n") + "\n",
+    { delay: 1 },
+  );
+  const last = "reply:filler149";
+  await expect(rows).toContainText(last, { timeout: 15000 });
+  await expect(jump).toHaveClass(/term-jump--locked/);
+
+  const bottomGap = () =>
+    page
+      .locator(".xterm-viewport")
+      .evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+
+  for (const size of [
+    { width: 900, height: 600 },
+    { width: 1300, height: 850 },
+  ]) {
+    await page.setViewportSize(size);
+    // Reflow is asynchronous; the viewport must settle back on the last line
+    // instead of being stranded one row above it (which also paused follow).
+    await expect.poll(bottomGap, { timeout: 5000 }).toBeLessThanOrEqual(2);
+    await expect(jump).toHaveClass(/term-jump--locked/);
+    await expect(jump).not.toHaveClass(/term-jump--alert/);
+    await expect(rows).toContainText(last);
+  }
+});
+
 test("hosting service reports healthy over REST", async ({ request }) => {
   const res = await request.get(`${HTTP}/health`);
   expect(res.ok()).toBeTruthy();
