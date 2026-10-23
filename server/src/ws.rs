@@ -10,6 +10,10 @@
 //! task handles inbound text control + binary INPUT frames.
 
 use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
 
 use axum::{
@@ -36,6 +40,11 @@ use crate::{
 /// Backlog size (in chunks) above which reconnect prefers a screen snapshot over
 /// replaying every raw chunk.
 const SNAPSHOT_THRESHOLD: u64 = 256;
+/// Replay pacing window, in unacknowledged data frames per task. A client that
+/// declares `acks` support never has more than this many replay frames in
+/// flight, so a backlog larger than the repeater's per-stream queue is paced to
+/// the receiver instead of being dumped — which would reset the stream.
+pub(crate) const REPLAY_WINDOW: u64 = 256;
 
 /// Buffer for the unified outbound writer. Bounded so a slow client applies
 /// backpressure to the session instead of growing memory without limit.
@@ -141,11 +150,12 @@ pub async fn run_session(
     state: SharedState,
 ) {
     // 1. Handshake: the first frame must be Hello.
-    let (client_id, cursors) = match read_hello(&mut rx).await {
+    let (client_id, cursors, acks) = match read_hello(&mut rx).await {
         Some(h) => h,
         None => return,
     };
-    tracing::info!(%client_id, "client connected");
+    tracing::info!(%client_id, acks, "client connected");
+    let tracker = AckTracker::new(acks, &cursors);
 
     // 2. Subscribe BEFORE replay so output produced during replay isn't missed.
     let mut broadcast_rx = state.tasks.subscribe();
@@ -178,11 +188,29 @@ pub async fn run_session(
 
         let state = state.clone();
         let client_id = client_id.clone();
+        let out = out_tx.clone();
+        let tracker = tracker.clone();
         tokio::spawn(async move {
             while let Some(win) = rx.recv().await {
                 match win {
                     WsIn::Text(t) => match serde_json::from_str::<ClientMsg>(&t) {
                         Ok(cm) => {
+                            match &cm {
+                                // Feed the replay pacer before the control task
+                                // sees it (which still persists the cursor).
+                                ClientMsg::Ack { task_id, seq } => {
+                                    tracker.advance(task_id, *seq);
+                                }
+                                // Answer pings here: `replay` owns the session
+                                // task while it streams, so routing a Pong
+                                // through the live loop would let a slow replay
+                                // miss the client's heartbeat deadline.
+                                ClientMsg::Ping { ts } => {
+                                    let _ = send_control(&out, &ServerMsg::Pong { ts: *ts }).await;
+                                    continue;
+                                }
+                                _ => {}
+                            }
                             if ctl_tx.send(cm).is_err() {
                                 break;
                             }
@@ -201,6 +229,9 @@ pub async fn run_session(
                     WsIn::Close => break,
                 }
             }
+            // Wake a replay parked on the pacing window: the client is gone,
+            // so there is nothing left to pace against.
+            tracker.close();
             // Closing the queue lets the control task finish what is already
             // queued; awaiting it keeps a command sent just before a clean
             // disconnect able to reply, as it could before this split.
@@ -226,6 +257,7 @@ pub async fn run_session(
         "connect",
         &cursors,
         &mut last_sent,
+        &tracker,
     )
     .await
     {
@@ -263,6 +295,7 @@ pub async fn run_session(
                         "lagged",
                         &from,
                         &mut last_sent,
+                        &tracker,
                     )
                     .await
                     {
@@ -394,15 +427,18 @@ fn auth_error(message: &str) -> AuthMsg {
     }
 }
 
-/// Read frames until a `Hello` arrives; returns (client_id, cursors).
-async fn read_hello(rx: &mut mpsc::Receiver<WsIn>) -> Option<(String, HashMap<String, u64>)> {
+/// Read frames until a `Hello` arrives; returns (client_id, cursors, acks).
+async fn read_hello(rx: &mut mpsc::Receiver<WsIn>) -> Option<(String, HashMap<String, u64>, bool)> {
     while let Some(win) = rx.recv().await {
         match win {
             WsIn::Text(t) => {
-                if let Ok(ClientMsg::Hello { client_id, cursors }) =
-                    serde_json::from_str::<ClientMsg>(&t)
+                if let Ok(ClientMsg::Hello {
+                    client_id,
+                    cursors,
+                    acks,
+                }) = serde_json::from_str::<ClientMsg>(&t)
                 {
-                    return Some((client_id, cursors));
+                    return Some((client_id, cursors, acks));
                 }
             }
             WsIn::Close => return None,
@@ -417,6 +453,80 @@ async fn read_hello(rx: &mut mpsc::Receiver<WsIn>) -> Option<(String, HashMap<St
     None
 }
 
+/// Per-session replay pacing. Only clients that declare `acks` in their Hello
+/// are paced; older clients keep the previous dump-the-whole-backlog behaviour.
+///
+/// `acked` starts at the client's published cursors because seqs are absolute
+/// and the window is measured from where the client actually is.
+pub(crate) struct AckTracker {
+    enabled: bool,
+    acked: Mutex<HashMap<String, u64>>,
+    notify: tokio::sync::Notify,
+    closed: AtomicBool,
+}
+
+impl AckTracker {
+    fn new(enabled: bool, cursors: &HashMap<String, u64>) -> Arc<Self> {
+        Arc::new(Self {
+            enabled,
+            acked: Mutex::new(if enabled {
+                cursors.clone()
+            } else {
+                HashMap::new()
+            }),
+            notify: tokio::sync::Notify::new(),
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    /// Record the client's cumulative progress for a task.
+    fn advance(&self, task_id: &str, seq: u64) {
+        let advanced = {
+            let mut acked = self.acked.lock().unwrap();
+            let entry = acked.entry(task_id.to_string()).or_insert(0);
+            if seq > *entry {
+                *entry = seq;
+                true
+            } else {
+                false
+            }
+        };
+        if advanced {
+            self.notify.notify_one();
+        }
+    }
+
+    /// The client is gone: fail the pending wait so the replay can unwind.
+    fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
+        self.notify.notify_one();
+    }
+
+    /// Wait until sending `next_seq` stays within [`REPLAY_WINDOW`] frames of
+    /// what the client has acknowledged. Returns `false` once the session ends.
+    async fn wait_for_room(&self, task_id: &str, next_seq: u64) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        loop {
+            if self.closed.load(Ordering::Relaxed) {
+                return false;
+            }
+            let acked = self
+                .acked
+                .lock()
+                .unwrap()
+                .get(task_id)
+                .copied()
+                .unwrap_or(0);
+            if next_seq.saturating_sub(acked) <= REPLAY_WINDOW {
+                return true;
+            }
+            self.notify.notified().await;
+        }
+    }
+}
+
 /// Reconstruct every task's terminal for a (re)connecting client, then send a
 /// `ReplayDone`. Large backlogs are collapsed to a screen SNAPSHOT; small ones
 /// are byte fast-forwarded so scrollback continuity is preserved. Either path
@@ -429,6 +539,7 @@ async fn replay(
     reason: &'static str,
     cursors: &HashMap<String, u64>,
     last_sent: &mut HashMap<String, u64>,
+    tracker: &AckTracker,
 ) -> bool {
     let tasks = match state.tasks.list().await {
         Ok(t) => t,
@@ -487,6 +598,12 @@ async fn replay(
             last_sent.insert(task.id.clone(), tail);
         } else if let Ok(chunks) = state.tasks.chunks_after(&task.id, after).await {
             for (seq, data) in chunks {
+                // Pace the byte replay to what the client has applied: an
+                // unbounded history must not outrun the repeater's stream
+                // queue (which would reset this very stream).
+                if !tracker.wait_for_room(&task.id, seq).await {
+                    return false;
+                }
                 let frame = Frame::Output {
                     task_id: uuid,
                     seq,
@@ -527,10 +644,9 @@ async fn handle_client_msg(
     direct_tx: &mpsc::UnboundedSender<ServerMsg>,
 ) {
     match msg {
-        ClientMsg::Hello { .. } => {} // already handshaked
-        ClientMsg::Ping { ts } => {
-            let _ = direct_tx.send(ServerMsg::Pong { ts });
-        }
+        // Hello is consumed by the handshake and Ping is answered by the
+        // transport dispatcher (so a long replay cannot starve the heartbeat).
+        ClientMsg::Hello { .. } | ClientMsg::Ping { .. } => {}
         ClientMsg::Ack { task_id, seq } => {
             if let Err(e) = state.store.set_cursor(client_id, &task_id, seq).await {
                 tracing::warn!(%client_id, %task_id, error=%e, "ack failed");

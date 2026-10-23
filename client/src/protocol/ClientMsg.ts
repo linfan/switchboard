@@ -3,7 +3,14 @@
 /**
  * Messages the client sends to a hosting service over the WebSocket.
  */
-export type ClientMsg = { "type": "hello", client_id: string, cursors: Record<string, number>, } | { "type": "create_task", tool: string, title: string | null, 
+export type ClientMsg = { "type": "hello", client_id: string, cursors: Record<string, number>, 
+/**
+ * The client keeps sending `Ack` frames as it applies replayed data.
+ * This lets the server pace a large replay to the receiver instead of
+ * dumping it and overflowing the repeater's per-stream queue. Absent
+ * in older clients (`false`), which keep the unpaced behaviour.
+ */
+acks: boolean, } | { "type": "create_task", tool: string, title: string | null, 
 /**
  * Working directory for the agent process (server-validated).
  */

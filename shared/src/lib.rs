@@ -232,6 +232,12 @@ pub enum ClientMsg {
         client_id: String,
         #[ts(type = "Record<string, number>")]
         cursors: HashMap<String, u64>,
+        /// The client keeps sending `Ack` frames as it applies replayed data.
+        /// This lets the server pace a large replay to the receiver instead of
+        /// dumping it and overflowing the repeater's per-stream queue. Absent
+        /// in older clients (`false`), which keep the unpaced behaviour.
+        #[serde(default)]
+        acks: bool,
     },
     /// Create a new task (conversation) running the given tool on a PTY sized
     /// `cols` × `rows` (the client's initial terminal size).
@@ -255,7 +261,9 @@ pub enum ClientMsg {
     /// Delete a task entirely: terminate its process if running, then remove the
     /// task and all its persisted terminal data from the host.
     DeleteTask { task_id: String },
-    /// Acknowledge durable receipt of messages up to `seq` for a task.
+    /// Acknowledge durable receipt of messages up to `seq` for a task. Also
+    /// paces a replay: the server keeps only a bounded window of unacknowledged
+    /// frames in flight, so a large backlog is delivered at the client's rate.
     Ack {
         task_id: String,
         #[ts(type = "number")]
@@ -331,11 +339,24 @@ mod tests {
         let msg = ClientMsg::Hello {
             client_id: "c1".into(),
             cursors,
+            acks: true,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"hello\""));
-        let back: ClientMsg = serde_json::from_str(&json).unwrap();
-        matches!(back, ClientMsg::Hello { .. });
+        match serde_json::from_str::<ClientMsg>(&json).unwrap() {
+            ClientMsg::Hello { acks, .. } => assert!(acks),
+            other => panic!("expected hello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hello_from_an_older_client_defaults_to_no_acks() {
+        // Builds no `acks` field, exactly as builds before pacing did.
+        let json = r#"{"type":"hello","client_id":"c1","cursors":{}}"#;
+        match serde_json::from_str::<ClientMsg>(json).unwrap() {
+            ClientMsg::Hello { acks, .. } => assert!(!acks),
+            other => panic!("expected hello, got {other:?}"),
+        }
     }
 
     #[test]

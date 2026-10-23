@@ -419,11 +419,13 @@ export class ConnectionManager {
     // "Connected" every cycle.
     this.setStatus("connecting", { attempt: this.attempt });
     // Re-issue Hello with the freshest cursors so the server replays only what
-    // we have not durably applied.
+    // we have not durably applied. `acks` lets it pace a large replay to us
+    // instead of dumping it into the repeater's bounded stream queue.
     this.send({
       type: "hello",
       client_id: this.d.clientId,
       cursors: this.d.getCursors(),
+      acks: true,
     });
     this.startHeartbeat();
     // Let the app re-assert per-task state that must survive a drop (e.g. the

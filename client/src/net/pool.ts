@@ -245,6 +245,10 @@ export class ConnectionPool {
     const setCursor = useStore.getState().setCursor;
     for (const { serviceId, taskId, seq } of pending.values()) {
       setCursor(serviceId, taskId, seq);
+      // Tell the worker how far this client has applied the replay, so it can
+      // pace a long backlog instead of dumping it into the repeater's bounded
+      // stream queue. Best-effort: a dropped ack is re-sent with the next flush.
+      this.send(serviceId, { type: "ack", task_id: taskId, seq });
     }
   }
 

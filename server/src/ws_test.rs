@@ -133,6 +133,20 @@ async fn hello(ws: &mut WsStream, cursors: HashMap<String, u64>) {
         &ClientMsg::Hello {
             client_id: "c1".into(),
             cursors,
+            acks: false,
+        },
+    )
+    .await;
+}
+
+/// Hello from a client that will pace the replay with `Ack` frames.
+async fn hello_paced(ws: &mut WsStream, cursors: HashMap<String, u64>) {
+    send(
+        ws,
+        &ClientMsg::Hello {
+            client_id: "c1".into(),
+            cursors,
+            acks: true,
         },
     )
     .await;
@@ -380,6 +394,66 @@ async fn large_backlog_uses_snapshot() {
         replay.contents().contains("FINAL"),
         "snapshot must redraw the screen"
     );
+}
+
+#[tokio::test]
+async fn replay_is_paced_by_ack_frames() {
+    let (addr, state) = start_server().await;
+    // No authoritative screen: a large gap cannot collapse to a snapshot, so an
+    // unpaced replay would dump the whole history in one burst.
+    let info = TaskInfo {
+        id: T1.into(),
+        tool: "claude".into(),
+        title: "old".into(),
+        status: TaskStatus::Exited { code: Some(0) },
+        created_at: now_millis(),
+        last_seq: 0,
+    };
+    state.store.create_task(&info).await.unwrap();
+    let n = super::ws::REPLAY_WINDOW * 2 + 88;
+    for _ in 0..n {
+        state.tasks.inject_chunk(T1, b"x").await.unwrap();
+    }
+
+    let mut ws = connect(addr).await;
+    hello_paced(&mut ws, HashMap::new()).await;
+
+    let mut got = 0u64;
+    let mut window_start = 0u64;
+    let mut waits = 0usize;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(500), ws.next()).await {
+            Ok(Some(Ok(WsMessage::Binary(_)))) => got += 1,
+            Ok(Some(Ok(WsMessage::Text(t)))) => {
+                if let Ok(ServerMsg::ReplayDone { .. }) = serde_json::from_str(t.as_str()) {
+                    break;
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(e))) => panic!("ws error after {got} frames: {e}"),
+            Ok(None) => panic!("stream ended after {got} frames"),
+            Err(_) => {
+                // The server must have sent exactly one window, then parked.
+                assert_eq!(
+                    got - window_start,
+                    super::ws::REPLAY_WINDOW,
+                    "replay sent more than the window before waiting"
+                );
+                waits += 1;
+                window_start = got;
+                send(
+                    &mut ws,
+                    &ClientMsg::Ack {
+                        task_id: T1.into(),
+                        seq: got,
+                    },
+                )
+                .await;
+            }
+        }
+    }
+    assert_eq!(waits, 2, "expected a wait per window");
+    assert_eq!(got, n, "the paced replay must still deliver every chunk");
 }
 
 #[tokio::test]

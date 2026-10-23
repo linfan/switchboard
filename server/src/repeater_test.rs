@@ -461,6 +461,7 @@ async fn hello(ws: &mut WsStream, cursors: HashMap<String, u64>) {
         &ClientMsg::Hello {
             client_id: "c1".into(),
             cursors,
+            acks: false,
         },
     )
     .await;
