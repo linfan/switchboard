@@ -190,6 +190,54 @@ test("scrolling away from the last line pauses auto-follow and the lock button c
   await expect(rows).toContainText(last);
 });
 
+test("control shortcuts while scrolled up leave the viewport alone, typing jumps back", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
+
+  await addWorkspace(page, "proj");
+  await openNewTask(page, "proj");
+  const dialog = page.getByRole("dialog", { name: "New task" });
+  await dialog.getByLabel("Title (optional)").fill("shortcut-task");
+  await dialog.getByRole("button", { name: "Create" }).click();
+  const conv = page.locator(".conv", { hasText: "shortcut-task" });
+  await expect(conv).toBeVisible({ timeout: 15000 });
+  await conv.click();
+
+  const rows = page.locator(".xterm-rows");
+  const screen = page.locator(".xterm-screen");
+  const jump = page.locator(".term-jump");
+  await expect(rows).toContainText("AGENT-READY", { timeout: 15000 });
+
+  // Fill the scrollback so the viewport can leave the last line.
+  await screen.click();
+  await page.keyboard.type(
+    Array.from({ length: 100 }, (_, i) => `filler${i}`).join("\n") + "\n",
+    { delay: 1 },
+  );
+  const last = "reply:filler99";
+  await expect(rows).toContainText(last, { timeout: 15000 });
+
+  const box = await screen.boundingBox();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.wheel(0, -2000);
+  await expect(jump).toHaveClass(/term-jump--alert/);
+
+  // Control shortcuts (interrupt, copy) are commands sent while reading
+  // history — they must not yank the viewport back to the bottom.
+  await page.keyboard.press("Meta+c");
+  await expect(jump).toHaveClass(/term-jump--alert/);
+  await page.keyboard.press("Control+c");
+  await expect(jump).toHaveClass(/term-jump--alert/);
+  await expect(rows).not.toContainText(last);
+
+  // Typing is input: the viewport returns to the cursor and resumes following.
+  await page.keyboard.press("f");
+  await expect(jump).not.toHaveClass(/term-jump--alert/);
+  await expect(rows).toContainText(last);
+});
+
 test("re-selecting a conversation keeps the viewport pinned to the latest output", async ({
   page,
 }) => {

@@ -45,9 +45,9 @@ interface Entry {
   /** Notified on every `follow` flip; see onFollow. */
   followListeners: Set<(following: boolean) => void>;
   /**
-   * When lock is ON, pressing any key while scrolled away returns to the
-   * bottom and resumes following. A toggle button in the terminal UI controls
-   * this flag.
+   * When lock is ON, typing or pasting while scrolled away returns to the
+   * bottom and resumes following. Control shortcuts (Ctrl+C, Cmd+C, arrows,
+   * …) do not. A toggle button in the terminal UI controls this flag.
    */
   lock: boolean;
   /** Notified on every `lock` flip; see onLock. */
@@ -100,6 +100,21 @@ function scrollToBottomNow(e: Entry): void {
   e.term.scrollToBottom();
   e.wheelPx = 0;
   setFollow(e, true);
+}
+
+/**
+ * Whether a keydown is ordinary text input rather than a control shortcut.
+ * Typing while scrolled up should bring the viewport back to the cursor, but
+ * Ctrl+C/Cmd+C and friends are commands sent while reading history — they
+ * must not yank the viewport away. Enter/Backspace/Tab edit the current input
+ * line, and IME composition still lands text in the terminal, so both count
+ * as typing; Escape, arrows and function keys do not.
+ */
+function isTypingKey(ev: KeyboardEvent): boolean {
+  if (ev.isComposing || ev.key === "Process") return true;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return false;
+  if (ev.key.length === 1) return true;
+  return ev.key === "Enter" || ev.key === "Backspace" || ev.key === "Tab";
 }
 
 /** Mark the current scroll stream as user-initiated and stop any resize pin. */
@@ -288,6 +303,10 @@ function ensure(serviceId: string, taskId: string): Entry {
     fontSize,
     scrollback: 10000,
     theme: { background: "#0b0f14" },
+    // xterm otherwise jumps to the bottom on every user byte — including
+    // control bytes like Ctrl+C's ^C — while the user is reading scrollback.
+    // The keydown listener in `attach` decides which input should jump.
+    scrollOnUserInput: false,
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -457,11 +476,25 @@ export function attach(
     e.el.addEventListener("touchmove", () => markUserScroll(e), {
       passive: true,
     });
-    // When the auto-follow lock is on and the user has scrolled away, pressing
-    // any key should jump back to the bottom and resume following.
-    e.el.addEventListener("keydown", () => {
-      if (e.lock && !e.follow) scrollToBottomNow(e);
-    });
+    // When the auto-follow lock is on and the user has scrolled away, typing
+    // should jump back to the bottom and resume following. Control shortcuts
+    // (Ctrl+C, Cmd+C, arrows, Escape, …) leave the viewport alone. Capture
+    // phase: xterm cancels (stopPropagation) the keydowns it consumes.
+    e.el.addEventListener(
+      "keydown",
+      (ev) => {
+        if (e.lock && !e.follow && isTypingKey(ev)) scrollToBottomNow(e);
+      },
+      true,
+    );
+    // Pasting inserts text like typing does, but produces no keydown.
+    e.el.addEventListener(
+      "paste",
+      () => {
+        if (e.lock && !e.follow) scrollToBottomNow(e);
+      },
+      true,
+    );
   }
   restoreScrollTop(e);
   const settle = () => {

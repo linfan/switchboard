@@ -9,9 +9,9 @@ import * as terminals from "../net/terminals";
  *
  * A lock-scroll toggle sits at the top-right corner. When the lock is ON
  * (default) auto-follow is "sticky": the user can scroll up to read history,
- * but pressing any key or scrolling back to the bottom resumes following.
- * When the lock is OFF the current stateless behavior applies (no sticky
- * follow).
+ * but typing (or scrolling back to the bottom) resumes following. Control
+ * shortcuts such as Ctrl+C or Cmd+C do not jump back. When the lock is OFF
+ * the current stateless behavior applies (no sticky follow).
  */
 export function TerminalView({
   serviceId,
