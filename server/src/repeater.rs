@@ -49,8 +49,11 @@ use crate::{auth, config::Config, tls, ws};
 
 /// Outbound (repeater→worker) tunnel channel depth.
 const MUX_BUF: usize = 512;
-/// Per-stream inbound (worker→repeater) channel depth.
-const STREAM_BUF: usize = 256;
+/// Per-stream inbound (worker→repeater) channel depth. Sized to absorb a burst
+/// (a replay of the largest byte window, plus live output) without resetting a
+/// stream that is merely a little behind its link. tokio allocates the queue in
+/// 32-slot blocks on demand, so the capacity costs nothing until it is used.
+const STREAM_BUF: usize = 1024;
 /// How long a client request/upgrade waits for a worker to be paired before failing.
 const GRACE: Duration = Duration::from_secs(5);
 /// Interval between app-level tunnel PINGs.
@@ -75,13 +78,22 @@ fn is_stripped_header(name: &str) -> bool {
         || n == "transfer-encoding"
 }
 
+/// One registered stream: the inbound sender plus the label the client opened
+/// it under, so a queue-full reset can name the endpoint (`/ws`, `/forward`,
+/// `GET /api/fs`, …) instead of only its numeric id.
+#[derive(Clone)]
+struct Route {
+    tx: mpsc::Sender<TunnelFrame>,
+    label: Arc<str>,
+}
+
 /// The one worker↔repeater tunnel: a writer channel plus a stream-id → inbound
 /// router so many client interactions multiplex over one WebSocket.
 pub struct Tunnel {
     /// Encoded frames destined for the worker (drained by the writer task).
     tx: mpsc::Sender<Vec<u8>>,
     next_stream: AtomicU64,
-    routes: StdMutex<HashMap<u64, mpsc::Sender<TunnelFrame>>>,
+    routes: StdMutex<HashMap<u64, Route>>,
     /// What the worker announced after auth; `None` for legacy builds that
     /// never send a HELLO.
     caps: Option<WorkerHello>,
@@ -98,9 +110,16 @@ impl Tunnel {
     }
 
     /// Register a per-stream inbound receiver; returns it to the caller.
-    fn register(&self, id: u64) -> mpsc::Receiver<TunnelFrame> {
+    /// `label` names what the client dialed, for queue-full diagnostics.
+    fn register(&self, id: u64, label: impl Into<Arc<str>>) -> mpsc::Receiver<TunnelFrame> {
         let (tx, rx) = mpsc::channel::<TunnelFrame>(STREAM_BUF);
-        self.routes.lock().unwrap().insert(id, tx);
+        self.routes.lock().unwrap().insert(
+            id,
+            Route {
+                tx,
+                label: label.into(),
+            },
+        );
         rx
     }
 
@@ -140,14 +159,15 @@ impl Tunnel {
     /// rebuilds per local connection) — and every other stream keeps flowing.
     fn route(&self, frame: TunnelFrame) {
         let id = frame.stream_id;
-        let tx = self.routes.lock().unwrap().get(&id).cloned();
-        let Some(tx) = tx else { return };
-        match tx.try_send(frame) {
+        let route = self.routes.lock().unwrap().get(&id).cloned();
+        let Some(route) = route else { return };
+        match route.tx.try_send(frame) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(frame)) => {
                 tracing::warn!(
                     stream = frame.stream_id,
                     kind = frame.kind,
+                    uri = %route.label,
                     "stream queue full; resetting the stream"
                 );
                 self.send_lossy(KIND_RST, frame.stream_id);
@@ -349,7 +369,7 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
         return (StatusCode::BAD_GATEWAY, "no worker paired").into_response();
     };
     let id = tunnel.alloc_stream();
-    let mut rx = tunnel.register(id);
+    let mut rx = tunnel.register(id, format!("{method} {path_and_query}"));
     let guard = StreamGuard {
         tunnel: tunnel.clone(),
         id,
@@ -500,7 +520,7 @@ async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
         return;
     };
     let id = tunnel.alloc_stream();
-    let mut rx = tunnel.register(id);
+    let mut rx = tunnel.register(id, uri);
     let guard = StreamGuard {
         tunnel: tunnel.clone(),
         id,
@@ -757,7 +777,7 @@ mod tests {
         };
 
         let stalled = tunnel.alloc_stream();
-        let mut stalled_rx = tunnel.register(stalled);
+        let mut stalled_rx = tunnel.register(stalled, "/ws");
         for _ in 0..STREAM_BUF {
             tunnel.route(TunnelFrame::new(KIND_WS_BIN, stalled, b"x".to_vec()));
         }
@@ -771,7 +791,7 @@ mod tests {
         assert_eq!((reset.kind, reset.stream_id), (KIND_RST, stalled));
 
         let healthy = tunnel.alloc_stream();
-        let mut healthy_rx = tunnel.register(healthy);
+        let mut healthy_rx = tunnel.register(healthy, "/ws");
         tunnel.route(TunnelFrame::control(KIND_WS_CLOSE, healthy));
         assert_eq!(healthy_rx.try_recv().unwrap().stream_id, healthy);
         // The drained-but-abandoned stream's receiver still holds its backlog;

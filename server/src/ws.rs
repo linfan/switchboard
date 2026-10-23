@@ -219,7 +219,16 @@ pub async fn run_session(
         return;
     }
     let mut last_sent: HashMap<String, u64> = HashMap::new();
-    if !replay(&out_tx, &state, &client_id, &cursors, &mut last_sent).await {
+    if !replay(
+        &out_tx,
+        &state,
+        &client_id,
+        "connect",
+        &cursors,
+        &mut last_sent,
+    )
+    .await
+    {
         return;
     }
 
@@ -247,7 +256,18 @@ pub async fn run_session(
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(%client_id, skipped = n, "broadcast lagged; resyncing from store");
                     let from = last_sent.clone();
-                    if !replay(&out_tx, &state, &client_id, &from, &mut last_sent).await { break; }
+                    if !replay(
+                        &out_tx,
+                        &state,
+                        &client_id,
+                        "lagged",
+                        &from,
+                        &mut last_sent,
+                    )
+                    .await
+                    {
+                        break;
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -406,6 +426,7 @@ async fn replay(
     out: &mpsc::Sender<WsOut>,
     state: &SharedState,
     client_id: &str,
+    reason: &'static str,
     cursors: &HashMap<String, u64>,
     last_sent: &mut HashMap<String, u64>,
 ) -> bool {
@@ -416,6 +437,26 @@ async fn replay(
             return true; // keep the connection; live stream may still work
         }
     };
+    // How much backlog this reconnect asked for. A large number here is what
+    // fills the repeater's per-stream queue and resets the stream; logging it at
+    // the start means a flapping client is explainable even when the replay is
+    // cut short before it completes.
+    let backlog_chunks: u64 = tasks
+        .iter()
+        .map(|t| {
+            let after = cursors.get(&t.id).copied().unwrap_or(0);
+            t.last_seq.saturating_sub(after)
+        })
+        .sum();
+    tracing::info!(
+        %client_id,
+        reason,
+        tasks = tasks.len(),
+        backlog_chunks,
+        "replaying backlog"
+    );
+    let mut sent_frames = 0u64;
+    let mut sent_bytes = 0u64;
     for task in &tasks {
         let after = cursors.get(&task.id).copied().unwrap_or(0);
         let _ = state.store.set_cursor(client_id, &task.id, after).await;
@@ -437,7 +478,10 @@ async fn replay(
                 seq: tail,
                 data: screen,
             };
-            if !send_binary(out, frame.encode()).await {
+            let encoded = frame.encode();
+            sent_frames += 1;
+            sent_bytes += encoded.len() as u64;
+            if !send_binary(out, encoded).await {
                 return false;
             }
             last_sent.insert(task.id.clone(), tail);
@@ -448,7 +492,10 @@ async fn replay(
                     seq,
                     data,
                 };
-                if !send_binary(out, frame.encode()).await {
+                let encoded = frame.encode();
+                sent_frames += 1;
+                sent_bytes += encoded.len() as u64;
+                if !send_binary(out, encoded).await {
                     return false;
                 }
                 last_sent.insert(task.id.clone(), seq);
@@ -463,6 +510,13 @@ async fn replay(
             return false;
         }
     }
+    tracing::info!(
+        %client_id,
+        reason,
+        frames = sent_frames,
+        bytes = sent_bytes,
+        "replay complete"
+    );
     true
 }
 

@@ -6,6 +6,7 @@ import {
   ConnectionManager,
   INPUT_BUF_BYTES,
   INPUT_BUF_TTL_MS,
+  STABLE_RESET_MS,
   toWsUrl,
   type WebSocketLike,
 } from "./connection";
@@ -311,6 +312,42 @@ describe("auto-reconnect", () => {
     vi.advanceTimersByTime(1999);
     expect(FakeSocket.instances.length).toBe(count);
     vi.advanceTimersByTime(1);
+    expect(FakeSocket.instances.length).toBe(count + 1);
+    mgr.stop();
+  });
+
+  it("keeps backing off when sessions are cut short before they stabilize", async () => {
+    const { mgr } = mkManager();
+    mgr.start();
+    // Cycle 1: a full session (auth + welcome) that dies at once.
+    await driveSession(FakeSocket.last());
+    FakeSocket.last().emitClose();
+    vi.advanceTimersByTime(1000); // attempt 0 -> base delay
+    // Cycle 2: same again. Auth succeeding must not reset the counter, or a
+    // server that closes every session would be reconnected once a second.
+    await driveSession(FakeSocket.last());
+    FakeSocket.last().emitClose();
+    const count = FakeSocket.instances.length;
+    vi.advanceTimersByTime(1999);
+    expect(FakeSocket.instances.length).toBe(count);
+    vi.advanceTimersByTime(1);
+    expect(FakeSocket.instances.length).toBe(count + 1);
+    mgr.stop();
+  });
+
+  it("resets the backoff once a session has stayed up", async () => {
+    const { mgr } = mkManager();
+    mgr.start();
+    FakeSocket.last().emitOpen();
+    FakeSocket.last().emitClose(); // attempt 0 -> 1s
+    vi.advanceTimersByTime(1000);
+    await driveSession(FakeSocket.last());
+    vi.advanceTimersByTime(STABLE_RESET_MS); // the session is now "healthy"
+    FakeSocket.last().emitClose();
+    const count = FakeSocket.instances.length;
+    vi.advanceTimersByTime(999);
+    expect(FakeSocket.instances.length).toBe(count);
+    vi.advanceTimersByTime(1); // back to the base delay
     expect(FakeSocket.instances.length).toBe(count + 1);
     mgr.stop();
   });

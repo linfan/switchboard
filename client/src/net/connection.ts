@@ -119,6 +119,15 @@ export const DEFAULT_HEARTBEAT: HeartbeatOptions = {
 export const DEFAULT_HANDSHAKE: HandshakeOptions = { timeoutMs: 10000 };
 const DEFAULT_WAKE: WakeOptions = { checkMs: 2000, driftMs: 5000 };
 
+/**
+ * How long a session must stay up before it counts as healthy and resets the
+ * reconnect backoff. Auth alone is not enough: a server (or repeater) that
+ * closes every session shortly after it starts would otherwise reset the delay
+ * each cycle and reconnect once a second forever. A short-lived session keeps
+ * the counter, so repeated server-side resets back off instead of flapping.
+ */
+export const STABLE_RESET_MS = 10_000;
+
 const WS_OPEN = 1;
 
 /**
@@ -179,6 +188,7 @@ export class ConnectionManager {
   private droppedInputBytes = 0;
 
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -350,6 +360,9 @@ export class ConnectionManager {
     if (msg.type === "welcome" && !this.welcomed) {
       this.welcomed = true;
       this.setStatus("online");
+      // The session is established; if it survives to the deadline the next
+      // drop starts a fresh backoff, otherwise the counter keeps growing.
+      this.armStableReset();
     }
     this.d.onMessage(msg as unknown as ServerMsg);
   }
@@ -399,13 +412,12 @@ export class ConnectionManager {
     this.clearHandshakeWatchdog();
     this.authed = true;
     this.welcomed = false;
-    this.attempt = 0;
     // Transport is authed but the session is not established yet: `welcome`
     // (which only arrives through a paired worker) is what promotes us to
     // "online". A repeater with no worker auths the client then closes after
     // its GRACE timeout — reporting "online" here would flash a false
     // "Connected" every cycle.
-    this.setStatus("connecting", { attempt: 0 });
+    this.setStatus("connecting", { attempt: this.attempt });
     // Re-issue Hello with the freshest cursors so the server replays only what
     // we have not durably applied.
     this.send({
@@ -459,6 +471,23 @@ export class ConnectionManager {
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+  }
+
+  // --- backoff reset ------------------------------------------------------
+
+  private armStableReset(): void {
+    this.clearStableReset();
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = null;
+      this.attempt = 0;
+    }, STABLE_RESET_MS);
+  }
+
+  private clearStableReset(): void {
+    if (this.stableTimer !== null) {
+      clearTimeout(this.stableTimer);
+      this.stableTimer = null;
     }
   }
 
@@ -604,6 +633,7 @@ export class ConnectionManager {
     this.authed = false;
     this.welcomed = false;
     this.clearHandshakeWatchdog();
+    this.clearStableReset();
     if (this.ws) {
       this.ws.onopen = null;
       this.ws.onclose = null;
