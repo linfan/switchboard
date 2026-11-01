@@ -54,25 +54,27 @@ interface Entry {
   lockListeners: Set<(locked: boolean) => void>;
   serviceId: string;
   taskId: string;
-  /**
-   * `performance.now()` of the last user scroll input (wheel, touch, scrollbar
-   * drag). xterm emits DOM scroll events of its own while it reflows or syncs
-   * the scrollbar, so a scroll event only means "the user moved the viewport"
-   * while this is recent.
-   */
-  userScrollAt: number;
   /** True while the native scrollbar thumb is being dragged. */
   scrollbarDrag: boolean;
+  /** `performance.now()` of the last touch gesture, which scrolls the DOM. */
+  touchAt: number;
   /** Sub-line pixel remainder of pixel-mode wheel deltas. */
   wheelPx: number;
   /**
-   * Deadline until which a just-resized terminal keeps re-pinning itself to
-   * the last line. xterm's viewport catches up asynchronously after a reflow
-   * and can briefly write a stale scrollTop, which otherwise strands the view
-   * one line above the bottom.
+   * Deadline until which a just-resized terminal keeps holding a viewport
+   * position. xterm's reflow catches up asynchronously and its viewport can
+   * look at the old DOM offset as a user scroll, so the position has to be
+   * re-asserted for a short window after every grid change.
    */
-  repinUntil: number;
-  repinRaf: number | null;
+  settleUntil: number;
+  settleRaf: number | null;
+  /**
+   * Position to hold while settling, as an absolute buffer line.
+   * `null` means "the last line", which is what a following terminal wants; a
+   * number freezes a scrolled-up view so a resize and the repaint that follows
+   * it do not drag the user through the new output.
+   */
+  settleY: number | null;
 }
 
 const entries = new Map<string, Entry>();
@@ -99,6 +101,8 @@ function followFromBuffer(e: Entry): void {
 function scrollToBottomNow(e: Entry): void {
   e.term.scrollToBottom();
   e.wheelPx = 0;
+  // An explicit jump overrides any resize anchor still being held.
+  e.settleY = null;
   setFollow(e, true);
 }
 
@@ -117,14 +121,9 @@ function isTypingKey(ev: KeyboardEvent): boolean {
   return ev.key === "Enter" || ev.key === "Backspace" || ev.key === "Tab";
 }
 
-/** Mark the current scroll stream as user-initiated and stop any resize pin. */
+/** User scroll input wins over an in-flight resize anchor. */
 function markUserScroll(e: Entry): void {
-  e.userScrollAt = now();
-  e.repinUntil = 0;
-  if (e.repinRaf !== null) {
-    cancelAnimationFrame(e.repinRaf);
-    e.repinRaf = null;
-  }
+  cancelSettle(e);
 }
 
 /** The element xterm scrolls; absent until `Terminal.open` has run. */
@@ -150,36 +149,82 @@ function domAtBottom(vp: HTMLElement): boolean {
  *
  * A following terminal wants a maxed-out scroller, which is exact and needs no
  * memory; otherwise fall back to the offset the last scroll event recorded.
+ * Whether it follows is read from xterm's buffer, not the (possibly stale)
+ * `follow` flag — a suppressed scroll can leave that flag behind.
  */
 function restoreScrollTop(e: Entry): void {
   const vp = viewportEl(e);
-  if (vp) vp.scrollTop = e.follow ? vp.scrollHeight : e.scrollTop;
+  if (!vp) return;
+  const b = e.term.buffer.active;
+  vp.scrollTop = b.viewportY >= b.baseY ? vp.scrollHeight : e.scrollTop;
+}
+
+/** Whether xterm's viewport is riding the last line. */
+function atBottom(e: Entry): boolean {
+  const b = e.term.buffer.active;
+  return b.viewportY >= b.baseY;
+}
+
+/** Whether the buffer sits where the active settle target wants it. */
+function settleSatisfied(e: Entry): boolean {
+  const b = e.term.buffer.active;
+  return e.settleY === null || e.settleY >= b.baseY
+    ? b.viewportY >= b.baseY
+    : b.viewportY === e.settleY;
+}
+
+/** Move the viewport to the position the current settle target describes. */
+function enforceSettle(e: Entry): void {
+  const b = e.term.buffer.active;
+  if (e.settleY === null || e.settleY >= b.baseY) {
+    if (b.viewportY < b.baseY) scrollToBottomNow(e);
+    else setFollow(e, true);
+    return;
+  }
+  if (b.viewportY !== e.settleY) e.term.scrollLines(e.settleY - b.viewportY);
+}
+
+function cancelSettle(e: Entry): void {
+  e.settleUntil = 0;
+  e.settleY = null;
+  if (e.settleRaf !== null) {
+    cancelAnimationFrame(e.settleRaf);
+    e.settleRaf = null;
+  }
 }
 
 /**
- * Re-pin a following terminal after its grid was resized/reflowed.
+ * Hold a viewport position across a grid change.
  *
- * `fit()` changes rows/columns synchronously, but xterm finishes reflowing the
- * buffer and syncing the scrollbar over the following frames. Its late viewport
- * write can land one row short of `baseY` (and be misread as a user scroll),
- * leaving the view stuck just above the last line. Pinning now and on every
- * frame for a short grace period keeps the viewport on the last line no matter
- * how those async syncs interleave.
+ * `fit()` reflows the buffer synchronously, but xterm finishes syncing its
+ * scroll area over the following frames. Meanwhile the browser clamps the DOM
+ * scroller as the viewport height changes, and xterm treats the resulting
+ * scroll event as a *user* scroll — with a large scrollback that can fling the
+ * view toward the top, from where auto-follow crawls back down line by line as
+ * output arrives. Re-asserting the position in the same task as the fit (and
+ * on every frame for a short grace period) keeps the resize from moving the
+ * view at all: a following terminal stays on the last line, and a scrolled-up
+ * terminal stays where xterm's reflow put it while the repaint streams past.
+ *
+ * `holdY` is xterm's post-reflow viewport line, or null to ride the last line;
+ * a holdY at or past the last line also means "follow the bottom", so a view
+ * that reflow leaves at the end of the buffer simply stays there.
  */
-function pinAfterResize(e: Entry): void {
-  scrollToBottomNow(e);
-  e.repinUntil = now() + 500;
-  if (e.repinRaf !== null) return;
+function beginSettle(e: Entry, holdY: number | null): void {
+  e.settleY = holdY;
+  e.settleUntil = now() + 500;
+  enforceSettle(e);
+  if (e.settleRaf !== null) return;
   const step = () => {
-    e.repinRaf = null;
-    if (e.repinUntil === 0 || now() >= e.repinUntil) return;
-    const b = e.term.buffer.active;
-    if (now() - e.userScrollAt > 300 && b.viewportY < b.baseY) {
-      e.term.scrollToBottom();
+    e.settleRaf = null;
+    if (e.settleUntil === 0 || now() >= e.settleUntil) {
+      cancelSettle(e);
+      return;
     }
-    e.repinRaf = requestAnimationFrame(step);
+    enforceSettle(e);
+    e.settleRaf = requestAnimationFrame(step);
   };
-  e.repinRaf = requestAnimationFrame(step);
+  e.settleRaf = requestAnimationFrame(step);
 }
 
 /**
@@ -214,6 +259,9 @@ function handleWheel(e: Entry, ev: WheelEvent): void {
   ev.preventDefault();
   ev.stopPropagation();
   markUserScroll(e);
+  // A wheel event is not a DOM gesture; clear the touch marker so its own
+  // scroll echoes are never mistaken for one.
+  e.touchAt = 0;
 
   const opts = e.term.options;
   const modifier = opts.fastScrollModifier;
@@ -245,8 +293,22 @@ function handleWheel(e: Entry, ev: WheelEvent): void {
 }
 
 /**
- * A scroll event on the viewport. xterm handles the event first, so its
- * `viewportY` is already up to date for a genuine user scroll.
+ * A scroll event on the viewport. xterm's own listener runs first, so for a
+ * DOM gesture its `viewportY` is already up to date by the time this runs.
+ *
+ * Scroll events come from two very different sources, and conflating them is
+ * what breaks the viewport:
+ *
+ * - a DOM gesture — scrollbar drag or touch — which moved `scrollTop` and which
+ *   xterm translated into a buffer scroll;
+ * - an echo of xterm writing `scrollTop` itself (reflow, the async sync after
+ *   `scrollLines`, or the browser clamping it when the viewport shrinks).
+ *
+ * Wheel input never takes the DOM path (see `handleWheel`), so its echoes must
+ * not be read as "the user is at the bottom now": at the last line the browser
+ * still reports the old, maxed-out offset for a frame, and adopting that would
+ * silently undo the wheel notch. Only gestures may adopt the bottom; echoes are
+ * judged against xterm's buffer, which is the source of truth.
  */
 function handleViewportScroll(e: Entry, vp: HTMLElement): void {
   // React removes our element before TerminalView's cleanup runs, so a scroll
@@ -254,26 +316,35 @@ function handleViewportScroll(e: Entry, vp: HTMLElement): void {
   e.scrollTop = vp.scrollTop;
   const b = e.term.buffer.active;
 
-  if (domAtBottom(vp)) {
-    // Reached the end of the scrollback. If xterm did not follow — its
-    // viewport handler ignores the scroll event that follows its own
-    // programmatic write, and a user gesture can coalesce into it — adopt the
-    // bottom explicitly so the viewport is not left one line short.
-    if (b.viewportY < b.baseY) e.term.scrollLines(b.baseY - b.viewportY);
+  if (e.scrollbarDrag || now() - e.touchAt < 300) {
+    if (domAtBottom(vp)) {
+      // Rounding can leave xterm a row short of the DOM bottom; adopt it so
+      // the scrollbar's end really is the last line.
+      if (b.viewportY < b.baseY) e.term.scrollLines(b.baseY - b.viewportY);
+      setFollow(e, true);
+    } else {
+      followFromBuffer(e);
+    }
+    return;
+  }
+
+  // A resize is in flight: hold the target position and ignore the offsets
+  // xterm's reflow writes along the way.
+  if (e.settleUntil > now()) {
+    enforceSettle(e);
+    return;
+  }
+
+  if (b.viewportY >= b.baseY) {
+    // Nothing moved the view away from the last line; keep following even if
+    // xterm swallowed the scroll notification.
     setFollow(e, true);
     return;
   }
 
-  if (e.scrollbarDrag || now() - e.userScrollAt < 300) {
-    followFromBuffer(e);
-    return;
-  }
-
-  // xterm's reflow/sync wrote scrollTop on its own. A following terminal must
-  // not be nudged off the last line by that (see pinAfterResize).
-  if (e.repinUntil > now() && b.viewportY < b.baseY) {
-    e.term.scrollToBottom();
-  }
+  // xterm wrote a stale offset while we believe we are following (a clamp
+  // misread as a user scroll). Repair it instead of silently ending follow.
+  if (e.follow) e.term.scrollToBottom();
 }
 
 /** Font size (px) applied to every terminal, adjustable via the zoom shortcuts.
@@ -328,11 +399,12 @@ function ensure(serviceId: string, taskId: string): Entry {
     followListeners: new Set(),
     lock: true,
     lockListeners: new Set(),
-    userScrollAt: 0,
     scrollbarDrag: false,
+    touchAt: 0,
     wheelPx: 0,
-    repinUntil: 0,
-    repinRaf: null,
+    settleUntil: 0,
+    settleRaf: null,
+    settleY: null,
     serviceId,
     taskId,
   };
@@ -353,11 +425,16 @@ export function write(serviceId: string, taskId: string, frame: Frame): void {
   } else if (frame.kind === "output") {
     // xterm auto-follows new lines whenever its own `isUserScrolling` flag is
     // clear, so no scroll is needed here. Only repair a following terminal
-    // whose viewport was left above the last line by a reflow race.
+    // whose viewport was left above the last line by a reflow race. The buffer
+    // is the truth: if it sits on the last line, follow regardless of a flag
+    // that a swallowed scroll event may have left behind.
     e.term.write(frame.data, () => {
-      if (!e.follow) return;
       const b = e.term.buffer.active;
-      if (b.viewportY < b.baseY) scrollToBottomNow(e);
+      if (b.viewportY >= b.baseY) {
+        setFollow(e, true);
+      } else if (e.follow) {
+        scrollToBottomNow(e);
+      }
     });
   }
 }
@@ -447,8 +524,12 @@ export function attach(
     e.term.open(e.el);
     e.opened = true;
     // Keyboard/selection scrolling goes through xterm's public `scrollLines`,
-    // which fires onScroll with the new buffer position.
-    e.term.onScroll(() => followFromBuffer(e));
+    // which fires onScroll with the new buffer position. A buffer move that is
+    // not the one the settle is holding means the user took over; drop it.
+    e.term.onScroll(() => {
+      if (e.settleUntil > now() && !settleSatisfied(e)) cancelSettle(e);
+      followFromBuffer(e);
+    });
 
     const vp = viewportEl(e);
     vp?.addEventListener("scroll", () => handleViewportScroll(e, vp));
@@ -470,12 +551,22 @@ export function attach(
       capture: true,
       passive: false,
     });
-    e.el.addEventListener("touchstart", () => markUserScroll(e), {
-      passive: true,
-    });
-    e.el.addEventListener("touchmove", () => markUserScroll(e), {
-      passive: true,
-    });
+    e.el.addEventListener(
+      "touchstart",
+      () => {
+        e.touchAt = now();
+        markUserScroll(e);
+      },
+      { passive: true },
+    );
+    e.el.addEventListener(
+      "touchmove",
+      () => {
+        e.touchAt = now();
+        markUserScroll(e);
+      },
+      { passive: true },
+    );
     // When the auto-follow lock is on and the user has scrolled away, typing
     // should jump back to the bottom and resume following. Control shortcuts
     // (Ctrl+C, Cmd+C, arrows, Escape, …) leave the viewport alone. Capture
@@ -498,7 +589,9 @@ export function attach(
   }
   restoreScrollTop(e);
   const settle = () => {
-    const wasFollowing = e.follow;
+    // Decide from xterm's buffer, not the flag: a suppressed scroll can leave
+    // `follow` stale, and a drag can call this several times in a row.
+    const following = atBottom(e);
     try {
       e.fit.fit();
     } catch {
@@ -509,7 +602,7 @@ export function attach(
     // over old on re-attach. A full refresh clears that; a plain fit does not
     // when the geometry is unchanged.
     e.term.refresh(0, e.term.rows - 1);
-    if (wasFollowing) pinAfterResize(e);
+    beginSettle(e, following ? null : e.term.buffer.active.viewportY);
   };
   // Defer the first fit until the host has a measured size.
   requestAnimationFrame(() => {
@@ -532,15 +625,19 @@ export function detach(serviceId: string, taskId: string): void {
 export function refit(serviceId: string, taskId: string): void {
   const e = entries.get(convKey(serviceId, taskId));
   if (!e?.opened) return;
-  const wasFollowing = e.follow;
+  // `follow` is the user's intent; the buffer can already have been nudged by
+  // the resize's own scroll clamping before this runs. A following terminal is
+  // pinned to the last line, a scrolled-up one holds whatever xterm's reflow
+  // leaves visible.
+  const following = e.follow;
   try {
     e.fit.fit();
   } catch {
     // ignore
   }
-  // fit() reflows the buffer asynchronously; re-pin so a resize never strands
-  // the viewport a row above live output.
-  if (wasFollowing) pinAfterResize(e);
+  // Reflow and the browser's scroll clamping run async and can be mistaken for
+  // user scrolls; hold the position across them.
+  beginSettle(e, following ? null : e.term.buffer.active.viewportY);
 }
 
 /**
@@ -551,7 +648,7 @@ export function refit(serviceId: string, taskId: string): void {
 export function setFontSize(size: number): void {
   fontSize = size;
   for (const e of entries.values()) {
-    const wasFollowing = e.follow;
+    const following = e.follow;
     e.term.options.fontSize = size;
     if (!e.opened) continue;
     try {
@@ -560,7 +657,7 @@ export function setFontSize(size: number): void {
       // ignore transient zero-size measurements
     }
     e.term.refresh(0, e.term.rows - 1);
-    if (wasFollowing) pinAfterResize(e);
+    beginSettle(e, following ? null : e.term.buffer.active.viewportY);
   }
 }
 
@@ -586,7 +683,7 @@ export function dispose(serviceId: string, taskId: string): void {
   const e = entries.get(key);
   if (!e) return;
   detach(serviceId, taskId);
-  if (e.repinRaf !== null) cancelAnimationFrame(e.repinRaf);
+  cancelSettle(e);
   e.term.dispose();
   entries.delete(key);
 }
