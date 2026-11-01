@@ -54,25 +54,23 @@ interface Entry {
   lockListeners: Set<(locked: boolean) => void>;
   serviceId: string;
   taskId: string;
-  /**
-   * `performance.now()` of the last user scroll input (wheel, touch, scrollbar
-   * drag). xterm emits DOM scroll events of its own while it reflows or syncs
-   * the scrollbar, so a scroll event only means "the user moved the viewport"
-   * while this is recent.
-   */
-  userScrollAt: number;
+  /** Last native scrollbar/touch input; wheel uses xterm's buffer API instead. */
+  nativeScrollAt: number;
   /** True while the native scrollbar thumb is being dragged. */
   scrollbarDrag: boolean;
   /** Sub-line pixel remainder of pixel-mode wheel deltas. */
   wheelPx: number;
-  /**
-   * Deadline until which a just-resized terminal keeps re-pinning itself to
-   * the last line. xterm's viewport catches up asynchronously after a reflow
-   * and can briefly write a stale scrollTop, which otherwise strands the view
-   * one line above the bottom.
-   */
-  repinUntil: number;
-  repinRaf: number | null;
+  /** Last buffer position not produced by a resize transient. */
+  stableY: number;
+  resizeRestore: ResizeRestore | null;
+}
+
+interface ResizeRestore {
+  following: boolean;
+  distanceFromBottom: number;
+  targetY: number | null;
+  framesRemaining: number;
+  raf: number | null;
 }
 
 const entries = new Map<string, Entry>();
@@ -98,8 +96,15 @@ function followFromBuffer(e: Entry): void {
  *  flag, so subsequent output keeps following. */
 function scrollToBottomNow(e: Entry): void {
   e.term.scrollToBottom();
+  syncViewportTop(e);
+  e.stableY = e.term.buffer.active.viewportY;
   e.wheelPx = 0;
   setFollow(e, true);
+}
+
+function jumpToBottom(e: Entry): void {
+  cancelResizeRestore(e);
+  scrollToBottomNow(e);
 }
 
 /**
@@ -117,14 +122,10 @@ function isTypingKey(ev: KeyboardEvent): boolean {
   return ev.key === "Enter" || ev.key === "Backspace" || ev.key === "Tab";
 }
 
-/** Mark the current scroll stream as user-initiated and stop any resize pin. */
-function markUserScroll(e: Entry): void {
-  e.userScrollAt = now();
-  e.repinUntil = 0;
-  if (e.repinRaf !== null) {
-    cancelAnimationFrame(e.repinRaf);
-    e.repinRaf = null;
-  }
+/** User input wins over an in-flight resize restoration. */
+function markUserScroll(e: Entry, native = false): void {
+  e.nativeScrollAt = native ? now() : 0;
+  cancelResizeRestore(e);
 }
 
 /** The element xterm scrolls; absent until `Terminal.open` has run. */
@@ -156,30 +157,91 @@ function restoreScrollTop(e: Entry): void {
   if (vp) vp.scrollTop = e.follow ? vp.scrollHeight : e.scrollTop;
 }
 
-/**
- * Re-pin a following terminal after its grid was resized/reflowed.
- *
- * `fit()` changes rows/columns synchronously, but xterm finishes reflowing the
- * buffer and syncing the scrollbar over the following frames. Its late viewport
- * write can land one row short of `baseY` (and be misread as a user scroll),
- * leaving the view stuck just above the last line. Pinning now and on every
- * frame for a short grace period keeps the viewport on the last line no matter
- * how those async syncs interleave.
- */
-function pinAfterResize(e: Entry): void {
-  scrollToBottomNow(e);
-  e.repinUntil = now() + 500;
-  if (e.repinRaf !== null) return;
-  const step = () => {
-    e.repinRaf = null;
-    if (e.repinUntil === 0 || now() >= e.repinUntil) return;
-    const b = e.term.buffer.active;
-    if (now() - e.userScrollAt > 300 && b.viewportY < b.baseY) {
-      e.term.scrollToBottom();
-    }
-    e.repinRaf = requestAnimationFrame(step);
+function rowHeight(e: Entry): number {
+  const screen = e.el.querySelector<HTMLElement>(".xterm-screen");
+  return screen && e.term.rows > 0
+    ? screen.getBoundingClientRect().height / e.term.rows
+    : 0;
+}
+
+/** Match the DOM to the buffer in the same task, before a stale scroll event. */
+function syncViewportTop(e: Entry): void {
+  const vp = viewportEl(e);
+  const height = rowHeight(e);
+  if (!vp || !(height > 0)) return;
+  const max = Math.max(0, vp.scrollHeight - vp.clientHeight);
+  const target = e.term.buffer.active.viewportY * height;
+  vp.scrollTop = Math.max(0, Math.min(target, max));
+  e.scrollTop = vp.scrollTop;
+}
+
+function cancelResizeRestore(e: Entry): void {
+  const restore = e.resizeRestore;
+  if (restore?.raf !== null && restore?.raf !== undefined) {
+    cancelAnimationFrame(restore.raf);
+  }
+  e.resizeRestore = null;
+}
+
+function restoreViewport(e: Entry): void {
+  const restore = e.resizeRestore;
+  if (!restore) return;
+  const b = e.term.buffer.active;
+  if (!restore.following && restore.targetY === null) {
+    restore.targetY = Math.max(0, b.baseY - restore.distanceFromBottom);
+  }
+  const target = restore.following ? b.baseY : restore.targetY!;
+  e.term.scrollToLine(target);
+  syncViewportTop(e);
+  setFollow(e, target >= b.baseY);
+}
+
+function fitAndRestore(e: Entry, force = false): void {
+  let dims: ReturnType<FitAddon["proposeDimensions"]>;
+  try {
+    dims = e.fit.proposeDimensions();
+  } catch {
+    return;
+  }
+  if (!dims) return;
+  if (!force && dims.cols === e.term.cols && dims.rows === e.term.rows) {
+    return;
+  }
+
+  const b = e.term.buffer.active;
+  const stableY = Math.max(0, Math.min(e.stableY, b.baseY));
+  const previousRestore = e.resizeRestore;
+  const anchorY = previousRestore?.targetY ?? stableY;
+  cancelResizeRestore(e);
+  const restore: ResizeRestore = {
+    following: previousRestore?.following ?? e.follow,
+    distanceFromBottom: b.baseY - anchorY,
+    targetY: null,
+    framesRemaining: 2,
+    raf: null,
   };
-  e.repinRaf = requestAnimationFrame(step);
+  e.resizeRestore = restore;
+  try {
+    e.fit.fit();
+  } catch {
+    cancelResizeRestore(e);
+    return;
+  }
+  restoreViewport(e);
+
+  const step = () => {
+    if (e.resizeRestore !== restore) return;
+    restore.raf = null;
+    restoreViewport(e);
+    restore.framesRemaining--;
+    if (restore.framesRemaining === 0) {
+      e.stableY = e.term.buffer.active.viewportY;
+      e.resizeRestore = null;
+      return;
+    }
+    restore.raf = requestAnimationFrame(step);
+  };
+  restore.raf = requestAnimationFrame(step);
 }
 
 /**
@@ -204,12 +266,8 @@ function handleWheel(e: Entry, ev: WheelEvent): void {
   if (ev.deltaY === 0 || ev.shiftKey || ev.ctrlKey || ev.metaKey) return;
   if (e.term.buffer.active.type === "alternate") return;
   if (e.term.modes.mouseTrackingMode !== "none") return;
-  const screen = e.el.querySelector<HTMLElement>(".xterm-screen");
-  const rowHeight =
-    screen && e.term.rows > 0
-      ? screen.getBoundingClientRect().height / e.term.rows
-      : 0;
-  if (!(rowHeight > 0)) return;
+  const height = rowHeight(e);
+  if (!(height > 0)) return;
 
   ev.preventDefault();
   ev.stopPropagation();
@@ -235,11 +293,12 @@ function handleWheel(e: Entry, ev: WheelEvent): void {
   } else {
     // Pixel deltas from trackpads arrive in fractions of a row; accumulate.
     e.wheelPx += ev.deltaY * speed;
-    lines = Math.trunc(e.wheelPx / rowHeight);
-    if (lines !== 0) e.wheelPx -= lines * rowHeight;
+    lines = Math.trunc(e.wheelPx / height);
+    if (lines !== 0) e.wheelPx -= lines * height;
   }
   if (lines !== 0) {
     e.term.scrollLines(lines);
+    syncViewportTop(e);
     followFromBuffer(e);
   }
 }
@@ -252,28 +311,21 @@ function handleViewportScroll(e: Entry, vp: HTMLElement): void {
   // React removes our element before TerminalView's cleanup runs, so a scroll
   // event is the only moment the live offset can be noted.
   e.scrollTop = vp.scrollTop;
+  const nativeGesture =
+    e.scrollbarDrag || (e.nativeScrollAt > 0 && now() - e.nativeScrollAt < 300);
+  if (!nativeGesture) return;
+
   const b = e.term.buffer.active;
-
   if (domAtBottom(vp)) {
-    // Reached the end of the scrollback. If xterm did not follow — its
-    // viewport handler ignores the scroll event that follows its own
-    // programmatic write, and a user gesture can coalesce into it — adopt the
-    // bottom explicitly so the viewport is not left one line short.
-    if (b.viewportY < b.baseY) e.term.scrollLines(b.baseY - b.viewportY);
+    if (b.viewportY < b.baseY) {
+      e.term.scrollLines(b.baseY - b.viewportY);
+      syncViewportTop(e);
+    }
     setFollow(e, true);
-    return;
-  }
-
-  if (e.scrollbarDrag || now() - e.userScrollAt < 300) {
+  } else {
     followFromBuffer(e);
-    return;
   }
-
-  // xterm's reflow/sync wrote scrollTop on its own. A following terminal must
-  // not be nudged off the last line by that (see pinAfterResize).
-  if (e.repinUntil > now() && b.viewportY < b.baseY) {
-    e.term.scrollToBottom();
-  }
+  e.stableY = b.viewportY;
 }
 
 /** Font size (px) applied to every terminal, adjustable via the zoom shortcuts.
@@ -328,11 +380,11 @@ function ensure(serviceId: string, taskId: string): Entry {
     followListeners: new Set(),
     lock: true,
     lockListeners: new Set(),
-    userScrollAt: 0,
+    nativeScrollAt: 0,
     scrollbarDrag: false,
     wheelPx: 0,
-    repinUntil: 0,
-    repinRaf: null,
+    stableY: 0,
+    resizeRestore: null,
     serviceId,
     taskId,
   };
@@ -346,6 +398,7 @@ export function write(serviceId: string, taskId: string, frame: Frame): void {
   if (frame.kind === "snapshot") {
     // A snapshot is an authoritative full-screen redraw: clear, then paint. It
     // reconstructs the *current* screen, so always land the viewport on it.
+    cancelResizeRestore(e);
     e.term.reset();
     e.term.write(frame.data, () => {
       scrollToBottomNow(e);
@@ -421,7 +474,7 @@ export function toggleLock(serviceId: string, taskId: string): void {
   e.lock = !e.lock;
   if (e.lock) {
     // Enabling lock while scrolled away: jump to bottom immediately.
-    scrollToBottomNow(e);
+    jumpToBottom(e);
     e.term.focus();
   }
   for (const cb of e.lockListeners) cb(e.lock);
@@ -431,7 +484,7 @@ export function toggleLock(serviceId: string, taskId: string): void {
 export function scrollToBottom(serviceId: string, taskId: string): void {
   const e = entries.get(convKey(serviceId, taskId));
   if (!e) return;
-  scrollToBottomNow(e);
+  jumpToBottom(e);
   e.term.focus();
 }
 
@@ -448,7 +501,11 @@ export function attach(
     e.opened = true;
     // Keyboard/selection scrolling goes through xterm's public `scrollLines`,
     // which fires onScroll with the new buffer position.
-    e.term.onScroll(() => followFromBuffer(e));
+    e.term.onScroll(() => {
+      if (e.resizeRestore) return;
+      e.stableY = e.term.buffer.active.viewportY;
+      followFromBuffer(e);
+    });
 
     const vp = viewportEl(e);
     vp?.addEventListener("scroll", () => handleViewportScroll(e, vp));
@@ -457,9 +514,10 @@ export function attach(
     vp?.addEventListener("mousedown", (ev: MouseEvent) => {
       if (ev.button !== 0) return;
       e.scrollbarDrag = true;
-      markUserScroll(e);
+      markUserScroll(e, true);
       const up = () => {
         e.scrollbarDrag = false;
+        markUserScroll(e, true);
         window.removeEventListener("mouseup", up);
       };
       window.addEventListener("mouseup", up);
@@ -470,10 +528,13 @@ export function attach(
       capture: true,
       passive: false,
     });
-    e.el.addEventListener("touchstart", () => markUserScroll(e), {
+    e.el.addEventListener("touchstart", () => markUserScroll(e, true), {
       passive: true,
     });
-    e.el.addEventListener("touchmove", () => markUserScroll(e), {
+    e.el.addEventListener("touchmove", () => markUserScroll(e, true), {
+      passive: true,
+    });
+    e.el.addEventListener("touchend", () => markUserScroll(e, true), {
       passive: true,
     });
     // When the auto-follow lock is on and the user has scrolled away, typing
@@ -483,7 +544,7 @@ export function attach(
     e.el.addEventListener(
       "keydown",
       (ev) => {
-        if (e.lock && !e.follow && isTypingKey(ev)) scrollToBottomNow(e);
+        if (e.lock && !e.follow && isTypingKey(ev)) jumpToBottom(e);
       },
       true,
     );
@@ -491,25 +552,19 @@ export function attach(
     e.el.addEventListener(
       "paste",
       () => {
-        if (e.lock && !e.follow) scrollToBottomNow(e);
+        if (e.lock && !e.follow) jumpToBottom(e);
       },
       true,
     );
   }
   restoreScrollTop(e);
   const settle = () => {
-    const wasFollowing = e.follow;
-    try {
-      e.fit.fit();
-    } catch {
-      // ignore transient zero-size measurements
-    }
+    fitAndRestore(e);
     // Repaint every row: output written while this terminal was detached (a
     // background task) can leave the renderer's grid stale, drawing new content
     // over old on re-attach. A full refresh clears that; a plain fit does not
     // when the geometry is unchanged.
     e.term.refresh(0, e.term.rows - 1);
-    if (wasFollowing) pinAfterResize(e);
   };
   // Defer the first fit until the host has a measured size.
   requestAnimationFrame(() => {
@@ -525,22 +580,16 @@ export function attach(
 /** Detach the terminal's element without destroying it (scrollback survives). */
 export function detach(serviceId: string, taskId: string): void {
   const e = entries.get(convKey(serviceId, taskId));
-  if (e?.el.parentElement) e.el.parentElement.removeChild(e.el);
+  if (!e) return;
+  cancelResizeRestore(e);
+  if (e.el.parentElement) e.el.parentElement.removeChild(e.el);
 }
 
 /** Refit the currently mounted terminal (call on container resize). */
 export function refit(serviceId: string, taskId: string): void {
   const e = entries.get(convKey(serviceId, taskId));
   if (!e?.opened) return;
-  const wasFollowing = e.follow;
-  try {
-    e.fit.fit();
-  } catch {
-    // ignore
-  }
-  // fit() reflows the buffer asynchronously; re-pin so a resize never strands
-  // the viewport a row above live output.
-  if (wasFollowing) pinAfterResize(e);
+  fitAndRestore(e);
 }
 
 /**
@@ -551,16 +600,10 @@ export function refit(serviceId: string, taskId: string): void {
 export function setFontSize(size: number): void {
   fontSize = size;
   for (const e of entries.values()) {
-    const wasFollowing = e.follow;
     e.term.options.fontSize = size;
     if (!e.opened) continue;
-    try {
-      e.fit.fit();
-    } catch {
-      // ignore transient zero-size measurements
-    }
+    fitAndRestore(e, true);
     e.term.refresh(0, e.term.rows - 1);
-    if (wasFollowing) pinAfterResize(e);
   }
 }
 
@@ -586,7 +629,6 @@ export function dispose(serviceId: string, taskId: string): void {
   const e = entries.get(key);
   if (!e) return;
   detach(serviceId, taskId);
-  if (e.repinRaf !== null) cancelAnimationFrame(e.repinRaf);
   e.term.dispose();
   entries.delete(key);
 }
