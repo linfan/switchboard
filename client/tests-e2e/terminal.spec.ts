@@ -2,6 +2,17 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { HTTP, TOKEN } from "./constants";
 
+interface TerminalProbe {
+  active: boolean;
+  topSamples: number[];
+  scrollEvents: number;
+  mutations: number;
+  resizeCallbacks: number;
+  resizeMessages: number;
+}
+
+type ProbeWindow = Window & { __terminalProbe?: TerminalProbe };
+
 // Create a workspace (name + a real server folder) so tasks have a home. Tasks
 // inherit its folder, so the New-task dialog no longer prompts for one.
 async function addWorkspace(page: Page, name: string) {
@@ -34,6 +45,35 @@ async function reconnect(page: Page) {
   await page.locator(".service__head").hover();
   await page.getByTitle("Service actions").click();
   await page.getByRole("menuitem", { name: "Reconnect now" }).click();
+}
+
+async function createTerminalTask(page: Page, title: string) {
+  const uniqueTitle = `${title}-${Date.now()}-${test.info().repeatEachIndex}`;
+  await page.goto("/");
+  await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
+  await addWorkspace(page, "proj");
+  await openNewTask(page, "proj");
+  const dialog = page.getByRole("dialog", { name: "New task" });
+  await dialog.getByLabel("Title (optional)").fill(uniqueTitle);
+  await dialog.getByRole("button", { name: "Create" }).click();
+  const conv = page.locator(".conv", { hasText: uniqueTitle });
+  await expect(conv).toBeVisible({ timeout: 15000 });
+  await conv.click();
+  await expect(page.locator(".xterm-rows")).toContainText("AGENT-READY", {
+    timeout: 15000,
+  });
+}
+
+async function fillScrollback(page: Page, count = 120) {
+  const rows = page.locator(".xterm-rows");
+  await page.locator(".xterm-screen").click();
+  await page.keyboard.type(
+    Array.from({ length: count }, (_, i) => `filler${i}`).join("\n") + "\n",
+    { delay: 1 },
+  );
+  await expect(rows).toContainText(`reply:filler${count - 1}`, {
+    timeout: 20000,
+  });
 }
 
 // Seed a registered service into localStorage before the app boots, so the
@@ -396,6 +436,202 @@ test("resizing keeps a following terminal pinned to the latest output", async ({
     await expect(jump).toHaveClass(/term-jump--locked/);
     await expect(jump).not.toHaveClass(/term-jump--alert/);
     await expect(rows).toContainText(last);
+  }
+});
+
+test("a wheel-up is not undone by a pending bottom scroll echo", async ({
+  page,
+}) => {
+  await createTerminalTask(page, "wheel-echo-task");
+  await fillScrollback(page);
+
+  const rows = page.locator(".xterm-rows");
+  const jump = page.locator(".term-jump");
+  const viewport = page.locator(".xterm-viewport");
+  await expect(jump).toHaveClass(/term-jump--locked/);
+  await page.evaluate(() => {
+    document.querySelector(".xterm-screen")!.dispatchEvent(
+      new WheelEvent("wheel", {
+        deltaY: -120,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    document
+      .querySelector(".xterm-viewport")!
+      .dispatchEvent(new Event("scroll"));
+  });
+
+  await expect(jump).toHaveClass(/term-jump--alert/);
+  await expect
+    .poll(() =>
+      viewport.evaluate(
+        (el) => el.scrollHeight - el.clientHeight - el.scrollTop,
+      ),
+    )
+    .toBeGreaterThan(2);
+
+  const scrollTop = await viewport.evaluate((el) => el.scrollTop);
+  await page.waitForTimeout(400);
+  expect(await viewport.evaluate((el) => el.scrollTop)).toBeCloseTo(
+    scrollTop,
+    0,
+  );
+  await expect(jump).toHaveClass(/term-jump--alert/);
+
+  await jump.click();
+  await expect(rows).toContainText("reply:filler119");
+});
+
+test("resize never flashes the top and becomes completely quiescent", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (this: WebSocket, data) {
+      const probe = (window as ProbeWindow).__terminalProbe;
+      if (probe?.active && typeof data === "string") {
+        try {
+          const message = JSON.parse(data) as { type?: string };
+          if (message.type === "resize") probe.resizeMessages++;
+        } catch {
+          // Ignore non-JSON WebSocket frames.
+        }
+      }
+      return send.call(this, data);
+    };
+  });
+  await createTerminalTask(page, "resize-quiet-task");
+  await fillScrollback(page, 150);
+  await expect(page.locator(".term-jump")).toHaveClass(/term-jump--locked/);
+
+  await page.evaluate(() => {
+    const viewport = document.querySelector<HTMLElement>(".xterm-viewport");
+    const rows = document.querySelector<HTMLElement>(".xterm-rows");
+    const host = document.querySelector<HTMLElement>(".term-pane");
+    if (!viewport || !rows || !host) throw new Error("terminal not mounted");
+    const probe: TerminalProbe = {
+      active: true,
+      topSamples: [],
+      scrollEvents: 0,
+      mutations: 0,
+      resizeCallbacks: 0,
+      resizeMessages: 0,
+    };
+    (window as ProbeWindow).__terminalProbe = probe;
+    const sampleTop = () => {
+      if (
+        probe.active &&
+        viewport.scrollHeight - viewport.clientHeight > 100 &&
+        viewport.scrollTop <= 2
+      ) {
+        probe.topSamples.push(viewport.scrollTop);
+      }
+    };
+    viewport.addEventListener("scroll", () => {
+      if (!probe.active) return;
+      probe.scrollEvents++;
+      sampleTop();
+    });
+    new MutationObserver(() => {
+      if (probe.active) probe.mutations++;
+    }).observe(rows, { childList: true, characterData: true, subtree: true });
+    new ResizeObserver(() => {
+      if (probe.active) probe.resizeCallbacks++;
+    }).observe(host);
+    const frame = () => {
+      if (!probe.active) return;
+      sampleTop();
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  });
+
+  const bottomGap = () =>
+    page
+      .locator(".xterm-viewport")
+      .evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+  for (const size of [
+    { width: 900, height: 600 },
+    { width: 1300, height: 850 },
+    { width: 1301, height: 850 },
+  ]) {
+    await page.setViewportSize(size);
+    await expect.poll(bottomGap, { timeout: 5000 }).toBeLessThanOrEqual(2);
+  }
+  await expect(page.locator(".xterm-rows")).toContainText("reply:filler149");
+  const topSamples = await page.evaluate(
+    () => (window as ProbeWindow).__terminalProbe!.topSamples,
+  );
+  expect(topSamples).toEqual([]);
+
+  await page.waitForTimeout(750);
+  await page.evaluate(() => {
+    const probe = (window as ProbeWindow).__terminalProbe!;
+    probe.scrollEvents = 0;
+    probe.mutations = 0;
+    probe.resizeCallbacks = 0;
+    probe.resizeMessages = 0;
+  });
+  await page.waitForTimeout(1000);
+  const quiet = await page.evaluate(() => {
+    const probe = (window as ProbeWindow).__terminalProbe!;
+    probe.active = false;
+    return {
+      scrollEvents: probe.scrollEvents,
+      mutations: probe.mutations,
+      resizeCallbacks: probe.resizeCallbacks,
+      resizeMessages: probe.resizeMessages,
+    };
+  });
+  expect(quiet).toEqual({
+    scrollEvents: 0,
+    mutations: 0,
+    resizeCallbacks: 0,
+    resizeMessages: 0,
+  });
+});
+
+test("resize preserves a history viewport near its previous distance from bottom", async ({
+  page,
+}) => {
+  await createTerminalTask(page, "resize-history-task");
+  await fillScrollback(page, 150);
+
+  const screen = page.locator(".xterm-screen");
+  const jump = page.locator(".term-jump");
+  const box = await screen.boundingBox();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.wheel(0, -1000);
+  await expect(jump).toHaveClass(/term-jump--alert/);
+
+  const readPosition = () =>
+    page.locator(".xterm-viewport").evaluate((viewport) => {
+      const screen = document.querySelector<HTMLElement>(".xterm-screen")!;
+      const rowCount = document.querySelector(".xterm-rows")!.childElementCount;
+      const rowHeight = screen.getBoundingClientRect().height / rowCount;
+      return {
+        gap: viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop,
+        rowHeight,
+        scrollTop: viewport.scrollTop,
+      };
+    });
+
+  for (const size of [
+    { width: 900, height: 600 },
+    { width: 700, height: 650 },
+  ]) {
+    const before = await readPosition();
+    await page.setViewportSize(size);
+    await expect
+      .poll(async () => {
+        const after = await readPosition();
+        return Math.abs(after.gap - before.gap) / after.rowHeight;
+      })
+      .toBeLessThanOrEqual(2);
+    const after = await readPosition();
+    expect(after.gap).toBeGreaterThan(after.rowHeight * 2);
+    await expect(jump).toHaveClass(/term-jump--alert/);
   }
 });
 
