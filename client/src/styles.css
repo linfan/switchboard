@@ -1206,8 +1206,7 @@ body {
 .weditor__status--M {
   color: #d29922;
 }
-.weditor__status--A,
-.weditor__status--\? {
+.weditor__status--A {
   color: #3fb950;
 }
 .weditor__status--D {

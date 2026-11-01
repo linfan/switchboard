@@ -162,7 +162,22 @@ pub async fn git_changes(cwd: &str, commit: &str) -> AppResult<Vec<GitChange>> {
     };
     if commit == WORKING {
         // Porcelain v1: "XY <path>" per line; XY is the two-column status.
-        let out = git(&root, &["status", "--porcelain"]).await.ok().flatten();
+        // `core.quotePath=false` keeps non-ASCII names as UTF-8 instead of
+        // octal-escaped `\346…`; `-uall` lists files inside untracked
+        // directories individually rather than collapsing them to "dir/".
+        let out = git(
+            &root,
+            &[
+                "-c",
+                "core.quotePath=false",
+                "status",
+                "--porcelain",
+                "-uall",
+            ],
+        )
+        .await
+        .ok()
+        .flatten();
         let Some(out) = out else {
             return Ok(Vec::new());
         };
@@ -185,10 +200,18 @@ pub async fn git_changes(cwd: &str, commit: &str) -> AppResult<Vec<GitChange>> {
         return Ok(changes);
     }
     validate_hash(commit)?;
-    // name-status for a single commit vs its first parent.
+    // name-status for a single commit vs its first parent. Same quoting rule as
+    // the working-tree branch so non-ASCII paths stay readable.
     let out = git(
         &root,
-        &["show", "--name-status", "--pretty=format:", commit],
+        &[
+            "-c",
+            "core.quotePath=false",
+            "show",
+            "--name-status",
+            "--pretty=format:",
+            commit,
+        ],
     )
     .await
     .ok()
@@ -610,6 +633,30 @@ mod tests {
         let mfd = git_file_diff(cwd, head, "a.txt").await.unwrap();
         assert_eq!(mfd.old_text, "hello\n");
         assert_eq!(mfd.new_text, "hello\nworld\n");
+    }
+
+    #[tokio::test]
+    async fn working_changes_keep_unicode_names_and_expand_untracked_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("a.txt"), "hi\n").unwrap();
+        run(dir.path(), &["add", "a.txt"]);
+        run(dir.path(), &["commit", "-q", "-m", "first"]);
+
+        std::fs::write(dir.path().join("中文.txt"), "hi\n").unwrap();
+        std::fs::create_dir(dir.path().join("新目录")).unwrap();
+        std::fs::write(dir.path().join("新目录/内文件.txt"), "x\n").unwrap();
+
+        let working = git_changes(cwd, WORKING).await.unwrap();
+        // Non-ASCII names come back as UTF-8, not octal-escaped `\346…`.
+        assert!(working.iter().any(|c| c.path == "中文.txt"));
+        // Files inside a brand-new directory are listed individually instead of
+        // being collapsed into a "新目录/" entry with no usable name.
+        assert!(working
+            .iter()
+            .any(|c| c.path == "新目录/内文件.txt" && c.status == "??"));
+        assert!(!working.iter().any(|c| c.path.ends_with('/')));
     }
 
     #[tokio::test]

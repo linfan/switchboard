@@ -1512,29 +1512,34 @@ function ChangeTree({
           </Fragment>
         );
       })}
-      {files.map((c) => (
-        <button
-          key={c.path}
-          className={`weditor__row weditor__row--file ${
-            activePath === c.path ? "is-active" : ""
-          }`}
-          style={indent}
-          title={c.path}
-          onClick={() => onOpenDiff(c.path, commit)}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onFileContextMenu(c, e);
-          }}
-        >
-          <span
-            className={`weditor__status weditor__status--${c.status[0] ?? ""}`}
+      {files.map((c) => {
+        // Porcelain reports untracked files as "??"; show the green "A" that
+        // added files get elsewhere instead of leaking the raw code.
+        const status = c.status === "??" ? "A" : c.status;
+        return (
+          <button
+            key={c.path}
+            className={`weditor__row weditor__row--file ${
+              activePath === c.path ? "is-active" : ""
+            }`}
+            style={indent}
+            title={c.path}
+            onClick={() => onOpenDiff(c.path, commit)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onFileContextMenu(c, e);
+            }}
           >
-            {c.status}
-          </span>
-          <span className="weditor__label">{c.path.split("/").pop()}</span>
-        </button>
-      ))}
+            <span
+              className={`weditor__status weditor__status--${status[0] ?? ""}`}
+            >
+              {status}
+            </span>
+            <span className="weditor__label">{c.path.split("/").pop()}</span>
+          </button>
+        );
+      })}
     </>
   );
 }
