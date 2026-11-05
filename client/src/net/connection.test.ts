@@ -368,12 +368,15 @@ describe("auto-reconnect", () => {
 
 describe("heartbeat", () => {
   it("declares the link dead when no Pong arrives", async () => {
-    const { mgr } = mkManager();
+    let now = 0;
+    const { mgr } = mkManager({ now: () => now });
     mgr.start();
     const s = FakeSocket.last();
     await driveHandshake(s);
+    now = 15000;
     vi.advanceTimersByTime(15000); // ping
     expect(s.find("ping")).toBeTruthy();
+    now = 25000;
     vi.advanceTimersByTime(10000); // pong deadline elapses
     expect(mgr.getStatus()).toBe("reconnecting");
     mgr.stop();
@@ -385,11 +388,14 @@ describe("heartbeat", () => {
     // its onmessage bound to the manager and would deliver a second copy of
     // every server frame into the same terminal after reconnect (doubled output
     // / keystroke echo).
-    const { mgr, binaries } = mkManager();
+    let now = 0;
+    const { mgr, binaries } = mkManager({ now: () => now });
     mgr.start();
     const s = FakeSocket.last();
     await driveHandshake(s);
+    now = 15000;
     vi.advanceTimersByTime(15000); // ping
+    now = 25000;
     vi.advanceTimersByTime(10000); // pong deadline elapses -> declared dead
     expect(mgr.getStatus()).toBe("reconnecting");
     expect(s.readyState).toBe(3); // closed
@@ -550,6 +556,32 @@ describe("starvation-safe heartbeat", () => {
     now = 25000 + 6000;
     vi.advanceTimersByTime(10000); // fire the pong timer at sim-time 25000
     expect(mgr.getStatus()).toBe("online"); // re-probed, not torn down
+    expect(ping()).toBe(2);
+    mgr.stop();
+  });
+
+  it("re-probes instead of dying while inbound frames still arrive", async () => {
+    // A pong queued behind a backed-up downlink is not a dead link: frames are
+    // still arriving. Tearing the session down only re-replays into the backlog.
+    let now = 0;
+    const { mgr } = mkManager({
+      now: () => now,
+      wake: { checkMs: 10_000_000, driftMs: 5000 },
+      heartbeat: { intervalMs: 15000, timeoutMs: 10000 },
+    });
+    mgr.start();
+    const s = FakeSocket.last();
+    await driveSession(s);
+    now = 15000;
+    vi.advanceTimersByTime(15000); // heartbeat ping; pong deadline = 25000
+    const ping = (): number =>
+      s.parsed().filter((m) => m.type === "ping").length;
+    expect(ping()).toBe(1);
+    now = 24000;
+    s.onmessage?.({ data: new Uint8Array([1]).buffer }); // data still flowing
+    now = 25000;
+    vi.advanceTimersByTime(10000); // fire the pong timer at its deadline
+    expect(mgr.getStatus()).toBe("online");
     expect(ping()).toBe(2);
     mgr.stop();
   });

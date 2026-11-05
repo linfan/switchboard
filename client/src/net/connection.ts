@@ -554,6 +554,21 @@ export class ConnectionManager {
         this.sendPing();
         return;
       }
+      // A pong can be queued behind terminal output or replay on a link that is
+      // demonstrably delivering data. Killing that session only reconnects and
+      // re-replays into the same backlog, so keep probing while inbound frames
+      // keep arriving; silence for a full timeout window is what proves death.
+      const sinceInbound = this.now() - this.lastInboundAt;
+      if (this.lastInboundAt && sinceInbound < this.heartbeatOpts.timeoutMs) {
+        logToBackend(
+          "warn",
+          `heartbeat pong late but inbound active ${sinceInbound}ms ago ` +
+            `(frames since ping=${this.inboundSincePing}, ` +
+            `bytes since ping=${this.inboundBytesSincePing}); re-probing`,
+        );
+        this.sendPing();
+        return;
+      }
       const lastInbound = this.lastInboundAt
         ? `${this.now() - this.lastInboundAt}ms ago`
         : "never";
