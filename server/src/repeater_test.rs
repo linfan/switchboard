@@ -778,7 +778,7 @@ async fn health_reports_worker_capabilities() {
         .unwrap();
     assert_eq!(status, 200);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["worker_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(v["worker_version"], crate::version::full());
     let features = v["worker_features"].as_array().expect("features array");
     assert!(features.iter().any(|f| f == "forward"));
     assert!(features.iter().any(|f| f == "ws"));

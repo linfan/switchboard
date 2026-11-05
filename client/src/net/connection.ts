@@ -130,6 +130,9 @@ export const STABLE_RESET_MS = 10_000;
 
 const WS_OPEN = 1;
 
+/** One input event this large is a paste; name it when it coincides with a drop. */
+const LARGE_INPUT_BYTES = 1024;
+
 /**
  * Bounds on keystrokes buffered across a reconnect. The size cap keeps memory
  * flat; the age cap is what makes replaying safe at all — `notifyOffline` clears
@@ -195,6 +198,10 @@ export class ConnectionManager {
   private wakeTimer: ReturnType<typeof setInterval> | null = null;
   private lastWakeTick = 0;
   private lastPingTs = 0;
+  /** Inbound frames seen since the last ping, and when the last one arrived. */
+  private inboundSincePing = 0;
+  private lastInboundAt = 0;
+  private lastRttMs: number | null = null;
 
   constructor(deps: ConnectionDeps) {
     this.d = deps;
@@ -266,6 +273,12 @@ export class ConnectionManager {
    * `flushInput` once the socket re-authenticates.
    */
   sendInput(taskId: string, bytes: Uint8Array): boolean {
+    if (bytes.length >= LARGE_INPUT_BYTES) {
+      logToBackend(
+        "info",
+        `terminal input burst: ${bytes.length} bytes to ${taskId}`,
+      );
+    }
     if (this.sendBytes(encodeInput(taskId, bytes))) return true;
     this.queueInput(taskId, bytes);
     return false;
@@ -331,6 +344,8 @@ export class ConnectionManager {
   }
 
   private onData(data: unknown): void {
+    this.lastInboundAt = this.now();
+    this.inboundSincePing += 1;
     // Binary frames are the terminal data plane; hand them off untouched.
     if (data instanceof ArrayBuffer) {
       this.d.onBinary(new Uint8Array(data));
@@ -412,6 +427,8 @@ export class ConnectionManager {
     this.clearHandshakeWatchdog();
     this.authed = true;
     this.welcomed = false;
+    this.lastRttMs = null;
+    this.lastInboundAt = this.now();
     // Transport is authed but the session is not established yet: `welcome`
     // (which only arrives through a paired worker) is what promotes us to
     // "online". A repeater with no worker auths the client then closes after
@@ -438,6 +455,10 @@ export class ConnectionManager {
   }
 
   private onClose(reason: string): void {
+    logToBackend(
+      "warn",
+      `connection closed: ${reason} (attempt ${this.attempt})`,
+    );
     this.stopHeartbeat();
     // Fully tear the socket down (detach handlers + close) rather than just
     // dropping the reference. A live-but-orphaned socket keeps its onmessage
@@ -506,6 +527,7 @@ export class ConnectionManager {
   private sendPing(): void {
     if (!this.ws || this.ws.readyState !== WS_OPEN) return;
     this.lastPingTs = this.now();
+    this.inboundSincePing = 0;
     this.send({ type: "ping", ts: this.lastPingTs });
     // Arm the pong deadline; if it fires, the link is (probably) dead.
     if (this.pongTimer !== null) clearTimeout(this.pongTimer);
@@ -519,9 +541,23 @@ export class ConnectionManager {
       // may be perfectly alive (which would reconnect and re-replay, blocking
       // the thread again — a feedback loop).
       if (this.now() - deadline > this.wakeOpts.driftMs) {
+        logToBackend(
+          "warn",
+          `heartbeat probe re-armed ${this.now() - deadline}ms past its deadline ` +
+            "(main thread was blocked, not necessarily the link)",
+        );
         this.sendPing();
         return;
       }
+      const lastInbound = this.lastInboundAt
+        ? `${this.now() - this.lastInboundAt}ms ago`
+        : "never";
+      logToBackend(
+        "warn",
+        `heartbeat timeout: no pong in ${this.heartbeatOpts.timeoutMs}ms ` +
+          `(frames since ping=${this.inboundSincePing}, last inbound ${lastInbound}, ` +
+          `last rtt=${this.lastRttMs ?? "n/a"}ms)`,
+      );
       this.onClose("heartbeat timeout");
     }, this.heartbeatOpts.timeoutMs);
   }
@@ -531,10 +567,14 @@ export class ConnectionManager {
       clearTimeout(this.pongTimer);
       this.pongTimer = null;
     }
+    const rttMs = this.now() - ts;
+    this.lastRttMs = rttMs;
+    if (rttMs > 1000) {
+      logToBackend("warn", `heartbeat pong slow: rtt=${rttMs}ms`);
+    }
     // Only re-assert "online" once the session is established; a pong that
     // arrives before `welcome` must not promote the status prematurely.
     if (!this.welcomed) return;
-    const rttMs = this.now() - ts;
     this.setStatus("online", { rttMs });
   }
 

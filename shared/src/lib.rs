@@ -172,7 +172,7 @@ pub struct GitWorktree {
 pub struct ServiceInfo {
     /// Operator-chosen name for this hosting service.
     pub name: String,
-    /// Server crate version.
+    /// Server version with the source commit as build metadata (`0.6.1+abc1234`).
     pub version: String,
     /// Agent tools this host can launch.
     pub tools: Vec<AgentTool>,

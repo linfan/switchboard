@@ -287,7 +287,7 @@ async fn health(State(st): State<Shared>) -> Json<serde_json::Value> {
         "status": "ok",
         "role": "repeater",
         "name": st.config.service_name,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::version::full(),
         "paired": tunnel.is_some(),
         "worker_version": worker_version,
         "worker_features": worker_features,

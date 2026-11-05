@@ -31,7 +31,7 @@ impl AppState {
     pub fn service_info(&self) -> ServiceInfo {
         ServiceInfo {
             name: self.config.service_name.clone(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::version::full(),
             tools: agent::available_tools(),
         }
     }

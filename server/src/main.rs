@@ -23,6 +23,7 @@ mod task;
 mod terminal;
 mod tls;
 mod upgrade;
+mod version;
 mod worker_link;
 mod ws;
 #[cfg(test)]

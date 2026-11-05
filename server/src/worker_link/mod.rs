@@ -157,7 +157,7 @@ async fn serve_once(
     // unknown kind with a warning; older workers never send it.
     let hello = WorkerHello {
         proto: PROTO,
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: crate::version::full(),
         features: FEATURES.iter().map(|f| (*f).into()).collect(),
     };
     let hello = TunnelFrame::new(KIND_HELLO, 0, serde_json::to_vec(&hello)?);

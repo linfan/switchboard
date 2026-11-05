@@ -14,7 +14,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{
@@ -51,6 +51,10 @@ pub(crate) const REPLAY_WINDOW: u64 = 256;
 const OUT_BUF: usize = 512;
 /// Buffer for inbound frames handed from the transport bridge to the session.
 const IN_BUF: usize = 64;
+/// Inbound frame size worth naming in the log. A paste arrives as a single
+/// binary INPUT frame (as does a reconnect's buffered-keystroke replay), so a
+/// large one is the first thing to check when a client drops right after typing.
+const LARGE_INBOUND_FRAME: usize = 4096;
 /// Bound the whole pre-session handshake: a peer that connects, reads the
 /// challenge, and then goes silent must not pin a task (and, on the repeater
 /// legs, a socket) indefinitely.
@@ -109,12 +113,26 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
     // Inbound bridge: axum stream -> WsIn. A closed/errored socket ends the
     // stream; forward a final Close so the session's reader loop terminates.
     tokio::spawn(async move {
-        while let Some(Ok(msg)) = stream.next().await {
+        while let Some(msg) = stream.next().await {
             let win = match msg {
-                Message::Text(t) => WsIn::Text(t.to_string()),
-                Message::Binary(b) => WsIn::Binary(b.to_vec()),
-                Message::Close(_) => break,
-                _ => continue,
+                Ok(Message::Text(t)) => WsIn::Text(t.to_string()),
+                Ok(Message::Binary(b)) => WsIn::Binary(b.to_vec()),
+                Ok(Message::Close(frame)) => {
+                    match frame {
+                        Some(f) => tracing::info!(
+                            code = f.code,
+                            reason = %f.reason,
+                            "websocket close frame received"
+                        ),
+                        None => tracing::info!("websocket close frame without a reason"),
+                    }
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!(error = %e, "websocket read error");
+                    break;
+                }
             };
             if in_tx.send(win).await.is_err() {
                 return;
@@ -155,6 +173,7 @@ pub async fn run_session(
         None => return,
     };
     tracing::info!(%client_id, acks, "client connected");
+    let connected_at = Instant::now();
     let tracker = AckTracker::new(acks, &cursors);
 
     // 2. Subscribe BEFORE replay so output produced during replay isn't missed.
@@ -193,39 +212,72 @@ pub async fn run_session(
         tokio::spawn(async move {
             while let Some(win) = rx.recv().await {
                 match win {
-                    WsIn::Text(t) => match serde_json::from_str::<ClientMsg>(&t) {
-                        Ok(cm) => {
-                            match &cm {
-                                // Feed the replay pacer before the control task
-                                // sees it (which still persists the cursor).
-                                ClientMsg::Ack { task_id, seq } => {
-                                    tracker.advance(task_id, *seq);
+                    WsIn::Text(t) => {
+                        if t.len() >= LARGE_INBOUND_FRAME {
+                            tracing::info!(%client_id, bytes = t.len(), "large inbound text frame");
+                        }
+                        match serde_json::from_str::<ClientMsg>(&t) {
+                            Ok(cm) => {
+                                match &cm {
+                                    // Feed the replay pacer before the control task
+                                    // sees it (which still persists the cursor).
+                                    ClientMsg::Ack { task_id, seq } => {
+                                        tracker.advance(task_id, *seq);
+                                    }
+                                    // Answer pings here: `replay` owns the session
+                                    // task while it streams, so routing a Pong
+                                    // through the live loop would let a slow replay
+                                    // miss the client's heartbeat deadline.
+                                    ClientMsg::Ping { ts } => {
+                                        // The pong shares the ordered outbound queue with
+                                        // replay and live output, so a full queue delays it
+                                        // past the client's deadline. Name the backlog when
+                                        // it is even close to mattering.
+                                        let started = Instant::now();
+                                        let _ =
+                                            send_control(&out, &ServerMsg::Pong { ts: *ts }).await;
+                                        let waited = started.elapsed();
+                                        if waited >= Duration::from_millis(500) {
+                                            tracing::warn!(
+                                                %client_id,
+                                                waited_ms = waited.as_millis() as u64,
+                                                queued = out
+                                                    .max_capacity()
+                                                    .saturating_sub(out.capacity()),
+                                                capacity = out.max_capacity(),
+                                                "pong delayed behind outbound backlog"
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                    _ => {}
                                 }
-                                // Answer pings here: `replay` owns the session
-                                // task while it streams, so routing a Pong
-                                // through the live loop would let a slow replay
-                                // miss the client's heartbeat deadline.
-                                ClientMsg::Ping { ts } => {
-                                    let _ = send_control(&out, &ServerMsg::Pong { ts: *ts }).await;
-                                    continue;
+                                if ctl_tx.send(cm).is_err() {
+                                    break;
                                 }
-                                _ => {}
                             }
-                            if ctl_tx.send(cm).is_err() {
-                                break;
+                            Err(e) => {
+                                tracing::warn!(%client_id, error=%e, "bad client message")
                             }
                         }
-                        Err(e) => tracing::warn!(%client_id, error=%e, "bad client message"),
-                    },
-                    WsIn::Binary(b) => match Frame::decode(&b) {
-                        Ok(Frame::Input { task_id, data }) => {
-                            if let Err(e) = state.tasks.send_input(&task_id.to_string(), &data) {
-                                tracing::warn!(%client_id, %task_id, error=%e, "input dropped");
-                            }
+                    }
+                    WsIn::Binary(b) => {
+                        if b.len() >= LARGE_INBOUND_FRAME {
+                            tracing::info!(%client_id, bytes = b.len(), "large inbound input frame");
                         }
-                        Ok(_) => tracing::warn!(%client_id, "unexpected server-bound binary frame"),
-                        Err(e) => tracing::warn!(%client_id, error=%e, "bad binary frame"),
-                    },
+                        match Frame::decode(&b) {
+                            Ok(Frame::Input { task_id, data }) => {
+                                if let Err(e) = state.tasks.send_input(&task_id.to_string(), &data)
+                                {
+                                    tracing::warn!(%client_id, %task_id, error=%e, "input dropped");
+                                }
+                            }
+                            Ok(_) => {
+                                tracing::warn!(%client_id, "unexpected server-bound binary frame")
+                            }
+                            Err(e) => tracing::warn!(%client_id, error=%e, "bad binary frame"),
+                        }
+                    }
                     WsIn::Close => break,
                 }
             }
@@ -247,6 +299,7 @@ pub async fn run_session(
         tasks: state.tasks.list().await.unwrap_or_default(),
     };
     if !send_control(&out_tx, &welcome).await {
+        tracing::info!(%client_id, reason = "welcome send failed", "client disconnected");
         return;
     }
     let mut last_sent: HashMap<String, u64> = HashMap::new();
@@ -261,19 +314,30 @@ pub async fn run_session(
     )
     .await
     {
+        tracing::info!(%client_id, reason = "replay failed", "client disconnected");
         return;
     }
 
     // 5. Live loop.
+    let reason;
     loop {
         tokio::select! {
-            _ = &mut shutdown_rx => break,
+            _ = &mut shutdown_rx => {
+                reason = "inbound closed";
+                break;
+            }
             Some(m) = direct_rx.recv() => {
-                if !send_control(&out_tx, &m).await { break; }
+                if !send_control(&out_tx, &m).await {
+                    reason = "outbound closed";
+                    break;
+                }
             }
             r = broadcast_rx.recv() => match r {
                 Ok(Outbound::Control(m)) => {
-                    if !send_control(&out_tx, &m).await { break; }
+                    if !send_control(&out_tx, &m).await {
+                        reason = "outbound closed";
+                        break;
+                    }
                 }
                 Ok(Outbound::Pty { task_id, seq, bytes }) => {
                     if last_sent.get(&task_id).is_some_and(|&s| seq <= s) {
@@ -282,7 +346,10 @@ pub async fn run_session(
                     last_sent.insert(task_id.clone(), seq);
                     if let Ok(uuid) = Uuid::parse_str(&task_id) {
                         let frame = Frame::Output { task_id: uuid, seq, data: bytes.to_vec() };
-                        if !send_binary(&out_tx, frame.encode()).await { break; }
+                        if !send_binary(&out_tx, frame.encode()).await {
+                            reason = "outbound closed";
+                            break;
+                        }
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -299,14 +366,23 @@ pub async fn run_session(
                     )
                     .await
                     {
+                        reason = "replay failed";
                         break;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    reason = "broadcast closed";
+                    break;
+                }
             }
         }
     }
-    tracing::info!(%client_id, "client disconnected");
+    tracing::info!(
+        %client_id,
+        reason,
+        uptime_ms = connected_at.elapsed().as_millis() as u64,
+        "client disconnected"
+    );
 }
 
 /// Run the `SWB-WS-v1` handshake: send a random challenge, read the client's

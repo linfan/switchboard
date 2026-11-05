@@ -81,7 +81,7 @@ async fn health(State(state): State<SharedState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "name": state.config.service_name,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::version::full(),
     }))
 }
 

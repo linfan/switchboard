@@ -660,6 +660,7 @@ pub async fn ws_connect(
 
     let inner = state.inner().clone();
     let id = inner.next.fetch_add(1, Ordering::Relaxed);
+    let connected_at = Instant::now();
     tracing::info!(%id, %url, "websocket connected");
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     inner.conns.lock().await.insert(id, tx);
@@ -683,7 +684,18 @@ pub async fn ws_connect(
             let body = match msg {
                 Ok(Message::Text(t)) => tagged(TAG_TEXT, t.as_bytes()),
                 Ok(Message::Binary(b)) => tagged(TAG_BINARY, b.as_ref()),
-                Ok(Message::Close(_)) => break,
+                Ok(Message::Close(frame)) => {
+                    match frame {
+                        Some(f) => tracing::info!(
+                            %id,
+                            code = u16::from(f.code),
+                            reason = %f.reason,
+                            "websocket close frame received"
+                        ),
+                        None => tracing::info!(%id, "websocket close frame without a reason"),
+                    }
+                    break;
+                }
                 Err(e) => {
                     tracing::warn!(%id, error = %e, "websocket read error");
                     break;
@@ -695,7 +707,11 @@ pub async fn ws_connect(
             }
         }
         cleanup.conns.lock().await.remove(&id);
-        tracing::info!(%id, "websocket closed");
+        tracing::info!(
+            %id,
+            uptime_ms = connected_at.elapsed().as_millis() as u64,
+            "websocket closed"
+        );
         let _ = on_frame.send(InvokeResponseBody::Raw(vec![TAG_CLOSE]));
     });
 
