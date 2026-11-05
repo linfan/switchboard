@@ -144,15 +144,42 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
     // Outbound bridge: WsOut -> axum sink. Exiting on a sink error drops the
     // receiver, so the session's next `out_tx.send` fails — its disconnect signal.
     tokio::spawn(async move {
+        let started = Instant::now();
+        let mut bytes: u64 = 0;
+        let mut write_ms: u64 = 0;
         while let Some(out) = out_rx.recv().await {
             let msg = match out {
                 WsOut::Text(t) => Message::Text(t.into()),
                 WsOut::Binary(b) => Message::Binary(b.into()),
             };
+            let len = match &msg {
+                Message::Text(t) => t.len(),
+                Message::Binary(b) => b.len(),
+                _ => 0,
+            } as u64;
+            let write_started = Instant::now();
             if sink.send(msg).await.is_err() {
-                return;
+                break;
+            }
+            bytes += len;
+            let waited = write_started.elapsed();
+            write_ms += waited.as_millis() as u64;
+            // A blocked write is the signature of TCP backpressure: the client
+            // is not draining, and every queued frame (pong included) waits.
+            if waited >= Duration::from_secs(1) {
+                tracing::warn!(
+                    bytes = len,
+                    waited_ms = waited.as_millis() as u64,
+                    "outbound write blocked"
+                );
             }
         }
+        tracing::info!(
+            bytes,
+            write_ms,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "outbound bridge closed"
+        );
     });
 
     run_session(in_rx, out_tx, state).await;
@@ -210,6 +237,7 @@ pub async fn run_session(
         let out = out_tx.clone();
         let tracker = tracker.clone();
         tokio::spawn(async move {
+            let mut last_ping: Option<Instant> = None;
             while let Some(win) = rx.recv().await {
                 match win {
                     WsIn::Text(t) => {
@@ -229,6 +257,29 @@ pub async fn run_session(
                                     // through the live loop would let a slow replay
                                     // miss the client's heartbeat deadline.
                                     ClientMsg::Ping { ts } => {
+                                        // The first ping of a session, and any long gap,
+                                        // is the cheapest proof that the client's heartbeat
+                                        // actually reached us. Every ping would be noise.
+                                        let now = Instant::now();
+                                        match last_ping {
+                                            None => tracing::info!(
+                                                %client_id,
+                                                "heartbeat ping received"
+                                            ),
+                                            Some(prev)
+                                                if now.duration_since(prev)
+                                                    > Duration::from_secs(20) =>
+                                            {
+                                                tracing::warn!(
+                                                    %client_id,
+                                                    gap_ms = now.duration_since(prev).as_millis()
+                                                        as u64,
+                                                    "heartbeat ping gap"
+                                                )
+                                            }
+                                            _ => {}
+                                        }
+                                        last_ping = Some(now);
                                         // The pong shares the ordered outbound queue with
                                         // replay and live output, so a full queue delays it
                                         // past the client's deadline. Name the backlog when
@@ -381,6 +432,7 @@ pub async fn run_session(
         %client_id,
         reason,
         uptime_ms = connected_at.elapsed().as_millis() as u64,
+        queued = OUT_BUF.saturating_sub(out_tx.capacity()),
         "client disconnected"
     );
 }

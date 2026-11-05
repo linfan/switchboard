@@ -71,6 +71,11 @@ class TauriWebSocket implements WebSocketLike {
    * it keeps control messages ordered against keystrokes on the same socket.
    */
   private chain: Promise<void> = Promise.resolve();
+  /**
+   * Frames queued behind the chain but not yet handed to Rust. A paste can make
+   * this large, and while it is non-zero the heartbeat ping cannot leave either.
+   */
+  private queued = 0;
 
   constructor(url: string, pin?: string) {
     void this.connect(url, pin);
@@ -143,23 +148,48 @@ class TauriWebSocket implements WebSocketLike {
     }
   }
 
+  /** Frames waiting for their turn in the serialized outbound chain. */
+  queuedSends(): number {
+    return this.queued;
+  }
+
   send(data: string | ArrayBufferLike | ArrayBufferView): void {
     if (this.closed || this.id === null) return;
     const id = this.id;
-    // Client->server frames are tiny keystrokes/resizes, so base64 here is
-    // negligible; the volume (and the perf win of raw bytes) is all inbound.
+    const bytes = typeof data === "string" ? data.length : data.byteLength;
+    // Client->server frames are tiny keystrokes/resizes — except a paste, which
+    // is one large frame and the only plausible way to stall this chain.
     const args =
       typeof data === "string"
         ? { id, text: data, binaryB64: null }
         : { id, text: null, binaryB64: bytesToBase64(data) };
+    this.queued += 1;
+    if (this.queued === 64 || this.queued % 256 === 0) {
+      logToBackend(
+        "warn",
+        `ws_send backlog: ${this.queued} frame(s) awaiting IPC`,
+      );
+    }
+    const started = Date.now();
     // The handler MUST sit inside the link: a rejection that escapes poisons
     // `chain`, and every keystroke after it would silently no-op forever.
-    this.chain = this.chain.then(() =>
-      invoke("ws_send", args).then(
-        () => undefined,
-        (e: unknown) => this.onSendFailed(e),
-      ),
-    );
+    this.chain = this.chain
+      .then(() =>
+        invoke("ws_send", args).then(
+          () => undefined,
+          (e: unknown) => this.onSendFailed(e),
+        ),
+      )
+      .then(() => {
+        this.queued -= 1;
+        const took = Date.now() - started;
+        if (took > 1000) {
+          logToBackend(
+            "warn",
+            `ws_send slow: ${took}ms for ${bytes} byte(s), ${this.queued} still queued`,
+          );
+        }
+      });
   }
 
   /**

@@ -31,6 +31,8 @@ export interface WebSocketLike {
   onmessage: ((ev: { data: unknown }) => void) | null;
   readyState: number;
   binaryType?: string;
+  /** Frames still queued in the local send path, when the transport can report it. */
+  queuedSends?: () => number;
 }
 
 export type WebSocketFactory = (url: string) => WebSocketLike;
@@ -200,6 +202,7 @@ export class ConnectionManager {
   private lastPingTs = 0;
   /** Inbound frames seen since the last ping, and when the last one arrived. */
   private inboundSincePing = 0;
+  private inboundBytesSincePing = 0;
   private lastInboundAt = 0;
   private lastRttMs: number | null = null;
 
@@ -346,6 +349,7 @@ export class ConnectionManager {
   private onData(data: unknown): void {
     this.lastInboundAt = this.now();
     this.inboundSincePing += 1;
+    this.inboundBytesSincePing += dataBytes(data);
     // Binary frames are the terminal data plane; hand them off untouched.
     if (data instanceof ArrayBuffer) {
       this.d.onBinary(new Uint8Array(data));
@@ -528,6 +532,7 @@ export class ConnectionManager {
     if (!this.ws || this.ws.readyState !== WS_OPEN) return;
     this.lastPingTs = this.now();
     this.inboundSincePing = 0;
+    this.inboundBytesSincePing = 0;
     this.send({ type: "ping", ts: this.lastPingTs });
     // Arm the pong deadline; if it fires, the link is (probably) dead.
     if (this.pongTimer !== null) clearTimeout(this.pongTimer);
@@ -555,8 +560,10 @@ export class ConnectionManager {
       logToBackend(
         "warn",
         `heartbeat timeout: no pong in ${this.heartbeatOpts.timeoutMs}ms ` +
-          `(frames since ping=${this.inboundSincePing}, last inbound ${lastInbound}, ` +
-          `last rtt=${this.lastRttMs ?? "n/a"}ms)`,
+          `(frames since ping=${this.inboundSincePing}, ` +
+          `bytes since ping=${this.inboundBytesSincePing}, last inbound ${lastInbound}, ` +
+          `last rtt=${this.lastRttMs ?? "n/a"}ms, ` +
+          `outbound backlog=${this.ws?.queuedSends?.() ?? "n/a"})`,
       );
       this.onClose("heartbeat timeout");
     }, this.heartbeatOpts.timeoutMs);
@@ -794,6 +801,13 @@ export class ConnectionManager {
     this.status = status;
     this.d.onStatus(status, meta);
   }
+}
+
+function dataBytes(data: unknown): number {
+  if (typeof data === "string") return data.length;
+  if (data instanceof ArrayBuffer) return data.byteLength;
+  if (ArrayBuffer.isView(data)) return data.byteLength;
+  return 0;
 }
 
 function concatBytes(parts: Uint8Array[]): Uint8Array {
