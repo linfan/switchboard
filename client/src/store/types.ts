@@ -79,6 +79,10 @@ export interface ServiceRuntime {
   nextRetryAt?: number;
   /** Consecutive failed attempts (drives backoff). */
   attempt: number;
+  /** Downlink is backlogged: pongs arrive late while data still trickles. */
+  degraded?: boolean;
+  /** Estimated downlink rate (bytes/sec) while degraded. */
+  downlinkBps?: number;
 }
 
 /** One open file in the editor: a tab. */

@@ -150,6 +150,8 @@ export class ConnectionPool {
                 meta?.attempt ??
                 useStore.getState().runtime[svc.id]?.attempt ??
                 0,
+              degraded: !!meta?.degraded,
+              downlinkBps: meta?.downlinkBps,
             }),
         });
         this.managers.set(svc.id, mgr);

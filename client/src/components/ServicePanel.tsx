@@ -149,6 +149,16 @@ const CONNECTION_LABEL: Record<ConnStatus, string> = {
   offline: "Offline",
 };
 
+/** Human-readable downlink rate for the degraded-link read-out. */
+function formatRate(bps?: number): string {
+  if (bps === undefined) return "unknown";
+  if (bps < 1024) return `${bps} B/s`;
+  if (bps < 1024 * 1024) {
+    return `${(bps / 1024).toFixed(bps < 10 * 1024 ? 1 : 0)} KB/s`;
+  }
+  return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
+}
+
 /** Re-render once a second while `active`, so countdowns stay live. */
 function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -168,6 +178,7 @@ export function ServicePanel({ service }: { service: Service }) {
     undefined,
   );
   const status = rt?.status ?? "offline";
+  const dotKind = rt?.degraded ? "degraded" : status;
   const now = useNow(status === "reconnecting");
 
   const forwards = portForwards.filter(
@@ -188,7 +199,10 @@ export function ServicePanel({ service }: { service: Service }) {
   return (
     <main className="panel service-panel">
       <header className="panel__header service-panel__header">
-        <span className={`dot dot--${status}`} title={status} />
+        <span
+          className={`dot dot--${dotKind}`}
+          title={rt?.degraded ? "downlink congested" : status}
+        />
         <div>
           <span className="panel__title">{service.name}</span>
           <span className="service-panel__url">{service.url}</span>
@@ -209,12 +223,19 @@ export function ServicePanel({ service }: { service: Service }) {
             <div className="service-panel__row">
               <dt>Connection</dt>
               <dd
-                className={`service-panel__conn service-panel__conn--${status}`}
+                className={`service-panel__conn service-panel__conn--${dotKind}`}
               >
-                <span className={`dot dot--${status}`} />
+                <span className={`dot dot--${dotKind}`} />
                 {CONNECTION_LABEL[status]}
+                {rt?.degraded && " · downlink congested"}
               </dd>
             </div>
+            {rt?.degraded && (
+              <div className="service-panel__row">
+                <dt>Downlink</dt>
+                <dd>~{formatRate(rt.downlinkBps)} received</dd>
+              </div>
+            )}
             <div className="service-panel__row">
               <dt>Endpoint</dt>
               <dd>{service.url}</dd>

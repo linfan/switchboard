@@ -497,7 +497,7 @@ fn open_ws_session(id: u64, state: SharedState, mux_tx: mpsc::Sender<Vec<u8>>) -
     let (in_tx, in_rx) = mpsc::channel::<WsIn>(IN_BUF);
     let (out_tx, mut out_rx) = mpsc::channel::<WsOut>(OUT_BUF);
 
-    let session = tokio::spawn(run_session(in_rx, out_tx, state));
+    let session = tokio::spawn(run_session(in_rx, out_tx, state, None));
     let drain = tokio::spawn(async move {
         while let Some(out) = out_rx.recv().await {
             let frame = match out {

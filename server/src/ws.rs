@@ -49,6 +49,9 @@ pub(crate) const REPLAY_WINDOW: u64 = 256;
 /// Buffer for the unified outbound writer. Bounded so a slow client applies
 /// backpressure to the session instead of growing memory without limit.
 const OUT_BUF: usize = 512;
+/// Priority lane for order-independent control replies (pongs), so terminal
+/// output or a replay cannot bury them behind the whole data queue.
+const CTL_BUF: usize = 8;
 /// Buffer for inbound frames handed from the transport bridge to the session.
 const IN_BUF: usize = 64;
 /// Inbound frame size worth naming in the log. A paste arrives as a single
@@ -109,6 +112,7 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
 
     let (in_tx, in_rx) = mpsc::channel::<WsIn>(IN_BUF);
     let (out_tx, mut out_rx) = mpsc::channel::<WsOut>(OUT_BUF);
+    let (ctl_tx, mut ctl_rx) = mpsc::channel::<WsOut>(CTL_BUF);
 
     // Inbound bridge: axum stream -> WsIn. A closed/errored socket ends the
     // stream; forward a final Close so the session's reader loop terminates.
@@ -147,7 +151,15 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
         let started = Instant::now();
         let mut bytes: u64 = 0;
         let mut write_ms: u64 = 0;
-        while let Some(out) = out_rx.recv().await {
+        loop {
+            // Control first: a pong overtaking queued terminal data is safe
+            // (it echoes a timestamp) and keeps the heartbeat honest.
+            let out = tokio::select! {
+                biased;
+                Some(out) = ctl_rx.recv() => out,
+                Some(out) = out_rx.recv() => out,
+                else => break,
+            };
             let msg = match out {
                 WsOut::Text(t) => Message::Text(t.into()),
                 WsOut::Binary(b) => Message::Binary(b.into()),
@@ -182,7 +194,7 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
         );
     });
 
-    run_session(in_rx, out_tx, state).await;
+    run_session(in_rx, out_tx, state, Some(ctl_tx)).await;
 }
 
 /// The transport-neutral session: Hello handshake, Welcome, per-task
@@ -193,6 +205,7 @@ pub async fn run_session(
     mut rx: mpsc::Receiver<WsIn>,
     out_tx: mpsc::Sender<WsOut>,
     state: SharedState,
+    control: Option<mpsc::Sender<WsOut>>,
 ) {
     // 1. Handshake: the first frame must be Hello.
     let (client_id, cursors, acks) = match read_hello(&mut rx).await {
@@ -280,24 +293,35 @@ pub async fn run_session(
                                             _ => {}
                                         }
                                         last_ping = Some(now);
-                                        // The pong shares the ordered outbound queue with
-                                        // replay and live output, so a full queue delays it
-                                        // past the client's deadline. Name the backlog when
-                                        // it is even close to mattering.
-                                        let started = Instant::now();
-                                        let _ =
-                                            send_control(&out, &ServerMsg::Pong { ts: *ts }).await;
-                                        let waited = started.elapsed();
-                                        if waited >= Duration::from_millis(500) {
-                                            tracing::warn!(
-                                                %client_id,
-                                                waited_ms = waited.as_millis() as u64,
-                                                queued = out
-                                                    .max_capacity()
-                                                    .saturating_sub(out.capacity()),
-                                                capacity = out.max_capacity(),
-                                                "pong delayed behind outbound backlog"
-                                            );
+                                        // Pongs carry only a timestamp, so they may
+                                        // overtake queued terminal data on the priority
+                                        // lane instead of waiting out the whole queue.
+                                        let pong = ServerMsg::Pong { ts: *ts };
+                                        let sent = match &control {
+                                            Some(ctl) => {
+                                                serde_json::to_string(&pong).ok().is_some_and(
+                                                    |json| ctl.try_send(WsOut::Text(json)).is_ok(),
+                                                )
+                                            }
+                                            None => false,
+                                        };
+                                        // Lane full (or absent): fall back to the data
+                                        // queue and name the backlog if it is slow.
+                                        if !sent {
+                                            let started = Instant::now();
+                                            let _ = send_control(&out, &pong).await;
+                                            let waited = started.elapsed();
+                                            if waited >= Duration::from_millis(500) {
+                                                tracing::warn!(
+                                                    %client_id,
+                                                    waited_ms = waited.as_millis() as u64,
+                                                    queued = out
+                                                        .max_capacity()
+                                                        .saturating_sub(out.capacity()),
+                                                    capacity = out.max_capacity(),
+                                                    "pong delayed behind outbound backlog"
+                                                );
+                                            }
                                         }
                                         continue;
                                     }

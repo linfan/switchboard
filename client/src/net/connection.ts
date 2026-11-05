@@ -77,6 +77,10 @@ export interface StatusMeta {
   attempt?: number;
   /** Last measured round-trip time in ms. */
   rttMs?: number;
+  /** The downlink is backlogged: pongs are late while data still trickles. */
+  degraded?: boolean;
+  /** Estimated downlink rate (bytes/sec) measured while degraded. */
+  downlinkBps?: number;
 }
 
 export interface ConnectionDeps {
@@ -205,6 +209,8 @@ export class ConnectionManager {
   private inboundBytesSincePing = 0;
   private lastInboundAt = 0;
   private lastRttMs: number | null = null;
+  /** Consecutive pongs that arrived too late; drives status and log throttling. */
+  private lateProbes = 0;
 
   constructor(deps: ConnectionDeps) {
     this.d = deps;
@@ -432,6 +438,7 @@ export class ConnectionManager {
     this.authed = true;
     this.welcomed = false;
     this.lastRttMs = null;
+    this.lateProbes = 0;
     this.lastInboundAt = this.now();
     // Transport is authed but the session is not established yet: `welcome`
     // (which only arrives through a paired worker) is what promotes us to
@@ -560,12 +567,28 @@ export class ConnectionManager {
       // keep arriving; silence for a full timeout window is what proves death.
       const sinceInbound = this.now() - this.lastInboundAt;
       if (this.lastInboundAt && sinceInbound < this.heartbeatOpts.timeoutMs) {
-        logToBackend(
-          "warn",
-          `heartbeat pong late but inbound active ${sinceInbound}ms ago ` +
-            `(frames since ping=${this.inboundSincePing}, ` +
-            `bytes since ping=${this.inboundBytesSincePing}); re-probing`,
+        this.lateProbes += 1;
+        const elapsedMs = Math.max(1, this.now() - this.lastPingTs);
+        const downlinkBps = Math.round(
+          (this.inboundBytesSincePing * 1000) / elapsedMs,
         );
+        if (this.welcomed) {
+          this.setStatus("online", {
+            rttMs: this.lastRttMs ?? undefined,
+            degraded: true,
+            downlinkBps,
+          });
+        }
+        // One line when it starts, then about once a minute while it persists.
+        if (this.lateProbes === 1 || this.lateProbes % 6 === 0) {
+          logToBackend(
+            "warn",
+            `heartbeat pong late but inbound active ${sinceInbound}ms ago ` +
+              `(late probes=${this.lateProbes}, ` +
+              `frames since ping=${this.inboundSincePing}, ` +
+              `downlink ~${downlinkBps} B/s); re-probing`,
+          );
+        }
         this.sendPing();
         return;
       }
@@ -591,6 +614,7 @@ export class ConnectionManager {
     }
     const rttMs = this.now() - ts;
     this.lastRttMs = rttMs;
+    this.lateProbes = 0;
     if (rttMs > 1000) {
       logToBackend("warn", `heartbeat pong slow: rtt=${rttMs}ms`);
     }

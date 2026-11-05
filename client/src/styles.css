@@ -140,7 +140,8 @@ body {
   background: #3fb950;
 }
 .dot--connecting,
-.dot--reconnecting {
+.dot--reconnecting,
+.dot--degraded {
   background: #d29922;
 }
 .dot--offline {
@@ -1623,7 +1624,8 @@ audio.weditor__media {
   color: #3fb950;
 }
 .service-panel__conn--connecting,
-.service-panel__conn--reconnecting {
+.service-panel__conn--reconnecting,
+.service-panel__conn--degraded {
   color: #d29922;
 }
 .service-panel__conn--offline {
