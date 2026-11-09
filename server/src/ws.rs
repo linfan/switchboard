@@ -208,13 +208,15 @@ pub async fn run_session(
     control: Option<mpsc::Sender<WsOut>>,
 ) {
     // 1. Handshake: the first frame must be Hello.
-    let (client_id, cursors, acks) = match read_hello(&mut rx).await {
+    let (client_id, cursors, acks, history_enabled) = match read_hello(&mut rx).await {
         Some(h) => h,
         None => return,
     };
-    tracing::info!(%client_id, acks, "client connected");
+    tracing::info!(%client_id, acks, history_enabled, "client connected");
     let connected_at = Instant::now();
     let tracker = AckTracker::new(acks, &cursors);
+    let (history_tx, mut history_rx) = mpsc::channel::<WsOut>(8);
+    let history_workers = HistoryWorkers::new(state.clone(), client_id.clone(), history_tx);
 
     // 2. Subscribe BEFORE replay so output produced during replay isn't missed.
     let mut broadcast_rx = state.tasks.subscribe();
@@ -249,6 +251,7 @@ pub async fn run_session(
         let client_id = client_id.clone();
         let out = out_tx.clone();
         let tracker = tracker.clone();
+        let history = history_workers.clone();
         tokio::spawn(async move {
             let mut last_ping: Option<Instant> = None;
             while let Some(win) = rx.recv().await {
@@ -264,6 +267,17 @@ pub async fn run_session(
                                     // sees it (which still persists the cursor).
                                     ClientMsg::Ack { task_id, seq } => {
                                         tracker.advance(task_id, *seq);
+                                    }
+                                    ClientMsg::HistoryAck { task_id, seq } => {
+                                        history.advance(task_id, *seq);
+                                        continue;
+                                    }
+                                    ClientMsg::HistoryCancel { task_id } => {
+                                        history.cancel(task_id);
+                                        continue;
+                                    }
+                                    ClientMsg::DeleteTask { task_id } => {
+                                        history.cancel(task_id);
                                     }
                                     // Answer pings here: `replay` owns the session
                                     // task while it streams, so routing a Pong
@@ -378,17 +392,16 @@ pub async fn run_session(
         return;
     }
     let mut last_sent: HashMap<String, u64> = HashMap::new();
-    if !replay(
-        &out_tx,
-        &state,
-        &client_id,
-        "connect",
-        &cursors,
-        &mut last_sent,
-        &tracker,
-    )
-    .await
-    {
+    let replay_ctx = ReplayContext {
+        out: &out_tx,
+        state: &state,
+        client_id: &client_id,
+        tracker: &tracker,
+        history_enabled,
+        history_workers: &history_workers,
+    };
+    if !replay(replay_ctx, "connect", &cursors, &mut last_sent).await {
+        history_workers.close();
         tracing::info!(%client_id, reason = "replay failed", "client disconnected");
         return;
     }
@@ -402,6 +415,9 @@ pub async fn run_session(
                 break;
             }
             Some(m) = direct_rx.recv() => {
+                if let ServerMsg::TaskDeleted { task_id } = &m {
+                    history_workers.cancel(task_id);
+                }
                 if !send_control(&out_tx, &m).await {
                     reason = "outbound closed";
                     break;
@@ -409,6 +425,9 @@ pub async fn run_session(
             }
             r = broadcast_rx.recv() => match r {
                 Ok(Outbound::Control(m)) => {
+                    if let ServerMsg::TaskDeleted { task_id } = &m {
+                        history_workers.cancel(task_id);
+                    }
                     if !send_control(&out_tx, &m).await {
                         reason = "outbound closed";
                         break;
@@ -430,15 +449,7 @@ pub async fn run_session(
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(%client_id, skipped = n, "broadcast lagged; resyncing from store");
                     let from = last_sent.clone();
-                    if !replay(
-                        &out_tx,
-                        &state,
-                        &client_id,
-                        "lagged",
-                        &from,
-                        &mut last_sent,
-                        &tracker,
-                    )
+                    if !replay(replay_ctx, "lagged", &from, &mut last_sent)
                     .await
                     {
                         reason = "replay failed";
@@ -449,9 +460,16 @@ pub async fn run_session(
                     reason = "broadcast closed";
                     break;
                 }
+            },
+            Some(out) = history_rx.recv() => {
+                if out_tx.send(out).await.is_err() {
+                    reason = "outbound closed";
+                    break;
+                }
             }
         }
     }
+    history_workers.close();
     tracing::info!(
         %client_id,
         reason,
@@ -579,8 +597,10 @@ fn auth_error(message: &str) -> AuthMsg {
     }
 }
 
-/// Read frames until a `Hello` arrives; returns (client_id, cursors, acks).
-async fn read_hello(rx: &mut mpsc::Receiver<WsIn>) -> Option<(String, HashMap<String, u64>, bool)> {
+/// Read frames until a `Hello` arrives; returns (client_id, cursors, acks, history).
+async fn read_hello(
+    rx: &mut mpsc::Receiver<WsIn>,
+) -> Option<(String, HashMap<String, u64>, bool, bool)> {
     while let Some(win) = rx.recv().await {
         match win {
             WsIn::Text(t) => {
@@ -588,9 +608,10 @@ async fn read_hello(rx: &mut mpsc::Receiver<WsIn>) -> Option<(String, HashMap<St
                     client_id,
                     cursors,
                     acks,
+                    history,
                 }) = serde_json::from_str::<ClientMsg>(&t)
                 {
-                    return Some((client_id, cursors, acks));
+                    return Some((client_id, cursors, acks, history));
                 }
             }
             WsIn::Close => return None,
@@ -644,14 +665,18 @@ impl AckTracker {
             }
         };
         if advanced {
-            self.notify.notify_one();
+            self.notify.notify_waiters();
         }
+    }
+
+    fn reset(&self, task_id: &str) {
+        self.acked.lock().unwrap().insert(task_id.to_string(), 0);
     }
 
     /// The client is gone: fail the pending wait so the replay can unwind.
     fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
-        self.notify.notify_one();
+        self.notify.notify_waiters();
     }
 
     /// Wait until sending `next_seq` stays within [`REPLAY_WINDOW`] frames of
@@ -661,6 +686,9 @@ impl AckTracker {
             return true;
         }
         loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.closed.load(Ordering::Relaxed) {
                 return false;
             }
@@ -674,9 +702,165 @@ impl AckTracker {
             if next_seq.saturating_sub(acked) <= REPLAY_WINDOW {
                 return true;
             }
-            self.notify.notified().await;
+            notified.await;
         }
     }
+
+    async fn wait_for_ack(&self, task_id: &str, seq: u64) -> bool {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.closed.load(Ordering::Relaxed) {
+                return false;
+            }
+            let acked = self
+                .acked
+                .lock()
+                .unwrap()
+                .get(task_id)
+                .copied()
+                .unwrap_or(0);
+            if acked >= seq {
+                return true;
+            }
+            notified.await;
+        }
+    }
+}
+
+const HISTORY_BATCH: u32 = 64;
+
+struct HistoryWorkers {
+    state: SharedState,
+    client_id: String,
+    tx: mpsc::Sender<WsOut>,
+    tracker: Arc<AckTracker>,
+    handles: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+}
+
+impl HistoryWorkers {
+    fn new(state: SharedState, client_id: String, tx: mpsc::Sender<WsOut>) -> Arc<Self> {
+        Arc::new(Self {
+            state,
+            client_id,
+            tx,
+            tracker: AckTracker::new(true, &HashMap::new()),
+            handles: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn start(self: &Arc<Self>, task_id: String, through: u64) {
+        self.cancel(&task_id);
+        self.tracker.reset(&task_id);
+        let workers = self.clone();
+        let task = task_id.clone();
+        let handle = tokio::spawn(async move {
+            workers.run(task, through).await;
+        });
+        self.handles.lock().unwrap().insert(task_id, handle);
+    }
+
+    fn advance(&self, task_id: &str, seq: u64) {
+        self.tracker.advance(task_id, seq);
+    }
+
+    fn cancel(&self, task_id: &str) {
+        if let Some(handle) = self.handles.lock().unwrap().remove(task_id) {
+            handle.abort();
+        }
+    }
+
+    fn close(&self) {
+        self.handles
+            .lock()
+            .unwrap()
+            .drain()
+            .for_each(|(_, handle)| handle.abort());
+        self.tracker.close();
+    }
+
+    async fn run(self: Arc<Self>, task_id: String, through: u64) {
+        let mut after = 0;
+        while after < through {
+            let chunks = match self
+                .state
+                .tasks
+                .chunks_window(&task_id, after, through, HISTORY_BATCH)
+                .await
+            {
+                Ok(chunks) => chunks,
+                Err(error) => {
+                    self.fail(&task_id, error.to_string()).await;
+                    return;
+                }
+            };
+            if chunks.is_empty() {
+                self.fail(&task_id, format!("missing chunk after {after}"))
+                    .await;
+                return;
+            }
+            for (seq, data) in chunks {
+                if seq != after + 1 {
+                    self.fail(
+                        &task_id,
+                        format!("non-contiguous chunk {seq} after {after}"),
+                    )
+                    .await;
+                    return;
+                }
+                if !self.tracker.wait_for_room(&task_id, seq).await {
+                    return;
+                }
+                let uuid = match Uuid::parse_str(&task_id) {
+                    Ok(uuid) => uuid,
+                    Err(_) => return,
+                };
+                let frame = Frame::History {
+                    task_id: uuid,
+                    seq,
+                    data,
+                };
+                if self.tx.send(WsOut::Binary(frame.encode())).await.is_err() {
+                    return;
+                }
+                after = seq;
+            }
+        }
+        if !self.tracker.wait_for_ack(&task_id, through).await {
+            return;
+        }
+        let done = ServerMsg::HistoryDone {
+            task_id: task_id.clone(),
+            last_seq: through,
+        };
+        if let Ok(json) = serde_json::to_string(&done) {
+            let _ = self.tx.send(WsOut::Text(json)).await;
+        }
+        tracing::info!(client_id = %self.client_id, %task_id, last_seq = through, "history replay complete");
+    }
+
+    async fn fail(&self, task_id: &str, message: String) {
+        tracing::warn!(client_id = %self.client_id, %task_id, %message, "history replay failed");
+        let error = ServerMsg::Error {
+            task_id: Some(task_id.to_string()),
+            code: Some("history_failed".into()),
+            message,
+        };
+        if let Ok(json) = serde_json::to_string(&error) {
+            let _ = self.tx.send(WsOut::Text(json)).await;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ReplayContext<'a> {
+    out: &'a mpsc::Sender<WsOut>,
+    state: &'a SharedState,
+    client_id: &'a str,
+    tracker: &'a AckTracker,
+    history_enabled: bool,
+    history_workers: &'a Arc<HistoryWorkers>,
 }
 
 /// Reconstruct every task's terminal for a (re)connecting client, then send a
@@ -685,14 +869,19 @@ impl AckTracker {
 /// path leaves `last_sent` at the highest seq the client now holds, so live dedup is
 /// exact. Advances the durable server-side cursor to the client's position.
 async fn replay(
-    out: &mpsc::Sender<WsOut>,
-    state: &SharedState,
-    client_id: &str,
+    ctx: ReplayContext<'_>,
     reason: &'static str,
     cursors: &HashMap<String, u64>,
     last_sent: &mut HashMap<String, u64>,
-    tracker: &AckTracker,
 ) -> bool {
+    let ReplayContext {
+        out,
+        state,
+        client_id,
+        tracker,
+        history_enabled,
+        history_workers,
+    } = ctx;
     let tasks = match state.tasks.list().await {
         Ok(t) => t,
         Err(e) => {
@@ -738,10 +927,12 @@ async fn replay(
             .then(|| state.tasks.snapshot(&task.id))
             .flatten();
 
-        if let Some(screen) = snapshot {
+        let mut replay_tail = tail;
+        if let Some((snapshot_seq, screen)) = snapshot {
+            replay_tail = snapshot_seq;
             let frame = Frame::Snapshot {
                 task_id: uuid,
-                seq: tail,
+                seq: snapshot_seq,
                 data: screen,
             };
             let encoded = frame.encode();
@@ -750,7 +941,17 @@ async fn replay(
             if !send_binary(out, encoded).await {
                 return false;
             }
-            last_sent.insert(task.id.clone(), tail);
+            last_sent.insert(task.id.clone(), snapshot_seq);
+            if after == 0 && tracker.enabled && history_enabled {
+                let start = ServerMsg::HistoryStart {
+                    task_id: task.id.clone(),
+                    last_seq: snapshot_seq,
+                };
+                if !send_control(out, &start).await {
+                    return false;
+                }
+                history_workers.start(task.id.clone(), snapshot_seq);
+            }
         } else if let Ok(chunks) = state.tasks.chunks_after(&task.id, after).await {
             for (seq, data) in chunks {
                 // Pace the byte replay to what the client has applied: an
@@ -776,7 +977,7 @@ async fn replay(
 
         let done = ServerMsg::ReplayDone {
             task_id: task.id.clone(),
-            last_seq: tail,
+            last_seq: replay_tail,
         };
         if !send_control(out, &done).await {
             return false;
@@ -801,7 +1002,10 @@ async fn handle_client_msg(
     match msg {
         // Hello is consumed by the handshake and Ping is answered by the
         // transport dispatcher (so a long replay cannot starve the heartbeat).
-        ClientMsg::Hello { .. } | ClientMsg::Ping { .. } => {}
+        ClientMsg::Hello { .. }
+        | ClientMsg::Ping { .. }
+        | ClientMsg::HistoryAck { .. }
+        | ClientMsg::HistoryCancel { .. } => {}
         ClientMsg::Ack { task_id, seq } => {
             if let Err(e) = state.store.set_cursor(client_id, &task_id, seq).await {
                 tracing::warn!(%client_id, %task_id, error=%e, "ack failed");

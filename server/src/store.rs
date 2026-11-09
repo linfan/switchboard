@@ -283,6 +283,27 @@ impl Store {
         Ok(rows.into_iter().map(|(seq, b)| (seq as u64, b)).collect())
     }
 
+    /// A bounded page of chunks in `(after, through]`, used by history recovery.
+    pub async fn chunks_window(
+        &self,
+        task_id: &str,
+        after: u64,
+        through: u64,
+        limit: u32,
+    ) -> AppResult<Vec<(u64, Vec<u8>)>> {
+        let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT seq, bytes FROM pty_chunks
+             WHERE task_id = ? AND seq > ? AND seq <= ? ORDER BY seq ASC LIMIT ?",
+        )
+        .bind(task_id)
+        .bind(after as i64)
+        .bind(through as i64)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(seq, b)| (seq as u64, b)).collect())
+    }
+
     // ---- delivery cursors ----------------------------------------------
 
     /// Advance the durable delivery cursor for (client, task). Never moves
@@ -390,6 +411,10 @@ mod tests {
         assert_eq!(after1.len(), 3);
         assert_eq!(after1[0].0, 2);
         assert_eq!(after1[0].1, b"b");
+        let window = s.chunks_window("t1", 1, 3, 1).await.unwrap();
+        assert_eq!(window, vec![(2, b"b".to_vec())]);
+        let window = s.chunks_window("t1", 1, 3, 10).await.unwrap();
+        assert_eq!(window, vec![(2, b"b".to_vec()), (3, b"c".to_vec())]);
         let after_all = s.chunks_after("t1", 4).await.unwrap();
         assert!(after_all.is_empty());
     }

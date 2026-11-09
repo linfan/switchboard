@@ -238,6 +238,9 @@ pub enum ClientMsg {
         /// in older clients (`false`), which keep the unpaced behaviour.
         #[serde(default)]
         acks: bool,
+        /// Restore scrollback in a separate history stream after a fresh snapshot.
+        #[serde(default)]
+        history: bool,
     },
     /// Create a new task (conversation) running the given tool on a PTY sized
     /// `cols` × `rows` (the client's initial terminal size).
@@ -269,6 +272,14 @@ pub enum ClientMsg {
         #[ts(type = "number")]
         seq: u64,
     },
+    /// Acknowledge history parsed by the offscreen terminal, independently of live output.
+    HistoryAck {
+        task_id: String,
+        #[ts(type = "number")]
+        seq: u64,
+    },
+    /// Stop a history transfer; the visible snapshot-plus-live terminal remains active.
+    HistoryCancel { task_id: String },
     /// Liveness probe; server replies `Pong` echoing `ts`.
     Ping {
         #[ts(type = "number")]
@@ -302,6 +313,18 @@ pub enum ServerMsg {
     /// Terminal OUTPUT/SNAPSHOT bytes travel as binary WS frames (see
     /// `frame.rs`), not as members of this enum.
     ReplayDone {
+        task_id: String,
+        #[ts(type = "number")]
+        last_seq: u64,
+    },
+    /// Start raw history recovery through this snapshot sequence.
+    HistoryStart {
+        task_id: String,
+        #[ts(type = "number")]
+        last_seq: u64,
+    },
+    /// The client has parsed all history through this snapshot sequence.
+    HistoryDone {
         task_id: String,
         #[ts(type = "number")]
         last_seq: u64,
@@ -340,11 +363,15 @@ mod tests {
             client_id: "c1".into(),
             cursors,
             acks: true,
+            history: true,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"hello\""));
         match serde_json::from_str::<ClientMsg>(&json).unwrap() {
-            ClientMsg::Hello { acks, .. } => assert!(acks),
+            ClientMsg::Hello { acks, history, .. } => {
+                assert!(acks);
+                assert!(history);
+            }
             other => panic!("expected hello, got {other:?}"),
         }
     }
@@ -354,7 +381,10 @@ mod tests {
         // Builds no `acks` field, exactly as builds before pacing did.
         let json = r#"{"type":"hello","client_id":"c1","cursors":{}}"#;
         match serde_json::from_str::<ClientMsg>(json).unwrap() {
-            ClientMsg::Hello { acks, .. } => assert!(!acks),
+            ClientMsg::Hello { acks, history, .. } => {
+                assert!(!acks);
+                assert!(!history);
+            }
             other => panic!("expected hello, got {other:?}"),
         }
     }

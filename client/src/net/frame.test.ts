@@ -6,6 +6,7 @@ import {
   encodeInput,
   Frame,
   FrameError,
+  KIND_HISTORY,
   KIND_INPUT,
   KIND_OUTPUT,
   KIND_SNAPSHOT,
@@ -41,6 +42,13 @@ describe("binary frame codec", () => {
     const data = new TextEncoder().encode("\x1b[2J\x1b[H$ ");
     const f: Frame = { kind: "snapshot", taskId: TID, seq: 42, data };
     expect(encode(f)[0]).toBe(KIND_SNAPSHOT);
+    expectSameFrame(roundTrip(f), f);
+  });
+
+  it("round-trips HISTORY independently of OUTPUT", () => {
+    const data = new TextEncoder().encode("older\r\n");
+    const f: Frame = { kind: "history", taskId: TID, seq: 41, data };
+    expect(encode(f)[0]).toBe(KIND_HISTORY);
     expectSameFrame(roundTrip(f), f);
   });
 

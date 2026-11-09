@@ -79,6 +79,9 @@ export class ConnectionPool {
     terminals.setSinks(
       (sid, tid, bytes) => this.sendInput(sid, tid, bytes),
       (sid, tid, cols, rows) => this.sendResize(sid, tid, cols, rows),
+      (sid, tid, seq) =>
+        this.send(sid, { type: "history_ack", task_id: tid, seq }),
+      (sid, tid) => this.send(sid, { type: "history_cancel", task_id: tid }),
     );
     const sync = (services: ServiceConfig[], settings: Settings) => {
       const live = new Set(services.map((s) => s.id));
@@ -141,7 +144,8 @@ export class ConnectionPool {
           // that happened while offline reaches the server and its snapshots
           // match the client's viewport.
           onReady: () => terminals.resync(svc.id),
-          onStatus: (status, meta) =>
+          onStatus: (status, meta) => {
+            if (status !== "online") terminals.cancelHistoryForService(svc.id);
             useStore.getState().setRuntime(svc.id, {
               status,
               lastError: meta?.error,
@@ -152,7 +156,8 @@ export class ConnectionPool {
                 0,
               degraded: !!meta?.degraded,
               downlinkBps: meta?.downlinkBps,
-            }),
+            });
+          },
         });
         this.managers.set(svc.id, mgr);
         mgr.start();
@@ -201,7 +206,13 @@ export class ConnectionPool {
 
   /** Apply a control message, disposing a deleted task's terminal first. */
   private onControl(serviceId: string, msg: ServerMsg): void {
-    if (msg.type === "task_deleted") {
+    if (msg.type === "history_start") {
+      terminals.beginHistory(serviceId, msg.task_id, msg.last_seq);
+    } else if (msg.type === "history_done") {
+      terminals.finishHistory(serviceId, msg.task_id);
+    } else if (msg.type === "error" && msg.code === "history_failed") {
+      if (msg.task_id) terminals.failHistory(serviceId, msg.task_id);
+    } else if (msg.type === "task_deleted") {
       terminals.dispose(serviceId, msg.task_id);
     }
     useStore.getState().applyServerMsg(serviceId, msg);
@@ -217,6 +228,10 @@ export class ConnectionPool {
     }
     // The terminal write is applied immediately (xterm queues its own parse);
     // the cursor advance is buffered and coalesced — see `pendingCursors`.
+    if (frame.kind === "history") {
+      terminals.writeHistory(serviceId, frame.taskId, frame);
+      return;
+    }
     terminals.write(serviceId, frame.taskId, frame);
     if (frame.kind === "output" || frame.kind === "snapshot") {
       this.queueCursor(serviceId, frame.taskId, frame.seq);

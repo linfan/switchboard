@@ -11,6 +11,7 @@
 //! ```text
 //!   OUTPUT    [0x01][task_id:16][seq:u64][data...]   server -> client
 //!   SNAPSHOT  [0x02][task_id:16][seq:u64][data...]   server -> client
+//!   HISTORY   [0x03][task_id:16][seq:u64][data...]   server -> client
 //!   INPUT     [0x10][task_id:16][data...]            client -> server
 //! ```
 //!
@@ -37,6 +38,7 @@ use uuid::Uuid;
 /// Frame-kind discriminants (first byte on the wire).
 pub const KIND_OUTPUT: u8 = 0x01;
 pub const KIND_SNAPSHOT: u8 = 0x02;
+pub const KIND_HISTORY: u8 = 0x03;
 pub const KIND_INPUT: u8 = 0x10;
 
 const UUID_LEN: usize = 16;
@@ -54,6 +56,12 @@ pub enum Frame {
     /// Screen snapshot that reconstructs terminal state on (re)connect
     /// (server → client). `data` is ANSI that redraws the current screen.
     Snapshot {
+        task_id: Uuid,
+        seq: u64,
+        data: Vec<u8>,
+    },
+    /// Historical output reconstructed offscreen (server → client).
+    History {
         task_id: Uuid,
         seq: u64,
         data: Vec<u8>,
@@ -91,6 +99,7 @@ impl Frame {
         match self {
             Frame::Output { task_id, .. }
             | Frame::Snapshot { task_id, .. }
+            | Frame::History { task_id, .. }
             | Frame::Input { task_id, .. } => *task_id,
         }
     }
@@ -102,6 +111,7 @@ impl Frame {
             Frame::Snapshot { task_id, seq, data } => {
                 encode_seq(KIND_SNAPSHOT, task_id, *seq, data)
             }
+            Frame::History { task_id, seq, data } => encode_seq(KIND_HISTORY, task_id, *seq, data),
             Frame::Input { task_id, data } => {
                 let mut out = Vec::with_capacity(1 + UUID_LEN + data.len());
                 out.push(KIND_INPUT);
@@ -116,7 +126,7 @@ impl Frame {
     pub fn decode(bytes: &[u8]) -> Result<Frame, FrameError> {
         let (&kind, rest) = bytes.split_first().ok_or(FrameError::Empty)?;
         match kind {
-            KIND_OUTPUT | KIND_SNAPSHOT => {
+            KIND_OUTPUT | KIND_SNAPSHOT | KIND_HISTORY => {
                 if rest.len() < UUID_LEN + SEQ_LEN {
                     return Err(FrameError::TooShort);
                 }
@@ -125,10 +135,10 @@ impl Frame {
                 seq_bytes.copy_from_slice(&rest[UUID_LEN..UUID_LEN + SEQ_LEN]);
                 let seq = u64::from_be_bytes(seq_bytes);
                 let data = rest[UUID_LEN + SEQ_LEN..].to_vec();
-                Ok(if kind == KIND_OUTPUT {
-                    Frame::Output { task_id, seq, data }
-                } else {
-                    Frame::Snapshot { task_id, seq, data }
+                Ok(match kind {
+                    KIND_OUTPUT => Frame::Output { task_id, seq, data },
+                    KIND_SNAPSHOT => Frame::Snapshot { task_id, seq, data },
+                    _ => Frame::History { task_id, seq, data },
                 })
             }
             KIND_INPUT => {
@@ -188,6 +198,18 @@ mod tests {
         };
         let bytes = f.encode();
         assert_eq!(bytes[0], KIND_SNAPSHOT);
+        assert_eq!(Frame::decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn history_round_trips() {
+        let f = Frame::History {
+            task_id: tid(),
+            seq: 41,
+            data: b"older\r\n".to_vec(),
+        };
+        let bytes = f.encode();
+        assert_eq!(bytes[0], KIND_HISTORY);
         assert_eq!(Frame::decode(&bytes).unwrap(), f);
     }
 

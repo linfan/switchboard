@@ -10,8 +10,12 @@ export type ClientMsg = { "type": "hello", client_id: string, cursors: Record<st
  * dumping it and overflowing the repeater's per-stream queue. Absent
  * in older clients (`false`), which keep the unpaced behaviour.
  */
-acks: boolean, } | { "type": "create_task", tool: string, title: string | null, 
+acks: boolean,
+/**
+ * Restore scrollback in a separate history stream after a fresh snapshot.
+ */
+history: boolean, } | { "type": "create_task", tool: string, title: string | null,
 /**
  * Working directory for the agent process (server-validated).
  */
-cwd: string | null, cols: number, rows: number, } | { "type": "resize", task_id: string, cols: number, rows: number, } | { "type": "terminate_task", task_id: string, } | { "type": "delete_task", task_id: string, } | { "type": "ack", task_id: string, seq: number, } | { "type": "ping", ts: number, };
+cwd: string | null, cols: number, rows: number, } | { "type": "resize", task_id: string, cols: number, rows: number, } | { "type": "terminate_task", task_id: string, } | { "type": "delete_task", task_id: string, } | { "type": "ack", task_id: string, seq: number, } | { "type": "history_ack", task_id: string, seq: number, } | { "type": "history_cancel", task_id: string, } | { "type": "ping", ts: number, };

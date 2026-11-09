@@ -30,15 +30,18 @@ transport security, repeater mode, and self-upgrade.
 2. A chunk is **persisted before it is broadcast**, and only then fed to the
    emulator. If the server crashes between persist and broadcast, it is still
    replayable.
-3. Every client keeps a **durable cursor** per task (`highest applied chunk
-   seq`), persisted locally. On (re)connect it sends `Hello { cursors }`; per
-   task the server either **byte fast-forwards** the chunks with `seq > cursor`
-   in order, or — when the backlog exceeds a threshold — sends a single **screen
-   snapshot** (the emulator's `contents_formatted()`) at the tail seq. Either way
-   it finishes with a `ReplayDone`.
-4. Live delivery **dedups by seq**, so a client that just replayed never double-
+3. Every client keeps an **in-memory live cursor** per task (`highest applied
+   chunk seq`). On (re)connect it sends `Hello { cursors }`; a nonzero cursor
+   means the page still owns the matching xterm, so the server byte fast-forwards
+   at any gap size. A fresh client starts at zero and uses a screen snapshot for
+   a large backlog. Each snapshot carries the emulator's exact applied seq.
+4. Fresh clients that negotiate history recovery receive the snapshot immediately,
+   then rebuild scrollback in an offscreen xterm from an independently paced
+   HISTORY stream while the visible terminal continues live OUTPUT. Once the
+   candidate catches up it replaces the visible terminal without a reset.
+5. Live delivery **dedups by seq**, so a client that just replayed never double-
    applies an in-flight chunk. No loss, no duplicates, no gaps.
-5. The `INPUT` data-plane frame carries raw keystrokes straight to the PTY;
+6. The `INPUT` data-plane frame carries raw keystrokes straight to the PTY;
    `Resize` (control plane) keeps the PTY's window size in sync with xterm.
 
 ## Reconnection & liveness (client)
@@ -60,9 +63,10 @@ exported to TypeScript via `ts-rs` (`client/src/protocol/`), so client and serve
 can never drift.
 
 - `ClientMsg`: `hello` · `create_task` (with `cols`/`rows`) · `resize` ·
-  `terminate_task` · `delete_task` · `ack` · `ping`
+  `terminate_task` · `delete_task` · `ack` · `history_ack` · `history_cancel` ·
+  `ping`
 - `ServerMsg`: `welcome` · `task_created` · `task_state` · `task_deleted` ·
-  `replay_done` · `pong` · `error`
+  `replay_done` · `history_start` · `history_done` · `pong` · `error`
 
 `terminate_task` stops a task's process but keeps its history (so it can still be
 replayed); `delete_task` terminates it *and* removes the task plus all its
@@ -77,6 +81,7 @@ big-endian with a 16-byte raw-UUID task id:
 |-------|--------|-----------|
 | `OUTPUT` | `[0x01][task_id:16][seq:u64][data]` | server → client |
 | `SNAPSHOT` | `[0x02][task_id:16][seq:u64][data]` | server → client |
+| `HISTORY` | `[0x03][task_id:16][seq:u64][data]` | server → client |
 | `INPUT` | `[0x10][task_id:16][data]` | client → server |
 
 ## Transport security (`SWB-v1`)

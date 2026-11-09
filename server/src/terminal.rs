@@ -11,6 +11,7 @@ pub struct TerminalEmulator {
     parser: vt100::Parser,
     cols: u16,
     rows: u16,
+    seq: u64,
 }
 
 impl TerminalEmulator {
@@ -21,12 +22,14 @@ impl TerminalEmulator {
             parser: vt100::Parser::new(rows, cols, 0),
             cols,
             rows,
+            seq: 0,
         }
     }
 
-    /// Feed raw PTY bytes into the emulator.
-    pub fn process(&mut self, bytes: &[u8]) {
+    /// Feed raw PTY bytes into the emulator and record the durable chunk applied.
+    pub fn process(&mut self, bytes: &[u8], seq: u64) {
         self.parser.process(bytes);
+        self.seq = seq;
     }
 
     /// Resize the emulated screen so snapshots match the client's viewport.
@@ -38,9 +41,9 @@ impl TerminalEmulator {
         }
     }
 
-    /// ANSI escape sequences that reconstruct the current visible screen.
-    pub fn snapshot(&self) -> Vec<u8> {
-        self.parser.screen().contents_formatted()
+    /// The last applied chunk and ANSI that reconstructs that exact visible screen.
+    pub fn snapshot(&self) -> (u64, Vec<u8>) {
+        (self.seq, self.parser.screen().contents_formatted())
     }
 
     /// Plain-text contents of the current screen (rows joined by `\n`), used in
@@ -58,14 +61,14 @@ mod tests {
     #[test]
     fn snapshot_reconstructs_the_screen() {
         let mut term = TerminalEmulator::new(80, 24);
-        term.process(b"\x1b[2J\x1b[H"); // clear + home
-        term.process(b"hello \x1b[31mred\x1b[0m world");
+        term.process(b"\x1b[2J\x1b[H", 1); // clear + home
+        term.process(b"hello \x1b[31mred\x1b[0m world", 2);
         let expected = term.contents();
 
         // Replay the snapshot into a fresh emulator: it must converge.
         let snap = term.snapshot();
         let mut replay = TerminalEmulator::new(80, 24);
-        replay.process(&snap);
+        replay.process(&snap.1, snap.0);
         assert_eq!(replay.contents(), expected);
         assert!(expected.contains("hello red world"));
     }
@@ -76,7 +79,7 @@ mod tests {
         term.resize(100, 40);
         // A line longer than 80 cols must not wrap at the old width.
         let line = "x".repeat(90);
-        term.process(line.as_bytes());
+        term.process(line.as_bytes(), 1);
         assert!(term.contents().lines().next().unwrap().len() >= 90);
     }
 }

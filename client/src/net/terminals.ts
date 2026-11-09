@@ -9,6 +9,7 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
 import type { Frame } from "./frame";
+import { logToBackend } from "./log";
 import { convKey } from "../store/types";
 
 /** Keystrokes typed into a terminal are sent to the owning service/task. */
@@ -24,6 +25,8 @@ export type ResizeSink = (
   cols: number,
   rows: number,
 ) => void;
+type HistoryAckSink = (serviceId: string, taskId: string, seq: number) => void;
+type HistoryCancelSink = (serviceId: string, taskId: string) => void;
 
 interface Entry {
   term: Terminal;
@@ -63,6 +66,8 @@ interface Entry {
   /** Last buffer position not produced by a resize transient. */
   stableY: number;
   resizeRestore: ResizeRestore | null;
+  history: HistoryRestore | null;
+  lastSnapshot: { seq: number; data: Uint8Array } | null;
 }
 
 interface ResizeRestore {
@@ -72,6 +77,25 @@ interface ResizeRestore {
   framesRemaining: number;
   raf: number | null;
 }
+
+type HistoryLiveEvent =
+  | { kind: "output"; seq: number; data: Uint8Array }
+  | { kind: "resize"; cols: number; rows: number };
+
+interface HistoryRestore {
+  term: Terminal;
+  fit: FitAddon;
+  el: HTMLDivElement;
+  throughSeq: number;
+  nextHistorySeq: number;
+  nextLiveSeq: number;
+  liveQueue: HistoryLiveEvent[];
+  liveBytes: number;
+  done: boolean;
+  draining: boolean;
+}
+
+const MAX_HISTORY_LIVE_BYTES = 16 * 1024 * 1024;
 
 const entries = new Map<string, Entry>();
 const encoder = new TextEncoder();
@@ -154,7 +178,15 @@ function domAtBottom(vp: HTMLElement): boolean {
  */
 function restoreScrollTop(e: Entry): void {
   const vp = viewportEl(e);
-  if (vp) vp.scrollTop = e.follow ? vp.scrollHeight : e.scrollTop;
+  if (!vp) return;
+  if (e.follow) {
+    vp.scrollTop = vp.scrollHeight;
+  } else {
+    const height = rowHeight(e);
+    vp.scrollTop =
+      height > 0 ? e.term.buffer.active.viewportY * height : e.scrollTop;
+  }
+  e.scrollTop = vp.scrollTop;
 }
 
 function rowHeight(e: Entry): number {
@@ -208,6 +240,8 @@ function fitAndRestore(e: Entry, force = false): void {
     return;
   }
 
+  const previousCols = e.term.cols;
+  const previousRows = e.term.rows;
   const b = e.term.buffer.active;
   const stableY = Math.max(0, Math.min(e.stableY, b.baseY));
   const previousRestore = e.resizeRestore;
@@ -226,6 +260,16 @@ function fitAndRestore(e: Entry, force = false): void {
   } catch {
     cancelResizeRestore(e);
     return;
+  }
+  if (
+    e.history &&
+    (e.term.cols !== previousCols || e.term.rows !== previousRows)
+  ) {
+    queueHistoryEvent(e, e.history, {
+      kind: "resize",
+      cols: e.term.cols,
+      rows: e.term.rows,
+    });
   }
   restoreViewport(e);
 
@@ -335,11 +379,53 @@ let fontSize = 13;
 
 let inputSink: InputSink | null = null;
 let resizeSink: ResizeSink | null = null;
+let historyAckSink: HistoryAckSink | null = null;
+let historyCancelSink: HistoryCancelSink | null = null;
 
 /** Wire the send callbacks (the pool provides these once, at startup). */
-export function setSinks(input: InputSink, resize: ResizeSink): void {
+export function setSinks(
+  input: InputSink,
+  resize: ResizeSink,
+  historyAck: HistoryAckSink,
+  historyCancel: HistoryCancelSink,
+): void {
   inputSink = input;
   resizeSink = resize;
+  historyAckSink = historyAck;
+  historyCancelSink = historyCancel;
+}
+
+function createParts(
+  serviceId: string,
+  taskId: string,
+  cols: number,
+  rows: number,
+  active: boolean,
+): { term: Terminal; fit: FitAddon; el: HTMLDivElement } {
+  const term = new Terminal({
+    convertEol: false,
+    cursorBlink: true,
+    disableStdin: !active,
+    cols,
+    rows,
+    fontFamily:
+      'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+    fontSize,
+    scrollback: 10000,
+    theme: { background: "#0b0f14" },
+    scrollOnUserInput: false,
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  if (active) {
+    term.onData((s) => inputSink?.(serviceId, taskId, encoder.encode(s)));
+    term.onResize(({ cols, rows }) =>
+      resizeSink?.(serviceId, taskId, cols, rows),
+    );
+  }
+  const el = document.createElement("div");
+  el.className = "term-host";
+  return { term, fit, el };
 }
 
 function ensure(serviceId: string, taskId: string): Entry {
@@ -347,28 +433,7 @@ function ensure(serviceId: string, taskId: string): Entry {
   let e = entries.get(key);
   if (e) return e;
 
-  const term = new Terminal({
-    convertEol: false,
-    cursorBlink: true,
-    fontFamily:
-      'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
-    fontSize,
-    scrollback: 10000,
-    theme: { background: "#0b0f14" },
-    // xterm otherwise jumps to the bottom on every user byte — including
-    // control bytes like Ctrl+C's ^C — while the user is reading scrollback.
-    // The keydown listener in `attach` decides which input should jump.
-    scrollOnUserInput: false,
-  });
-  const fit = new FitAddon();
-  term.loadAddon(fit);
-  term.onData((s) => inputSink?.(serviceId, taskId, encoder.encode(s)));
-  term.onResize(({ cols, rows }) =>
-    resizeSink?.(serviceId, taskId, cols, rows),
-  );
-
-  const el = document.createElement("div");
-  el.className = "term-host";
+  const { term, fit, el } = createParts(serviceId, taskId, 80, 24, true);
 
   e = {
     term,
@@ -385,6 +450,8 @@ function ensure(serviceId: string, taskId: string): Entry {
     wheelPx: 0,
     stableY: 0,
     resizeRestore: null,
+    history: null,
+    lastSnapshot: null,
     serviceId,
     taskId,
   };
@@ -396,20 +463,23 @@ function ensure(serviceId: string, taskId: string): Entry {
 export function write(serviceId: string, taskId: string, frame: Frame): void {
   const e = ensure(serviceId, taskId);
   if (frame.kind === "snapshot") {
-    // A snapshot is an authoritative full-screen redraw: clear, then paint. It
-    // reconstructs the *current* screen, so always land the viewport on it.
+    cancelHistory(e, false);
+    e.lastSnapshot = { seq: frame.seq, data: frame.data };
     cancelResizeRestore(e);
-    e.term.reset();
-    e.term.write(frame.data, () => {
-      scrollToBottomNow(e);
+    const term = e.term;
+    term.reset();
+    term.write(frame.data, () => {
+      if (e.term === term) scrollToBottomNow(e);
     });
   } else if (frame.kind === "output") {
-    // xterm auto-follows new lines whenever its own `isUserScrolling` flag is
-    // clear, so no scroll is needed here. Only repair a following terminal
-    // whose viewport was left above the last line by a reflow race.
-    e.term.write(frame.data, () => {
-      if (!e.follow) return;
-      const b = e.term.buffer.active;
+    e.lastSnapshot = null;
+    const history = e.history;
+    if (history && frame.seq <= history.throughSeq) return;
+    if (history) queueHistoryLive(e, history, frame);
+    const term = e.term;
+    term.write(frame.data, () => {
+      if (e.term !== term || !e.follow) return;
+      const b = term.buffer.active;
       if (b.viewportY < b.baseY) scrollToBottomNow(e);
     });
   }
@@ -488,6 +558,60 @@ export function scrollToBottom(serviceId: string, taskId: string): void {
   e.term.focus();
 }
 
+function wireOpened(e: Entry): void {
+  const term = e.term;
+  const el = e.el;
+  e.opened = true;
+  term.onScroll(() => {
+    if (e.term !== term || e.resizeRestore) return;
+    e.stableY = term.buffer.active.viewportY;
+    followFromBuffer(e);
+  });
+
+  const vp = viewportEl(e);
+  vp?.addEventListener("scroll", () => {
+    if (e.term === term) handleViewportScroll(e, vp);
+  });
+  vp?.addEventListener("mousedown", (ev: MouseEvent) => {
+    if (e.term !== term || ev.button !== 0) return;
+    e.scrollbarDrag = true;
+    markUserScroll(e, true);
+    const up = () => {
+      e.scrollbarDrag = false;
+      markUserScroll(e, true);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mouseup", up);
+  });
+  el.addEventListener("wheel", (ev) => handleWheel(e, ev), {
+    capture: true,
+    passive: false,
+  });
+  el.addEventListener("touchstart", () => markUserScroll(e, true), {
+    passive: true,
+  });
+  el.addEventListener("touchmove", () => markUserScroll(e, true), {
+    passive: true,
+  });
+  el.addEventListener("touchend", () => markUserScroll(e, true), {
+    passive: true,
+  });
+  el.addEventListener(
+    "keydown",
+    (ev) => {
+      if (e.lock && !e.follow && isTypingKey(ev)) jumpToBottom(e);
+    },
+    true,
+  );
+  el.addEventListener(
+    "paste",
+    () => {
+      if (e.lock && !e.follow) jumpToBottom(e);
+    },
+    true,
+  );
+}
+
 /** Mount a task's terminal into `host` (idempotent across task switches). */
 export function attach(
   serviceId: string,
@@ -498,68 +622,14 @@ export function attach(
   host.appendChild(e.el);
   if (!e.opened) {
     e.term.open(e.el);
-    e.opened = true;
-    // Keyboard/selection scrolling goes through xterm's public `scrollLines`,
-    // which fires onScroll with the new buffer position.
-    e.term.onScroll(() => {
-      if (e.resizeRestore) return;
-      e.stableY = e.term.buffer.active.viewportY;
-      followFromBuffer(e);
-    });
-
-    const vp = viewportEl(e);
-    vp?.addEventListener("scroll", () => handleViewportScroll(e, vp));
-    // Mousedown on the viewport itself means the native scrollbar thumb;
-    // scroll events until release belong to the user.
-    vp?.addEventListener("mousedown", (ev: MouseEvent) => {
-      if (ev.button !== 0) return;
-      e.scrollbarDrag = true;
-      markUserScroll(e, true);
-      const up = () => {
-        e.scrollbarDrag = false;
-        markUserScroll(e, true);
-        window.removeEventListener("mouseup", up);
-      };
-      window.addEventListener("mouseup", up);
-    });
-    // Capture phase runs before xterm's own wheel listener on `.xterm`, so the
-    // normal-buffer wheel gesture never reaches its DOM scroll path.
-    e.el.addEventListener("wheel", (ev) => handleWheel(e, ev), {
-      capture: true,
-      passive: false,
-    });
-    e.el.addEventListener("touchstart", () => markUserScroll(e, true), {
-      passive: true,
-    });
-    e.el.addEventListener("touchmove", () => markUserScroll(e, true), {
-      passive: true,
-    });
-    e.el.addEventListener("touchend", () => markUserScroll(e, true), {
-      passive: true,
-    });
-    // When the auto-follow lock is on and the user has scrolled away, typing
-    // should jump back to the bottom and resume following. Control shortcuts
-    // (Ctrl+C, Cmd+C, arrows, Escape, …) leave the viewport alone. Capture
-    // phase: xterm cancels (stopPropagation) the keydowns it consumes.
-    e.el.addEventListener(
-      "keydown",
-      (ev) => {
-        if (e.lock && !e.follow && isTypingKey(ev)) jumpToBottom(e);
-      },
-      true,
-    );
-    // Pasting inserts text like typing does, but produces no keydown.
-    e.el.addEventListener(
-      "paste",
-      () => {
-        if (e.lock && !e.follow) jumpToBottom(e);
-      },
-      true,
-    );
+    wireOpened(e);
   }
   restoreScrollTop(e);
+  const term = e.term;
   const settle = () => {
+    if (e.term !== term) return;
     fitAndRestore(e);
+    restoreScrollTop(e);
     // Repaint every row: output written while this terminal was detached (a
     // background task) can leave the renderer's grid stale, drawing new content
     // over old on re-attach. A full refresh clears that; a plain fit does not
@@ -568,13 +638,218 @@ export function attach(
   };
   // Defer the first fit until the host has a measured size.
   requestAnimationFrame(() => {
+    if (e.term !== term) return;
     settle();
-    e.term.focus();
+    term.focus();
   });
   // Re-fit once webfonts finish loading. The first fit can measure the fallback
   // font's cell size and mis-compute rows, clipping or overlapping the last
   // line until something forces a resize.
   document.fonts?.ready?.then(settle).catch(() => {});
+}
+
+function queueHistoryEvent(
+  e: Entry,
+  restore: HistoryRestore,
+  event: HistoryLiveEvent,
+): void {
+  if (e.history !== restore) return;
+  if (event.kind === "output") {
+    if (event.seq !== restore.nextLiveSeq) {
+      logToBackend(
+        "warn",
+        `history restore cancelled for ${e.taskId}: live sequence ${event.seq}, expected ${restore.nextLiveSeq}`,
+      );
+      cancelHistory(e, true);
+      return;
+    }
+    restore.nextLiveSeq++;
+    restore.liveBytes += event.data.byteLength;
+    if (restore.liveBytes > MAX_HISTORY_LIVE_BYTES) {
+      logToBackend(
+        "warn",
+        `history restore cancelled for ${e.taskId}: live catch-up exceeded ${MAX_HISTORY_LIVE_BYTES} bytes`,
+      );
+      cancelHistory(e, true);
+      return;
+    }
+  }
+  restore.liveQueue.push(event);
+  if (restore.done) drainHistoryLive(e, restore);
+}
+
+function queueHistoryLive(
+  e: Entry,
+  restore: HistoryRestore,
+  frame: Extract<Frame, { kind: "output" }>,
+): void {
+  queueHistoryEvent(e, restore, {
+    kind: "output",
+    seq: frame.seq,
+    data: frame.data,
+  });
+}
+
+export function beginHistory(
+  serviceId: string,
+  taskId: string,
+  throughSeq: number,
+): void {
+  const e = entries.get(convKey(serviceId, taskId));
+  const snapshot = e?.lastSnapshot;
+  if (!e || !snapshot || snapshot.seq !== throughSeq) return;
+  cancelHistory(e, false);
+  const parts = createParts(serviceId, taskId, e.term.cols, e.term.rows, false);
+  try {
+    parts.term.open(parts.el);
+  } catch {
+    parts.term.dispose();
+    return;
+  }
+  e.history = {
+    ...parts,
+    throughSeq,
+    nextHistorySeq: 1,
+    nextLiveSeq: throughSeq + 1,
+    liveQueue: [],
+    liveBytes: 0,
+    done: false,
+    draining: false,
+  };
+  e.lastSnapshot = null;
+}
+
+export function writeHistory(
+  serviceId: string,
+  taskId: string,
+  frame: Extract<Frame, { kind: "history" }>,
+): void {
+  const e = entries.get(convKey(serviceId, taskId));
+  const restore = e?.history;
+  if (!e || !restore) return;
+  if (frame.seq !== restore.nextHistorySeq || frame.seq > restore.throughSeq) {
+    cancelHistory(e, true);
+    return;
+  }
+  restore.nextHistorySeq++;
+  try {
+    restore.term.write(frame.data, () => {
+      if (e.history !== restore) return;
+      historyAckSink?.(serviceId, taskId, frame.seq);
+    });
+  } catch {
+    cancelHistory(e, true);
+  }
+}
+
+export function finishHistory(serviceId: string, taskId: string): void {
+  const e = entries.get(convKey(serviceId, taskId));
+  const restore = e?.history;
+  if (!e || !restore || restore.done) return;
+  restore.done = true;
+  drainHistoryLive(e, restore);
+}
+
+function drainHistoryLive(e: Entry, restore: HistoryRestore): void {
+  if (e.history !== restore || restore.draining || !restore.done) {
+    return;
+  }
+  restore.draining = true;
+  const step = () => {
+    if (e.history !== restore) return;
+    const event = restore.liveQueue.shift();
+    if (!event) {
+      restore.draining = false;
+      commitHistory(e, restore);
+      return;
+    }
+    if (event.kind === "resize") {
+      restore.term.resize(event.cols, event.rows);
+      step();
+      return;
+    }
+    try {
+      restore.term.write(event.data, step);
+    } catch {
+      cancelHistory(e, true);
+    }
+  };
+  step();
+}
+
+function commitHistory(e: Entry, restore: HistoryRestore): void {
+  if (
+    e.history !== restore ||
+    !restore.done ||
+    restore.draining ||
+    restore.liveQueue.length > 0
+  ) {
+    return;
+  }
+
+  const oldTerm = e.term;
+  const oldEl = e.el;
+  const parent = oldEl.parentElement;
+  const hadFocus = oldEl.contains(document.activeElement);
+  const oldBuffer = oldTerm.buffer.active;
+  const distanceFromBottom = oldBuffer.baseY - oldBuffer.viewportY;
+  cancelResizeRestore(e);
+
+  e.history = null;
+  e.term = restore.term;
+  e.fit = restore.fit;
+  e.el = restore.el;
+  e.opened = false;
+  e.term.options.disableStdin = false;
+  e.term.onData((s) => inputSink?.(e.serviceId, e.taskId, encoder.encode(s)));
+  e.term.onResize(({ cols, rows }) =>
+    resizeSink?.(e.serviceId, e.taskId, cols, rows),
+  );
+  wireOpened(e);
+  if (parent) parent.replaceChild(e.el, oldEl);
+
+  e.nativeScrollAt = 0;
+  e.scrollbarDrag = false;
+  e.wheelPx = 0;
+  if (e.follow) {
+    scrollToBottomNow(e);
+  } else {
+    const b = e.term.buffer.active;
+    const target = Math.max(0, b.baseY - distanceFromBottom);
+    e.term.scrollToLine(target);
+    syncViewportTop(e);
+    setFollow(e, target >= b.baseY);
+  }
+  e.stableY = e.term.buffer.active.viewportY;
+  e.term.refresh(0, e.term.rows - 1);
+  if (hadFocus) e.term.focus();
+  oldTerm.dispose();
+  oldEl.remove();
+  logToBackend(
+    "info",
+    `history restored for ${e.taskId} through ${restore.throughSeq}`,
+  );
+}
+
+function cancelHistory(e: Entry, notify: boolean): void {
+  const restore = e.history;
+  if (!restore) return;
+  e.history = null;
+  e.lastSnapshot = null;
+  restore.term.dispose();
+  restore.el.remove();
+  if (notify) historyCancelSink?.(e.serviceId, e.taskId);
+}
+
+export function cancelHistoryForService(serviceId: string): void {
+  for (const e of entries.values()) {
+    if (e.serviceId === serviceId && e.history) cancelHistory(e, true);
+  }
+}
+
+export function failHistory(serviceId: string, taskId: string): void {
+  const e = entries.get(convKey(serviceId, taskId));
+  if (e) cancelHistory(e, false);
 }
 
 /** Detach the terminal's element without destroying it (scrollback survives). */
@@ -600,6 +875,7 @@ export function refit(serviceId: string, taskId: string): void {
 export function setFontSize(size: number): void {
   fontSize = size;
   for (const e of entries.values()) {
+    cancelHistory(e, true);
     e.term.options.fontSize = size;
     if (!e.opened) continue;
     fitAndRestore(e, true);
@@ -628,6 +904,7 @@ export function dispose(serviceId: string, taskId: string): void {
   const key = convKey(serviceId, taskId);
   const e = entries.get(key);
   if (!e) return;
+  cancelHistory(e, true);
   detach(serviceId, taskId);
   e.term.dispose();
   entries.delete(key);

@@ -202,6 +202,7 @@ describe("handshake", () => {
       client_id: "c1",
       cursors: { t1: 5 },
       acks: true,
+      history: true,
     });
     s.emitMessage(WELCOME);
     expect(mgr.getStatus()).toBe("online");

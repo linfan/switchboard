@@ -9,10 +9,12 @@ process.stdout.write("AGENT-READY\r\n");
 
 const rl = readline.createInterface({ input: process.stdin });
 let ticker = null;
+let tui = false;
 rl.on("line", (line) => {
   const t = line.trim();
   if (t === "") return;
   if (t === "quit") {
+    if (tui) process.stdout.write("\x1b[?6l\x1b[r\x1b[?1049l");
     process.exit(0);
   }
   // `tick:<ms>:<count>` streams timed output, for scroll tests that need new
@@ -33,9 +35,30 @@ rl.on("line", (line) => {
     }, ms || 1000);
     return;
   }
+  if (t.startsWith("tui:")) {
+    const [ms, count] = t
+      .slice(4)
+      .split(":")
+      .map((n) => parseInt(n, 10));
+    if (ticker) clearInterval(ticker);
+    tui = true;
+    let emitted = 0;
+    process.stdout.write(
+      "\x1b[?1049h\x1b[?6h\x1b[1;10r\x1b[1;1HHEADER\x1b[5;1HFRAME:0\x1b[10;1HFOOTER",
+    );
+    ticker = setInterval(() => {
+      process.stdout.write(`\x1b[5;1HFRAME:${++emitted}\x1b[K`);
+      if (ticker && emitted >= (count || 10)) {
+        clearInterval(ticker);
+        ticker = null;
+      }
+    }, ms || 1000);
+    return;
+  }
   process.stdout.write(`reply:${t}\r\n`);
 });
 rl.on("close", () => {
   if (ticker) clearInterval(ticker);
+  if (tui) process.stdout.write("\x1b[?6l\x1b[r\x1b[?1049l");
   process.exit(0);
 });

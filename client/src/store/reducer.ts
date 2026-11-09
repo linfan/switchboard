@@ -131,6 +131,8 @@ export function applyMsg(
       return {};
     }
     case "replay_done":
+    case "history_start":
+    case "history_done":
     case "pong":
       return {};
   }

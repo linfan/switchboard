@@ -176,9 +176,21 @@ impl TaskManager {
         self.store.chunks_after(task_id, after).await
     }
 
+    pub async fn chunks_window(
+        &self,
+        task_id: &str,
+        after: u64,
+        through: u64,
+        limit: u32,
+    ) -> AppResult<Vec<(u64, Vec<u8>)>> {
+        self.store
+            .chunks_window(task_id, after, through, limit)
+            .await
+    }
+
     /// Current authoritative screen for a task as ANSI escape sequences, if a
     /// live emulator exists. Used for reconnect snapshots.
-    pub fn snapshot(&self, task_id: &str) -> Option<Vec<u8>> {
+    pub fn snapshot(&self, task_id: &str) -> Option<(u64, Vec<u8>)> {
         self.terminals
             .lock()
             .unwrap()
@@ -274,8 +286,8 @@ impl TaskManager {
             let (cols, rows) = link.size();
             let mut emu = TerminalEmulator::new(cols, rows);
             if let Ok(chunks) = self.store.chunks_after(&row.task_id, 0).await {
-                for (_, bytes) in chunks {
-                    emu.process(&bytes);
+                for (seq, bytes) in chunks {
+                    emu.process(&bytes, seq);
                 }
             }
 
@@ -504,7 +516,7 @@ impl TaskManager {
     pub async fn inject_chunk(&self, task_id: &str, bytes: &[u8]) -> AppResult<u64> {
         let seq = self.store.append_chunk(task_id, bytes).await?;
         if let Some(t) = self.terminals.lock().unwrap().get_mut(task_id) {
-            t.process(bytes);
+            t.process(bytes, seq);
         }
         let _ = self.events.send(Outbound::Pty {
             task_id: task_id.to_string(),
@@ -542,7 +554,7 @@ impl TaskManager {
                         match store.append_chunk(&task_id, &bytes).await {
                             Ok(seq) => {
                                 if let Some(t) = terminals.lock().unwrap().get_mut(&task_id) {
-                                    t.process(&bytes);
+                                    t.process(&bytes, seq);
                                 }
                                 // Durable now, so the host may drop its copy.
                                 durable += bytes.len() as u64;

@@ -462,6 +462,7 @@ async fn hello(ws: &mut WsStream, cursors: HashMap<String, u64>) {
             client_id: "c1".into(),
             cursors,
             acks: false,
+            history: false,
         },
     )
     .await;

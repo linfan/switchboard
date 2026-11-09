@@ -110,6 +110,7 @@ Server → Client:
 ```
 OUTPUT    [0x01][task_id:16][seq:u64][data: raw PTY bytes]
 SNAPSHOT  [0x02][task_id:16][seq:u64][data: ANSI to reconstruct current screen]
+HISTORY   [0x03][task_id:16][seq:u64][data: raw PTY bytes for offscreen scrollback]
 ```
 Client → Server:
 ```
@@ -145,8 +146,8 @@ task the server picks a replay strategy:
 - **Snapshot (fresh or legacy client, large backlog).** If `tail - cursor > N`
   and the client either starts from zero or lacks Ack pacing, render the current
   screen via `vt100::Screen::contents_formatted()` and send a SNAPSHOT frame
-  carrying the tail `seq`. Client does `term.reset()` then `term.write(snapshot)`.
-  Cost is O(screen), independent of session length. Then resume live from tail.
+  carrying the emulator's exact applied `seq`. Client does `term.reset()` then
+  `term.write(snapshot)`. Cost is O(screen), independent of session length.
 - **Byte fast-forward (live buffer or small backlog).** Replay raw OUTPUT chunks
   `seq > cursor` for a small gap, or for any gap when a paced client has a live
   buffer (`cursor > 0`). This is byte-exact and preserves scrollback with no reset.
@@ -156,6 +157,16 @@ persists the delivery cursor (used to pick fast-forward vs snapshot and to bound
 log growth). Because the emulator state is a pure function of the ordered chunk
 log, snapshot and fast-forward converge to the identical screen — and multiple
 concurrent viewers of one task all converge on the server's authoritative state.
+
+Clients that send `Hello.history = true` also recover scrollback after a fresh
+large snapshot. The server sends `Snapshot(S)` and `ReplayDone(S)` immediately,
+then interleaves ordinary live OUTPUT after `S` with HISTORY chunks `1..=S` on a
+bounded, independently acknowledged stream. The visible terminal stays live. An
+offscreen xterm parses HISTORY through `S`, then drains queued live output and
+resizes in order before replacing the visible terminal in place.
+`HistoryAck` never advances the live cursor. `HistoryDone` is sent only after the
+candidate parsed `S`; cancellation or failure discards only the candidate and
+leaves the visible snapshot-plus-live terminal untouched.
 
 Retention: keep the full `pty_chunks` log for audit + scrollback by default;
 optional trimming of chunks below the min delivered cursor beyond a byte budget
@@ -169,11 +180,13 @@ now flow as keystrokes in INPUT frames; structured events are gone.)
 Add / change:
 ```
 ClientMsg (text/JSON):
-  Hello         { client_id, cursors }                    // unchanged
+  Hello         { client_id, cursors, acks, history }       // + replay/history capabilities
   CreateTask    { tool, title?, cwd?, cols, rows }         // + initial PTY size; initial_prompt dropped
   Resize        { task_id, cols, rows }                    // NEW
   TerminateTask { task_id }                                // unchanged
   Ack           { task_id, seq }                           // unchanged (now chunk seq)
+  HistoryAck    { task_id, seq }                           // parsed history, independent of live Ack
+  HistoryCancel { task_id }                                // optional history-only abort
   Ping          { ts }                                     // unchanged
 
 ServerMsg (text/JSON):
@@ -181,6 +194,7 @@ ServerMsg (text/JSON):
   TaskCreated { task }                                     // unchanged
   TaskState   { task_id, status }                          // unchanged
   ReplayDone  { task_id, last_seq }                        // unchanged
+  HistoryStart / HistoryDone { task_id, last_seq }          // fresh scrollback recovery
   Pong        { ts }                                       // unchanged
   Error       { task_id?, code?, message }                 // unchanged
 ```

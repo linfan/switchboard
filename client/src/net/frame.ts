@@ -4,6 +4,7 @@
 // Layout (integers big-endian, task_id = the 16 raw bytes of the task UUID):
 //   OUTPUT    [0x01][task_id:16][seq:u64][data...]   server -> client
 //   SNAPSHOT  [0x02][task_id:16][seq:u64][data...]   server -> client
+//   HISTORY   [0x03][task_id:16][seq:u64][data...]   server -> client
 //   INPUT     [0x10][task_id:16][data...]            client -> server
 //
 // `seq` is a per-task chunk counter; it stays well below 2^53, so we carry it as
@@ -17,6 +18,7 @@
 
 export const KIND_OUTPUT = 0x01;
 export const KIND_SNAPSHOT = 0x02;
+export const KIND_HISTORY = 0x03;
 export const KIND_INPUT = 0x10;
 
 const UUID_LEN = 16;
@@ -25,6 +27,7 @@ const SEQ_LEN = 8;
 export type Frame =
   | { kind: "output"; taskId: string; seq: number; data: Uint8Array }
   | { kind: "snapshot"; taskId: string; seq: number; data: Uint8Array }
+  | { kind: "history"; taskId: string; seq: number; data: Uint8Array }
   | { kind: "input"; taskId: string; data: Uint8Array };
 
 export class FrameError extends Error {}
@@ -37,7 +40,12 @@ export function encode(frame: Frame): Uint8Array {
     out.set(frame.data, 1 + UUID_LEN);
     return out;
   }
-  const kind = frame.kind === "output" ? KIND_OUTPUT : KIND_SNAPSHOT;
+  const kind =
+    frame.kind === "output"
+      ? KIND_OUTPUT
+      : frame.kind === "snapshot"
+        ? KIND_SNAPSHOT
+        : KIND_HISTORY;
   const header = 1 + UUID_LEN + SEQ_LEN;
   const out = new Uint8Array(header + frame.data.length);
   out[0] = kind;
@@ -50,7 +58,7 @@ export function encode(frame: Frame): Uint8Array {
 export function decode(bytes: Uint8Array): Frame {
   if (bytes.length < 1) throw new FrameError("empty frame");
   const kind = bytes[0];
-  if (kind === KIND_OUTPUT || kind === KIND_SNAPSHOT) {
+  if (kind === KIND_OUTPUT || kind === KIND_SNAPSHOT || kind === KIND_HISTORY) {
     if (bytes.length < 1 + UUID_LEN + SEQ_LEN) {
       throw new FrameError("frame shorter than its header");
     }
@@ -58,7 +66,12 @@ export function decode(bytes: Uint8Array): Frame {
     const seq = readU64BE(bytes, 1 + UUID_LEN);
     const data = bytes.slice(1 + UUID_LEN + SEQ_LEN);
     return {
-      kind: kind === KIND_OUTPUT ? "output" : "snapshot",
+      kind:
+        kind === KIND_OUTPUT
+          ? "output"
+          : kind === KIND_SNAPSHOT
+            ? "snapshot"
+            : "history",
       taskId,
       seq,
       data,

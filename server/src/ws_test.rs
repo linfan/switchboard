@@ -24,6 +24,7 @@ use crate::{
 const TOKEN: &str = "test-token";
 // Two fixed v4-shaped UUIDs so the 16-byte frame headers parse.
 const T1: &str = "11111111-1111-4111-8111-111111111111";
+const T2: &str = "22222222-2222-4222-8222-222222222222";
 
 async fn build_state() -> Arc<AppState> {
     let dir = tempfile::tempdir().unwrap();
@@ -134,6 +135,7 @@ async fn hello(ws: &mut WsStream, cursors: HashMap<String, u64>) {
             client_id: "c1".into(),
             cursors,
             acks: false,
+            history: false,
         },
     )
     .await;
@@ -147,6 +149,20 @@ async fn hello_paced(ws: &mut WsStream, cursors: HashMap<String, u64>) {
             client_id: "c1".into(),
             cursors,
             acks: true,
+            history: false,
+        },
+    )
+    .await;
+}
+
+async fn hello_history(ws: &mut WsStream) {
+    send(
+        ws,
+        &ClientMsg::Hello {
+            client_id: "c1".into(),
+            cursors: HashMap::new(),
+            acks: true,
+            history: true,
         },
     )
     .await;
@@ -193,7 +209,7 @@ async fn read_paced_replay(ws: &mut WsStream, task_id: &str) -> Vec<Frame> {
             Rx::Bin(f) => {
                 let seq = match &f {
                     Frame::Output { seq, .. } | Frame::Snapshot { seq, .. } => Some(*seq),
-                    Frame::Input { .. } => None,
+                    Frame::History { .. } | Frame::Input { .. } => None,
                 };
                 if let Some(seq) = seq {
                     send(
@@ -417,7 +433,7 @@ async fn large_backlog_uses_snapshot() {
 
     // The snapshot must reconstruct the current screen.
     let mut replay = TerminalEmulator::new(80, 24);
-    replay.process(&snap.1);
+    replay.process(&snap.1, snap.0);
     assert!(
         replay.contents().contains("FINAL"),
         "snapshot must redraw the screen"
@@ -464,6 +480,166 @@ async fn large_backlog_without_pacing_keeps_snapshot() {
     assert!(frames
         .iter()
         .any(|frame| matches!(frame, Frame::Snapshot { seq: 301, .. })));
+}
+
+#[tokio::test]
+async fn history_replay_interleaves_live_output() {
+    let (addr, state) = start_server().await;
+    seed(&state, T1).await;
+    for _ in 0..301 {
+        state.tasks.inject_chunk(T1, b".").await.unwrap();
+    }
+
+    let mut ws = connect(addr).await;
+    hello_history(&mut ws).await;
+    let mut snapshot = false;
+    let mut started = false;
+    loop {
+        match next_rx(&mut ws).await {
+            Rx::Bin(Frame::Snapshot { seq: 301, .. }) => snapshot = true,
+            Rx::Ctrl(ServerMsg::HistoryStart {
+                task_id,
+                last_seq: 301,
+            }) if task_id == T1 => started = true,
+            Rx::Ctrl(ServerMsg::ReplayDone { task_id, .. }) if task_id == T1 => break,
+            _ => {}
+        }
+    }
+    assert!(snapshot && started);
+
+    assert!(matches!(
+        next_rx(&mut ws).await,
+        Rx::Bin(Frame::History { seq: 1, .. })
+    ));
+    state.tasks.inject_chunk(T1, b"live").await.unwrap();
+
+    let mut history = vec![1];
+    let live_seq = loop {
+        match next_rx(&mut ws).await {
+            Rx::Bin(Frame::History { seq, .. }) => history.push(seq),
+            Rx::Bin(Frame::Output { seq, data, .. }) => {
+                assert_eq!(data, b"live");
+                break seq;
+            }
+            Rx::Ctrl(ServerMsg::HistoryDone { .. }) => {
+                panic!("history completed before live output")
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(live_seq, 302);
+    assert!(history.len() <= super::ws::REPLAY_WINDOW as usize);
+
+    for seq in &history {
+        send(
+            &mut ws,
+            &ClientMsg::HistoryAck {
+                task_id: T1.into(),
+                seq: *seq,
+            },
+        )
+        .await;
+    }
+    loop {
+        match next_rx(&mut ws).await {
+            Rx::Bin(Frame::History { seq, .. }) => {
+                history.push(seq);
+                send(
+                    &mut ws,
+                    &ClientMsg::HistoryAck {
+                        task_id: T1.into(),
+                        seq,
+                    },
+                )
+                .await;
+            }
+            Rx::Ctrl(ServerMsg::HistoryDone {
+                task_id,
+                last_seq: 301,
+            }) if task_id == T1 => break,
+            _ => {}
+        }
+    }
+    assert_eq!(history, (1..=301).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn history_cancel_keeps_live_output() {
+    let (addr, state) = start_server().await;
+    seed(&state, T1).await;
+    for _ in 0..301 {
+        state.tasks.inject_chunk(T1, b".").await.unwrap();
+    }
+
+    let mut ws = connect(addr).await;
+    hello_history(&mut ws).await;
+    loop {
+        if matches!(
+            next_rx(&mut ws).await,
+            Rx::Ctrl(ServerMsg::ReplayDone { task_id, .. }) if task_id == T1
+        ) {
+            break;
+        }
+    }
+    assert!(matches!(
+        next_rx(&mut ws).await,
+        Rx::Bin(Frame::History { seq: 1, .. })
+    ));
+    send(&mut ws, &ClientMsg::HistoryCancel { task_id: T1.into() }).await;
+    state.tasks.inject_chunk(T1, b"live").await.unwrap();
+
+    loop {
+        match next_rx(&mut ws).await {
+            Rx::Bin(Frame::Output { seq: 302, data, .. }) => {
+                assert_eq!(data, b"live");
+                break;
+            }
+            Rx::Ctrl(ServerMsg::HistoryDone { .. }) => {
+                panic!("cancelled history reported completion")
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn concurrent_history_workers_both_finish() {
+    let (addr, state) = start_server().await;
+    for task in [T1, T2] {
+        seed(&state, task).await;
+        for _ in 0..301 {
+            state.tasks.inject_chunk(task, b".").await.unwrap();
+        }
+    }
+
+    let mut ws = connect(addr).await;
+    hello_history(&mut ws).await;
+    let mut replay_done = 0;
+    while replay_done < 2 {
+        if matches!(
+            next_rx(&mut ws).await,
+            Rx::Ctrl(ServerMsg::ReplayDone { .. })
+        ) {
+            replay_done += 1;
+        }
+    }
+
+    let mut sequences: HashMap<String, Vec<u64>> = HashMap::new();
+    let mut history_done = 0;
+    while history_done < 2 {
+        match next_rx(&mut ws).await {
+            Rx::Bin(Frame::History { task_id, seq, .. }) => {
+                let task_id = task_id.to_string();
+                sequences.entry(task_id.clone()).or_default().push(seq);
+                send(&mut ws, &ClientMsg::HistoryAck { task_id, seq }).await;
+            }
+            Rx::Ctrl(ServerMsg::HistoryDone { .. }) => history_done += 1,
+            _ => {}
+        }
+    }
+    for task in [T1, T2] {
+        assert_eq!(sequences.get(task).unwrap(), &(1..=301).collect::<Vec<_>>());
+    }
 }
 
 #[tokio::test]
