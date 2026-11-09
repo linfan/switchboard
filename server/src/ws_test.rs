@@ -186,6 +186,34 @@ async fn read_through_replay(ws: &mut WsStream, task_id: &str) -> Vec<Frame> {
     frames
 }
 
+async fn read_paced_replay(ws: &mut WsStream, task_id: &str) -> Vec<Frame> {
+    let mut frames = Vec::new();
+    loop {
+        match next_rx(ws).await {
+            Rx::Bin(f) => {
+                let seq = match &f {
+                    Frame::Output { seq, .. } | Frame::Snapshot { seq, .. } => Some(*seq),
+                    Frame::Input { .. } => None,
+                };
+                if let Some(seq) = seq {
+                    send(
+                        ws,
+                        &ClientMsg::Ack {
+                            task_id: task_id.into(),
+                            seq,
+                        },
+                    )
+                    .await;
+                }
+                frames.push(f);
+            }
+            Rx::Ctrl(ServerMsg::ReplayDone { task_id: t, .. }) if t == task_id => break,
+            Rx::Ctrl(_) => {}
+        }
+    }
+    frames
+}
+
 /// Collapse OUTPUT frames to (seq, data) pairs, ignoring snapshots.
 fn outputs(frames: &[Frame]) -> Vec<(u64, Vec<u8>)> {
     frames
@@ -394,6 +422,48 @@ async fn large_backlog_uses_snapshot() {
         replay.contents().contains("FINAL"),
         "snapshot must redraw the screen"
     );
+}
+
+#[tokio::test]
+async fn large_backlog_with_live_buffer_uses_byte_replay() {
+    let (addr, state) = start_server().await;
+    seed(&state, T1).await;
+    state.tasks.inject_chunk(T1, b"initial").await.unwrap();
+    for _ in 0..300 {
+        state.tasks.inject_chunk(T1, b".").await.unwrap();
+    }
+
+    let mut ws = connect(addr).await;
+    hello_paced(&mut ws, HashMap::from([(T1.to_string(), 1u64)])).await;
+    let frames = read_paced_replay(&mut ws, T1).await;
+    let replayed = outputs(&frames);
+
+    assert_eq!(replayed.len(), 300);
+    assert_eq!(replayed.first().unwrap().0, 2);
+    assert_eq!(replayed.last().unwrap().0, 301);
+    assert!(replayed.iter().all(|(_, data)| data == b"."));
+    assert!(frames
+        .iter()
+        .all(|frame| matches!(frame, Frame::Output { .. })));
+}
+
+#[tokio::test]
+async fn large_backlog_without_pacing_keeps_snapshot() {
+    let (addr, state) = start_server().await;
+    seed(&state, T1).await;
+    state.tasks.inject_chunk(T1, b"initial").await.unwrap();
+    for _ in 0..300 {
+        state.tasks.inject_chunk(T1, b".").await.unwrap();
+    }
+
+    let mut ws = connect(addr).await;
+    hello(&mut ws, HashMap::from([(T1.to_string(), 1u64)])).await;
+    let frames = read_through_replay(&mut ws, T1).await;
+
+    assert!(outputs(&frames).is_empty());
+    assert!(frames
+        .iter()
+        .any(|frame| matches!(frame, Frame::Snapshot { seq: 301, .. })));
 }
 
 #[tokio::test]

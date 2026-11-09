@@ -142,14 +142,14 @@ Server pipeline for each PTY chunk (in order, before broadcast):
 On (re)connect the client sends `Hello { cursors: {task_id: last_seq} }`. Per
 task the server picks a replay strategy:
 
-- **Snapshot (always correct, default).** Render the current screen via
-  `vt100::Screen::contents_formatted()` (returns the escape sequences that
-  recreate the visible grid) and send a SNAPSHOT frame carrying the current tail
-  `seq`. Client does `term.reset()` then `term.write(snapshot)`. Cost is
-  O(screen), independent of session length. Then resume live from tail seq.
-- **Byte fast-forward (optimization).** If the client's cursor is recent
-  (`tail - cursor ≤ N` chunks / bytes), replay raw OUTPUT chunks `seq > cursor`
-  instead — byte-exact, preserves scrollback continuity, no reset.
+- **Snapshot (fresh or legacy client, large backlog).** If `tail - cursor > N`
+  and the client either starts from zero or lacks Ack pacing, render the current
+  screen via `vt100::Screen::contents_formatted()` and send a SNAPSHOT frame
+  carrying the tail `seq`. Client does `term.reset()` then `term.write(snapshot)`.
+  Cost is O(screen), independent of session length. Then resume live from tail.
+- **Byte fast-forward (live buffer or small backlog).** Replay raw OUTPUT chunks
+  `seq > cursor` for a small gap, or for any gap when a paced client has a live
+  buffer (`cursor > 0`). This is byte-exact and preserves scrollback with no reset.
 
 Either path ends with `ReplayDone{task_id, last_seq}`. `Ack{task_id, seq}`
 persists the delivery cursor (used to pick fast-forward vs snapshot and to bound

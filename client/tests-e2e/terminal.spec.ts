@@ -11,7 +11,131 @@ interface TerminalProbe {
   resizeMessages: number;
 }
 
-type ProbeWindow = Window & { __terminalProbe?: TerminalProbe };
+interface StreamProbe {
+  snapshots: Array<{ taskId: string; seq: number }>;
+  replayDone: Array<{ taskId: string; lastSeq: number }>;
+  tasks: Array<{ id: string; title: string }>;
+  topSamples: Array<{ at: number; top: number; max: number }>;
+  dropData: boolean;
+  droppedFrames: number;
+}
+
+type ProbeWindow = Window & {
+  __terminalProbe?: TerminalProbe;
+  __streamProbe?: StreamProbe;
+};
+
+async function installStreamProbe(page: Page) {
+  await page.addInitScript(() => {
+    const probe: StreamProbe = {
+      snapshots: [],
+      replayDone: [],
+      tasks: [],
+      topSamples: [],
+      dropData: false,
+      droppedFrames: 0,
+    };
+    (window as ProbeWindow).__streamProbe = probe;
+    const NativeWebSocket = window.WebSocket;
+    const onmessage = Object.getOwnPropertyDescriptor(
+      NativeWebSocket.prototype,
+      "onmessage",
+    )!;
+    window.WebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const socket = Reflect.construct(target, args) as WebSocket;
+        Object.defineProperty(socket, "onmessage", {
+          configurable: true,
+          get: () => onmessage.get?.call(socket) ?? null,
+          set: (handler: WebSocket["onmessage"]) => {
+            onmessage.set?.call(socket, (event: MessageEvent) => {
+              if (typeof event.data === "string") {
+                try {
+                  const message = JSON.parse(event.data) as {
+                    type?: string;
+                    task?: { id: string; title: string };
+                    tasks?: Array<{ id: string; title: string }>;
+                    task_id?: string;
+                    last_seq?: number;
+                  };
+                  if (
+                    message.type === "replay_done" &&
+                    message.task_id &&
+                    message.last_seq !== undefined
+                  ) {
+                    probe.replayDone.push({
+                      taskId: message.task_id,
+                      lastSeq: message.last_seq,
+                    });
+                  }
+                  if (message.type === "task_created" && message.task) {
+                    probe.tasks.push(message.task);
+                  }
+                  if (message.type === "welcome" && message.tasks) {
+                    probe.tasks.push(...message.tasks);
+                  }
+                } catch {
+                  // Non-JSON control messages do not affect the probe.
+                }
+              } else if (event.data instanceof ArrayBuffer) {
+                const bytes = new Uint8Array(event.data);
+                const kind = bytes[0];
+                if (probe.dropData && (kind === 1 || kind === 2)) {
+                  probe.droppedFrames++;
+                  return;
+                }
+                if (kind === 2) {
+                  const hex = Array.from(bytes.subarray(1, 17), (byte) =>
+                    byte.toString(16).padStart(2, "0"),
+                  ).join("");
+                  const taskId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+                  const view = new DataView(event.data);
+                  const seq =
+                    view.getUint32(17, false) * 0x1_0000_0000 +
+                    view.getUint32(21, false);
+                  probe.snapshots.push({ taskId, seq });
+                }
+              }
+              handler?.call(socket, event);
+            });
+          },
+        });
+        return socket;
+      },
+    });
+  });
+}
+
+async function sampleStreamingTop(page: Page) {
+  await page.evaluate(() => {
+    const viewport = document.querySelector<HTMLElement>(".xterm-viewport");
+    if (!viewport) throw new Error("terminal not mounted");
+    const probe = (window as ProbeWindow).__streamProbe!;
+    let hadHistory = false;
+    const sample = () => {
+      if (!viewport.isConnected) return;
+      const max = viewport.scrollHeight - viewport.clientHeight;
+      if (max > 100) hadHistory = true;
+      if (
+        hadHistory &&
+        viewport.scrollTop <= 2 &&
+        probe.topSamples.length < 200
+      ) {
+        probe.topSamples.push({
+          at: performance.now(),
+          top: viewport.scrollTop,
+          max,
+        });
+      }
+    };
+    viewport.addEventListener("scroll", sample);
+    const frame = () => {
+      sample();
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  });
+}
 
 // Create a workspace (name + a real server folder) so tasks have a home. Tasks
 // inherit its folder, so the New-task dialog no longer prompts for one.
@@ -62,6 +186,7 @@ async function createTerminalTask(page: Page, title: string) {
   await expect(page.locator(".xterm-rows")).toContainText("AGENT-READY", {
     timeout: 15000,
   });
+  return uniqueTitle;
 }
 
 async function fillScrollback(page: Page, count = 120) {
@@ -335,34 +460,120 @@ test("re-selecting a conversation keeps the viewport pinned to the latest output
   await expect(rows).toContainText(last);
 });
 
+test("streaming reselection never flashes the top or resets history", async ({
+  page,
+}) => {
+  await installStreamProbe(page);
+  const title = await createTerminalTask(page, "stream-reselect-task");
+  await fillScrollback(page, 150);
+  await sampleStreamingTop(page);
+
+  await page.locator(".xterm-screen").click();
+  await page.keyboard.type("tick:2:2000");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".xterm-rows")).toContainText("tick:1");
+
+  const conv = page.locator(".conv", { hasText: title });
+  for (let i = 0; i < 8; i++) {
+    await page.locator(".workspace__head", { hasText: "proj" }).click();
+    await expect(page.locator(".xterm-screen")).toHaveCount(0);
+    await conv.click();
+    await expect(page.locator(".xterm-screen")).toBeVisible();
+  }
+
+  const probe = await page.evaluate(
+    () => (window as ProbeWindow).__streamProbe!,
+  );
+  const task = probe.tasks.find((candidate) => candidate.title === title);
+  const snapshots = probe.snapshots.filter(
+    (snapshot) => snapshot.taskId === task?.id,
+  );
+  expect(snapshots).toEqual([]);
+  expect(probe.topSamples).toEqual([]);
+});
+
+for (const detached of [false, true]) {
+  test(`live reconnect preserves a ${detached ? "detached" : "mounted"} terminal without a top flash`, async ({
+    page,
+  }) => {
+    await installStreamProbe(page);
+    const title = await createTerminalTask(page, "live-replay-task");
+    await fillScrollback(page, 150);
+    await sampleStreamingTop(page);
+    await page.locator(".xterm-screen").click();
+    await page.keyboard.type("tick:2:2000");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".xterm-rows")).toContainText("tick:1");
+
+    if (detached) {
+      await page.locator(".workspace__head", { hasText: "proj" }).click();
+      await expect(page.locator(".xterm-screen")).toHaveCount(0);
+    }
+    await page.evaluate(() => {
+      (window as ProbeWindow).__streamProbe!.dropData = true;
+    });
+    await page.waitForTimeout(1500);
+    expect(
+      await page.evaluate(
+        () => (window as ProbeWindow).__streamProbe!.droppedFrames,
+      ),
+    ).toBeGreaterThan(256);
+    const before = await page.evaluate(() => {
+      const probe = (window as ProbeWindow).__streamProbe!;
+      return {
+        snapshots: probe.snapshots.length,
+        replays: probe.replayDone.length,
+      };
+    });
+    await reconnect(page);
+    await page.evaluate(() => {
+      (window as ProbeWindow).__streamProbe!.dropData = false;
+    });
+
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            () => (window as ProbeWindow).__streamProbe!.replayDone.length,
+          ),
+        { timeout: 15000 },
+      )
+      .toBeGreaterThan(before.replays);
+
+    if (detached) {
+      await page.locator(".conv", { hasText: title }).click();
+      await expect(page.locator(".xterm-screen")).toBeVisible();
+    }
+    await page.locator(".xterm-screen").click();
+    await page.keyboard.type("quit");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".conv", { hasText: title })).toContainText(
+      "exited",
+      { timeout: 10000 },
+    );
+    const probe = await page.evaluate(
+      () => (window as ProbeWindow).__streamProbe!,
+    );
+    expect(probe.snapshots).toHaveLength(before.snapshots);
+    expect(probe.topSamples).toEqual([]);
+
+    const box = await page.locator(".xterm-screen").boundingBox();
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    await page.mouse.wheel(0, -100000);
+    await expect(page.locator(".xterm-rows")).toContainText("AGENT-READY");
+  });
+}
+
 test("streaming output does not pull a scrolled-up viewport back to the bottom", async ({
   page,
 }) => {
-  await page.goto("/");
-  await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
-
-  await addWorkspace(page, "proj");
-  await openNewTask(page, "proj");
-  const dialog = page.getByRole("dialog", { name: "New task" });
-  await dialog.getByLabel("Title (optional)").fill("hold-scroll-task");
-  await dialog.getByRole("button", { name: "Create" }).click();
-  const conv = page.locator(".conv", { hasText: "hold-scroll-task" });
-  await expect(conv).toBeVisible({ timeout: 15000 });
-  await conv.click();
+  await createTerminalTask(page, "hold-scroll-task");
+  await fillScrollback(page);
 
   const rows = page.locator(".xterm-rows");
   const screen = page.locator(".xterm-screen");
   const jump = page.locator(".term-jump");
-  await expect(rows).toContainText("AGENT-READY", { timeout: 15000 });
-
-  // Fill the scrollback so the viewport can leave the last line.
-  await screen.click();
-  await page.keyboard.type(
-    Array.from({ length: 100 }, (_, i) => `filler${i}`).join("\n") + "\n",
-    { delay: 1 },
-  );
-  const last = "reply:filler99";
-  await expect(rows).toContainText(last, { timeout: 15000 });
+  const last = "reply:filler119";
 
   // Start a short burst of output, then scroll up while it is still arriving.
   await page.keyboard.type("tick:100:25");

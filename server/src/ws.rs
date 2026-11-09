@@ -680,9 +680,9 @@ impl AckTracker {
 }
 
 /// Reconstruct every task's terminal for a (re)connecting client, then send a
-/// `ReplayDone`. Large backlogs are collapsed to a screen SNAPSHOT; small ones
-/// are byte fast-forwarded so scrollback continuity is preserved. Either path
-/// leaves `last_sent` at the highest seq the client now holds, so live dedup is
+/// `ReplayDone`. Live buffers are byte fast-forwarded to preserve scrollback;
+/// large initial or legacy-client backlogs collapse to a screen SNAPSHOT. Either
+/// path leaves `last_sent` at the highest seq the client now holds, so live dedup is
 /// exact. Advances the durable server-side cursor to the client's position.
 async fn replay(
     out: &mpsc::Sender<WsOut>,
@@ -731,7 +731,10 @@ async fn replay(
         last_sent.insert(task.id.clone(), after);
 
         let gap = tail.saturating_sub(after);
-        let snapshot = (gap > SNAPSHOT_THRESHOLD)
+        // A non-zero cursor belongs to this page's live xterm buffer. Paced
+        // clients can replay any gap without risking queues or losing scrollback.
+        let preserve_scrollback = after > 0 && tracker.enabled;
+        let snapshot = (gap > SNAPSHOT_THRESHOLD && !preserve_scrollback)
             .then(|| state.tasks.snapshot(&task.id))
             .flatten();
 
