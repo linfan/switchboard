@@ -79,6 +79,31 @@ test("one row still deletes on its own", async ({ page }) => {
   await expect.poll(() => readdirSync(dir)).toEqual(names.slice(0, 2));
 });
 
+test("a delete whose reply is lost still leaves the tree right", async ({
+  page,
+}) => {
+  // The host deletes the file, but the client never sees the 204. The tree must
+  // stop trusting its cache: the path probe says the file is gone.
+  await page.route("**/api/fs/delete", async (route) => {
+    await route.fetch(); // really delete on the host
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ message: "reply lost" }),
+    });
+  });
+
+  await row(page, "keep.txt").click({ button: "right" });
+  await page.locator(".menu__item", { hasText: "Delete" }).first().click();
+  await page
+    .locator(".menu__item", { hasText: "Click again to delete" })
+    .click();
+
+  await expect(row(page, "keep.txt")).toHaveCount(0);
+  await expect.poll(() => readdirSync(dir)).toEqual(names.slice(0, 2));
+  await expect(page.locator(".hint--error")).toHaveCount(0);
+});
+
 test("a refused path doesn't stop the rest of the batch", async ({ page }) => {
   // Stand in for a delete the host won't do (a busy folder, a vanished file).
   let refuse = true;

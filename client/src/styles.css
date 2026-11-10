@@ -1086,17 +1086,24 @@ body {
   outline: none;
   border-color: var(--accent);
 }
-.weditor__filter-clear {
+.weditor__filter-clear,
+.weditor__filter-refresh {
   flex: none;
   border: none;
   background: transparent;
   color: var(--fg-dim);
   cursor: pointer;
-  font-size: 16px;
   line-height: 1;
   padding: 2px 4px;
 }
-.weditor__filter-clear:hover {
+.weditor__filter-clear {
+  font-size: 16px;
+}
+.weditor__filter-refresh {
+  font-size: 14px;
+}
+.weditor__filter-clear:hover,
+.weditor__filter-refresh:hover {
   color: var(--fg);
 }
 

@@ -9,12 +9,14 @@ import {
   gitLog,
   listDir,
   renamePath,
+  statPath,
 } from "../net/rest";
 import { formatBytes } from "../net/media";
 import {
   basename,
   cancelTransfer,
   downloadFiles,
+  joinLocalPath,
   uploadFiles,
   type TransferHooks,
 } from "../net/transfer";
@@ -84,6 +86,29 @@ async function resolveTreePath(
   return chain;
 }
 
+/**
+ * Whether `path` exists on the host, asked after a filesystem call failed: the
+ * failed reply alone can't say whether the call never ran or ran with its reply
+ * lost. `null` means the probe itself couldn't reach the host, so the caller
+ * must keep treating the outcome as unknown rather than decided.
+ */
+async function pathExists(
+  service: ServiceRef,
+  path: string,
+): Promise<boolean | null> {
+  try {
+    return (await statPath(service, path)).exists;
+  } catch {
+    return null;
+  }
+}
+
+/** `path`'s sibling named `name`, keeping the prefix (and separator) as-is. */
+function sibling(path: string, name: string): string {
+  const base = basename(path);
+  return `${path.slice(0, path.length - base.length)}${name}`;
+}
+
 /** Right-pane file editor for a selected workspace. */
 export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
   const service = useStore((s) =>
@@ -110,8 +135,12 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
 
   const [git, setGit] = useState<GitInfo | null>(null);
   const [gitError, setGitError] = useState<string | null>(null);
-  // Bumped after a filesystem op so open directory listings re-fetch.
-  const [refreshKey, setRefreshKey] = useState(0);
+  // Bumped after a filesystem op so open directory listings re-fetch. `hard`
+  // marks the manual refresh: rows drop their cached listing first, so a stale
+  // row can't survive even when the host can't be reached right now.
+  const [refresh, setRefresh] = useState({ seq: 0, hard: false });
+  const refreshTree = (hard = false) =>
+    setRefresh((r) => ({ seq: r.seq + 1, hard }));
   const [fsError, setFsError] = useState<string | null>(null);
 
   // Width of the left panel column, adjustable by dragging the divider.
@@ -220,11 +249,22 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
     setFsError(null);
     try {
       await renamePath(service, entry.path, newName);
-      dropTabsUnder(entry.path);
-      setRefreshKey((k) => k + 1);
     } catch (e) {
-      setFsError(errMsg(e));
+      // A lost reply can't say whether the rename never ran or ran with its
+      // reply lost; the disk settles it. Source gone + target present is the
+      // post-rename state, while a real refusal leaves the source in place.
+      const target = sibling(entry.path, newName);
+      const [source, renamed] = await Promise.all([
+        pathExists(service, entry.path),
+        pathExists(service, target),
+      ]);
+      if (!(source === false && renamed === true)) {
+        setFsError(errMsg(e));
+        return;
+      }
     }
+    dropTabsUnder(entry.path);
+    refreshTree();
   };
 
   // The host deletes one path per request, so a batch goes one at a time and a
@@ -238,17 +278,22 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
       try {
         await deletePath(service, path);
       } catch (e) {
-        failed.push({
-          name: basename(path),
-          message: errMsg(e),
-        });
-        continue;
+        // The delete may have landed with its reply lost, leaving a ghost row
+        // that is gone on disk but not in the tree; only a path still there is
+        // a real failure.
+        if ((await pathExists(service, path)) !== false) {
+          failed.push({
+            name: basename(path),
+            message: errMsg(e),
+          });
+          continue;
+        }
       }
       // Only a path that really went away invalidates the tabs open on it.
       dropTabsUnder(path);
       deleted++;
     }
-    if (deleted > 0) setRefreshKey((k) => k + 1);
+    if (deleted > 0) refreshTree();
     if (failed.length > 0) setFsError(batchMessage("Deleted", deleted, failed));
   };
 
@@ -310,17 +355,27 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
         uploadMaxFiles,
         hooks,
       );
+      // The host refuses a name that already exists before writing anything, so
+      // that error is real; any other failure may be a lost reply after the
+      // bytes landed, which the disk can settle.
+      const failed: { name: string; message: string }[] = [];
+      let done = outcome.done.length;
+      for (const f of outcome.failed) {
+        if (f.message.includes("already exists")) {
+          failed.push(f);
+          continue;
+        }
+        if (
+          (await pathExists(service, joinLocalPath(entry.path, f.name))) ===
+          true
+        )
+          done++;
+        else failed.push(f);
+      }
       // Partial success is still a change to the host worth re-listing for.
-      if (outcome.done.length > 0) setRefreshKey((k) => k + 1);
-      if (outcome.failed.length > 0)
-        setFsError(
-          batchMessage(
-            "Uploaded",
-            outcome.done.length,
-            outcome.failed,
-            outcome.cancelled,
-          ),
-        );
+      if (done > 0) refreshTree();
+      if (failed.length > 0)
+        setFsError(batchMessage("Uploaded", done, failed, outcome.cancelled));
     } catch (e) {
       setFsError(errMsg(e));
     } finally {
@@ -330,17 +385,24 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
 
   const handleCreate = async (dir: string, name: string, isDir: boolean) => {
     setFsError(null);
+    // The row path the host will report for the entry, in its own separator.
+    const path = joinLocalPath(dir, name);
     try {
       await createEntry(service, dir, name, isDir);
-      setRefreshKey((k) => k + 1);
-      // Open a freshly-created file straight away for editing.
-      if (!isDir) {
-        const path = `${dir.replace(/\/+$/, "")}/${name}`;
-        openTab(workspace.id, { path, mode: "edit" });
-      }
     } catch (e) {
-      setFsError(errMsg(e));
+      // "already exists" is the host refusing before it writes anything; any
+      // other failure may have created the entry with its reply lost.
+      if (
+        errMsg(e).includes("already exists") ||
+        (await pathExists(service, path)) !== true
+      ) {
+        setFsError(errMsg(e));
+        return;
+      }
     }
+    refreshTree();
+    // Open a freshly-created file straight away for editing.
+    if (!isDir) openTab(workspace.id, { path, mode: "edit" });
   };
 
   return (
@@ -371,7 +433,8 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
                 expanded={expandedDirs}
                 activePath={active?.mode === "edit" ? active.path : undefined}
                 reveal={reveal}
-                refreshKey={refreshKey}
+                refreshKey={refresh.seq}
+                hardRefresh={refresh.hard}
                 onToggleDir={toggleDir}
                 onOpenFile={(path) =>
                   openTab(workspace.id, { path, mode: "edit" })
@@ -381,6 +444,10 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
                 onDownload={handleDownload}
                 onUpload={handleUpload}
                 onCreate={handleCreate}
+                onRefresh={() => {
+                  setFsError(null);
+                  refreshTree(true);
+                }}
               />
             </div>
             <TransferStrip workspaceId={workspace.id} />
@@ -552,6 +619,8 @@ interface TreeActions {
   /** Path the open context menu acts on, highlighted so the target is obvious. */
   contextPath: string | null;
   refreshKey: number;
+  /** True when that refresh was manual: rows drop their cached listing. */
+  hardRefresh: boolean;
   /** Lower-cased name filter; empty string means no filtering. */
   filter: string;
   /**
@@ -686,6 +755,7 @@ function FileTree({
   activePath,
   reveal,
   refreshKey,
+  hardRefresh,
   onToggleDir,
   onOpenFile,
   onRename,
@@ -693,6 +763,7 @@ function FileTree({
   onDownload,
   onUpload,
   onCreate,
+  onRefresh,
 }: {
   service: ServiceRef;
   root: string;
@@ -701,6 +772,8 @@ function FileTree({
   /** A request from the editor toolbar to scroll `path` into view. */
   reveal: { path: string; seq: number } | null;
   refreshKey: number;
+  /** True when that refresh was manual: rows drop their cached listing. */
+  hardRefresh: boolean;
   onToggleDir: (path: string) => void;
   onOpenFile: (path: string) => void;
   onRename: (entry: FsEntry, newName: string) => void;
@@ -710,6 +783,8 @@ function FileTree({
   onDelete: (paths: string[]) => void;
   onUpload: (entry: FsEntry) => void;
   onCreate: (dir: string, name: string, isDir: boolean) => void;
+  /** Re-list every open folder from disk, dropping the cached rows first. */
+  onRefresh: () => void;
 }) {
   const downloadMaxFiles = useStore((s) => s.settings.downloadMaxFiles);
   const [ctxMenu, setCtxMenu] = useState<{
@@ -847,6 +922,7 @@ function FileTree({
     contextPath: ctxMenu && !ctxMenu.isRoot ? ctxMenu.entry.path : null,
     revealPath: flashPath,
     refreshKey,
+    hardRefresh,
     filter: normFilter,
     visibleDirs,
     renamingPath,
@@ -1000,6 +1076,16 @@ function FileTree({
             ×
           </button>
         )}
+        <button
+          type="button"
+          className="weditor__filter-refresh"
+          aria-label="Refresh file tree"
+          title="Refresh — re-read from disk"
+          onContextMenu={(e) => e.stopPropagation()}
+          onClick={onRefresh}
+        >
+          ⟳
+        </button>
       </div>
       {capNote && (
         <div className="weditor__row weditor__row--hint">{capNote}</div>
@@ -1051,8 +1137,19 @@ function DirNode({
   const [listing, setListing] = useState<FsListing | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The refresh this node has already acted on, so a "hard" one can be told
+  // apart from a re-render — and noticed even if it happened while collapsed.
+  const seenRefresh = useRef(actions.refreshKey);
 
   useEffect(() => {
+    const unseen = seenRefresh.current !== actions.refreshKey;
+    seenRefresh.current = actions.refreshKey;
+    // A manual refresh drops the cached rows, so nothing stale can stay on
+    // screen if the new listing is slow or fails. Automatic refreshes keep them
+    // to avoid a flicker after every rename/delete/upload. Done before the
+    // `open` guard so a folder refreshed while collapsed can't flash old rows
+    // at the next expand.
+    if (unseen && actions.hardRefresh) setListing(null);
     if (!open) return;
     let cancelled = false;
     setLoading(true);
@@ -1073,7 +1170,7 @@ function DirNode({
     // refreshKey re-lists after a filesystem op (rename/delete/upload). The rest
     // of `actions` is rebuilt on every render, so it must stay out of the deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, path, service, isRoot, actions.refreshKey]);
+  }, [open, path, service, isRoot, actions.refreshKey, actions.hardRefresh]);
 
   const indent = { paddingLeft: `${depth * 12 + 8}px` };
 
