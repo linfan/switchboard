@@ -3,22 +3,28 @@ import type { ServiceInfo, TaskInfo, TaskStatus } from "../protocol";
 /** Liveness of a single hosting-service connection. */
 export type ConnStatus = "connecting" | "online" | "offline" | "reconnecting";
 
-/** A hosting service the user has registered. Persisted across restarts. */
-export interface Service {
-  /** Stable client-generated id (survives edits to name/url). */
-  id: string;
-  /** User-facing label. */
-  name: string;
+/** Connection identity shared by every network entry point. */
+export interface ServiceRef {
   /** Base URL, e.g. `http://127.0.0.1:8787` (ws:// derived from it). */
   url: string;
   /** Shared secret. Never transmitted — used only to compute SWB-v1 HMAC proofs. */
   token: string;
+  /** Repeater worker tag; absent for an untagged direct connection. */
+  tag?: string;
   /**
    * SHA-256 (hex) of the server's pinned leaf TLS certificate, captured on first
    * add (trust-on-first-use). Enforced on every later connection and mixed into
    * every auth proof as the channel binding. Absent for plain-HTTP services.
    */
   certFingerprint?: string;
+}
+
+/** A hosting service the user has registered. Persisted across restarts. */
+export interface Service extends ServiceRef {
+  /** Stable client-generated id (survives edits to name/url). */
+  id: string;
+  /** User-facing label. */
+  name: string;
 }
 
 /**

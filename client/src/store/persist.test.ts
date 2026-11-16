@@ -42,6 +42,33 @@ describe("persist round-trip through localStorage", () => {
     expect(persisted().services).toHaveLength(0);
   });
 
+  it("round-trips a service TAG and keeps legacy untagged direct fixtures", () => {
+    useStore.getState().addService({
+      id: "tagged",
+      name: "Tagged",
+      url: "http://x",
+      token: "t",
+      tag: "worker-A",
+    });
+    useStore.getState().addService({
+      id: "direct",
+      name: "Direct",
+      url: "http://y",
+      token: "t",
+    });
+
+    expect(persisted().services).toEqual([
+      {
+        id: "tagged",
+        name: "Tagged",
+        url: "http://x",
+        token: "t",
+        tag: "worker-A",
+      },
+      { id: "direct", name: "Direct", url: "http://y", token: "t" },
+    ]);
+  });
+
   it("does not persist cursors (terminal buffer is lost on reload, so a fresh start must re-sync from 0)", () => {
     useStore.getState().setCursor("s1", "t1", 42);
     expect(useStore.getState().cursors[convKey("s1", "t1")]).toBe(42);

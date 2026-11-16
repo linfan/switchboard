@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { cancelTransfer, downloadFiles, joinLocalPath } from "./transfer";
+import type { ServiceRef } from "../store/types";
+import { cbFromPin, fromHex, restSignHeaders, sha256 } from "./swbauth";
+import {
+  cancelTransfer,
+  downloadFiles,
+  joinLocalPath,
+  openPreview,
+  uploadBinaryUpgrade,
+  uploadFiles,
+} from "./transfer";
 
 const svc = { url: "http://host:8787", token: "tok" };
 
@@ -13,6 +22,43 @@ type FetchImpl = (url: string, init: RequestInit) => Response;
 
 function mockFetch(impl: FetchImpl) {
   vi.stubGlobal("fetch", vi.fn(impl));
+}
+
+async function expectMacTarget(
+  init: RequestInit,
+  service: ServiceRef,
+  method: string,
+  target: string,
+  body: Uint8Array = new Uint8Array(0),
+): Promise<void> {
+  const headers = init.headers as Record<string, string>;
+  const expected = await restSignHeaders({
+    token: service.token,
+    method,
+    pathAndQuery: target,
+    bodyHash: await sha256(body),
+    cb: cbFromPin(service.certFingerprint),
+    ts: Number(headers["x-swb-ts"]),
+    nonce: fromHex(headers["x-swb-nonce"]),
+  });
+  expect(headers["x-swb-mac"]).toBe(expected["x-swb-mac"]);
+}
+
+function pickBrowserFile(file: File): void {
+  vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(function (
+    this: HTMLInputElement,
+  ) {
+    Object.defineProperty(this, "files", { value: [file] });
+    this.dispatchEvent(new Event("change"));
+  });
+}
+
+function browserFile(contents: string, name: string): File {
+  const file = new File([contents], name);
+  Object.defineProperty(file, "arrayBuffer", {
+    value: async () => new TextEncoder().encode(contents).buffer,
+  });
+  return file;
 }
 
 /** A response whose body arrives as `chunks`, with the given `Content-Length`. */
@@ -166,6 +212,28 @@ describe("downloadFiles", () => {
     expect(ended).toEqual(started);
   });
 
+  it("signs the exact tagged download target and keeps direct unchanged", async () => {
+    mockFetch(() => streamed([1], 1));
+    const tagged = { ...svc, tag: "worker-A" };
+
+    await downloadFiles(tagged, ["/host/a.bin"]);
+    await downloadFiles(svc, ["/host/a.bin"]);
+
+    const calls = vi.mocked(fetch).mock.calls;
+    const taggedTarget = "/api/fs/download?path=%2Fhost%2Fa.bin&tag=worker-A";
+    expect(calls[0][0]).toBe(`http://host:8787${taggedTarget}`);
+    await expectMacTarget(calls[0][1]!, tagged, "GET", taggedTarget);
+    expect(calls[1][0]).toBe(
+      "http://host:8787/api/fs/download?path=%2Fhost%2Fa.bin",
+    );
+    await expectMacTarget(
+      calls[1][1]!,
+      svc,
+      "GET",
+      "/api/fs/download?path=%2Fhost%2Fa.bin",
+    );
+  });
+
   it("requests nothing for an empty selection", async () => {
     mockFetch(() => streamed([1], 1));
     await expect(downloadFiles(svc, [])).resolves.toMatchObject({
@@ -174,6 +242,63 @@ describe("downloadFiles", () => {
       cancelled: 0,
     });
     expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("tagged browser transfers", () => {
+  it("uses the same tagged preview URL and MAC target", async () => {
+    mockFetch(() => new Response(new Uint8Array([1]), { status: 200 }));
+    const tagged = { ...svc, tag: "worker-A" };
+    const preview = await openPreview(tagged, "/host/image.png", "png", 7);
+
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    const target = "/api/fs/download?path=%2Fhost%2Fimage.png&tag=worker-A";
+    expect(url).toBe(`http://host:8787${target}`);
+    await expectMacTarget(init!, tagged, "GET", target);
+    preview.release();
+  });
+
+  it("uses the same tagged browser upload URL and body MAC", async () => {
+    mockFetch(() => new Response("", { status: 200 }));
+    const file = browserFile("abc", "a.bin");
+    pickBrowserFile(file);
+    const tagged = { ...svc, tag: "worker-A" };
+
+    await expect(uploadFiles(tagged, "/host dir", 5)).resolves.toMatchObject({
+      done: ["a.bin"],
+      failed: [],
+    });
+
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    const target = "/api/fs/upload?dir=%2Fhost%20dir&name=a.bin&tag=worker-A";
+    expect(url).toBe(`http://host:8787${target}`);
+    await expectMacTarget(
+      init!,
+      tagged,
+      "POST",
+      target,
+      new TextEncoder().encode("abc"),
+    );
+  });
+
+  it("uses the same tagged browser upgrade upload URL and body MAC", async () => {
+    mockFetch(() => new Response("", { status: 200 }));
+    const file = browserFile("new-binary", "switchboard");
+    pickBrowserFile(file);
+    const tagged = { ...svc, tag: "worker-A" };
+
+    await expect(uploadBinaryUpgrade(tagged)).resolves.toBe(true);
+
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    const target = "/api/admin/upgrade/upload?tag=worker-A";
+    expect(url).toBe(`http://host:8787${target}`);
+    await expectMacTarget(
+      init!,
+      tagged,
+      "POST",
+      target,
+      new TextEncoder().encode("new-binary"),
+    );
   });
 });
 

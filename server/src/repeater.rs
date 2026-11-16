@@ -6,8 +6,8 @@
 //!   forwarded opaquely to the paired worker over the tunnel, so any new REST route
 //!   or control message works with no repeater change.
 //! - **worker-facing** (`SWITCHBOARD_REPEATER_ADDR`, `SWITCHBOARD_REPEATER_TOKEN`):
-//!   a `/repeater` WebSocket a single worker dials in on. Only one worker may be
-//!   paired at a time; a second is rejected until the first's tunnel dies.
+//!   a `/repeater` WebSocket that workers dial in on. Each worker announces a
+//!   route TAG; a newer worker replaces only the incumbent with the same TAG.
 //!
 //! Auth is terminated per hop: the repeater validates the client's `SWB-v1` proof
 //! at ingress (its own cert is the channel binding) and authenticates the worker
@@ -25,9 +25,9 @@ use axum::{
     body::{Body, Bytes},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Request, State,
+        OriginalUri, Request, State,
     },
-    http::StatusCode,
+    http::{StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -38,9 +38,10 @@ use switchboard_shared::{
     auth::{H_MAC, H_NONCE, H_TS},
     now_millis,
     tunnel::{
-        ReqHead, RespHead, TunnelFrame, WorkerHello, WsOpen, BODY_CHUNK, KIND_HELLO, KIND_PING,
-        KIND_PONG, KIND_REQ_BODY, KIND_REQ_END, KIND_REQ_HEAD, KIND_RESP_BODY, KIND_RESP_END,
-        KIND_RESP_HEAD, KIND_RST, KIND_WS_BIN, KIND_WS_CLOSE, KIND_WS_OPEN, KIND_WS_TEXT,
+        ReqHead, RespHead, Tag, TunnelFrame, WorkerHello, WsOpen, BODY_CHUNK, KIND_HELLO,
+        KIND_PING, KIND_PONG, KIND_REQ_BODY, KIND_REQ_END, KIND_REQ_HEAD, KIND_RESP_BODY,
+        KIND_RESP_END, KIND_RESP_HEAD, KIND_RST, KIND_WS_BIN, KIND_WS_CLOSE, KIND_WS_OPEN,
+        KIND_WS_TEXT, PROTO,
     },
 };
 use tokio::sync::mpsc;
@@ -58,10 +59,9 @@ const STREAM_BUF: usize = 1024;
 const GRACE: Duration = Duration::from_secs(5);
 /// Interval between app-level tunnel PINGs.
 const HEARTBEAT: Duration = Duration::from_secs(15);
-/// Tear the tunnel down (freeing the slot) after this long with no worker frame.
+/// Tear the tunnel down (freeing its TAG) after this long with no worker frame.
 const IDLE_MS: i64 = 45_000;
-/// How long a freshly authenticated worker gets to announce itself before it is
-/// treated as a legacy build that predates the HELLO frame.
+/// How long a freshly authenticated worker gets to send its mandatory HELLO.
 const HELLO_GRACE: Duration = Duration::from_secs(1);
 /// Largest client REST body the repeater buffers to sign-check + forward.
 const MAX_BODY: usize = 128 * 1024 * 1024;
@@ -78,6 +78,35 @@ fn is_stripped_header(name: &str) -> bool {
         || n == "transfer-encoding"
 }
 
+struct RouteTarget {
+    tag: Tag,
+    forwarded_uri: String,
+}
+
+fn route_target(uri: &Uri) -> std::result::Result<RouteTarget, String> {
+    let mut tag = None;
+    let mut forwarded = Vec::new();
+    for raw_pair in uri.query().unwrap_or_default().split('&') {
+        let mut decoded = form_urlencoded::parse(raw_pair.as_bytes());
+        let (key, value) = decoded.next().unwrap_or_default();
+        if key == "tag" {
+            if tag.is_some() {
+                return Err("exactly one tag parameter is required".into());
+            }
+            tag = Some(Tag::parse(&value).map_err(|e| e.to_string())?);
+        } else {
+            forwarded.push(raw_pair);
+        }
+    }
+    let tag = tag.ok_or_else(|| "exactly one tag parameter is required".to_string())?;
+    let forwarded_uri = match (forwarded.is_empty(), uri.query()) {
+        (true, _) => uri.path().to_string(),
+        (false, Some(_)) => format!("{}?{}", uri.path(), forwarded.join("&")),
+        (false, None) => unreachable!(),
+    };
+    Ok(RouteTarget { tag, forwarded_uri })
+}
+
 /// One registered stream: the inbound sender plus the label the client opened
 /// it under, so a queue-full reset can name the endpoint (`/ws`, `/forward`,
 /// `GET /api/fs`, …) instead of only its numeric id.
@@ -87,17 +116,16 @@ struct Route {
     label: Arc<str>,
 }
 
-/// The one worker↔repeater tunnel: a writer channel plus a stream-id → inbound
+/// One worker↔repeater tunnel: a writer channel plus a stream-id → inbound
 /// router so many client interactions multiplex over one WebSocket.
 pub struct Tunnel {
+    tag: Tag,
     /// Encoded frames destined for the worker (drained by the writer task).
     tx: mpsc::Sender<Vec<u8>>,
     next_stream: AtomicU64,
     routes: StdMutex<HashMap<u64, Route>>,
-    /// What the worker announced after auth; `None` for legacy builds that
-    /// never send a HELLO.
-    caps: Option<WorkerHello>,
-    /// Fired when a newer worker evicts this tunnel from the single slot, so its
+    caps: WorkerHello,
+    /// Fired when a newer worker evicts this tunnel from the same TAG, so its
     /// session task tears down at once rather than lingering until the idle
     /// timeout. `notify_one` (not `notify_waiters`) so the signal is not lost if
     /// it races the session reaching its `.notified()` await.
@@ -165,6 +193,7 @@ impl Tunnel {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(frame)) => {
                 tracing::warn!(
+                    tag = %self.tag,
                     stream = frame.stream_id,
                     kind = frame.kind,
                     uri = %route.label,
@@ -178,18 +207,17 @@ impl Tunnel {
     }
 }
 
-/// Shared repeater state: auth material + the single tunnel slot.
+/// Shared repeater state: auth material + current tunnels by worker TAG.
 pub struct RepeaterState {
     config: Config,
     cert_fp: Vec<u8>,
     nonce_cache: auth::ReplayCache,
-    /// The one paired worker's tunnel, or `None` when unpaired.
-    slot: StdMutex<Option<Arc<Tunnel>>>,
+    tunnels: StdMutex<HashMap<Tag, Arc<Tunnel>>>,
 }
 
 impl RepeaterState {
-    fn tunnel(&self) -> Option<Arc<Tunnel>> {
-        self.slot.lock().unwrap().clone()
+    fn tunnel(&self, tag: &Tag) -> Option<Arc<Tunnel>> {
+        self.tunnels.lock().unwrap().get(tag).cloned()
     }
 }
 
@@ -244,7 +272,7 @@ pub(crate) async fn serve(
         config: config.clone(),
         cert_fp,
         nonce_cache: Default::default(),
-        slot: StdMutex::new(None),
+        tunnels: StdMutex::new(HashMap::new()),
     });
 
     let rustls_config =
@@ -272,33 +300,33 @@ pub(crate) async fn serve(
     Ok(())
 }
 
-/// Unauthenticated liveness: always answered locally so it works with no worker.
-async fn health(State(st): State<Shared>) -> Json<serde_json::Value> {
-    let tunnel = st.tunnel();
-    let worker_version = tunnel
-        .as_ref()
-        .and_then(|t| t.caps.as_ref())
-        .map(|h| h.version.clone());
-    let worker_features = tunnel
-        .as_ref()
-        .and_then(|t| t.caps.as_ref())
-        .map(|h| h.features.clone());
+/// Unauthenticated liveness for one TAG, answered locally with or without a worker.
+async fn health(State(st): State<Shared>, OriginalUri(uri): OriginalUri) -> Response {
+    let route = match route_target(&uri) {
+        Ok(route) => route,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    let tunnel = st.tunnel(&route.tag);
+    let worker_version = tunnel.as_ref().map(|t| t.caps.version.clone());
+    let worker_features = tunnel.as_ref().map(|t| t.caps.features.clone());
     Json(json!({
         "status": "ok",
         "role": "repeater",
         "name": st.config.service_name,
         "version": crate::version::full(),
+        "tag": route.tag,
         "paired": tunnel.is_some(),
         "worker_version": worker_version,
         "worker_features": worker_features,
     }))
+    .into_response()
 }
 
-/// Wait up to [`GRACE`] for a worker to be paired.
-async fn wait_for_tunnel(st: &Shared) -> Option<Arc<Tunnel>> {
+/// Wait up to [`GRACE`] for the selected worker TAG to be paired.
+async fn wait_for_tunnel(st: &Shared, tag: &Tag) -> Option<Arc<Tunnel>> {
     let deadline = tokio::time::Instant::now() + GRACE;
     loop {
-        if let Some(t) = st.tunnel() {
+        if let Some(t) = st.tunnel(tag) {
             return Some(t);
         }
         if tokio::time::Instant::now() >= deadline {
@@ -339,6 +367,10 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
         .map(|pq| pq.as_str())
         .unwrap_or_else(|| parts.uri.path())
         .to_string();
+    let route = match route_target(&parts.uri) {
+        Ok(route) => route,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
 
     // The request body must be buffered whole: SWB-REST-v1 signs SHA-256(body),
     // so the signature cannot be verified without seeing every byte.
@@ -365,8 +397,12 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let Some(tunnel) = wait_for_tunnel(&st).await else {
-        return (StatusCode::BAD_GATEWAY, "no worker paired").into_response();
+    let Some(tunnel) = wait_for_tunnel(&st, &route.tag).await else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("no worker paired for tag {}", route.tag),
+        )
+            .into_response();
     };
     let id = tunnel.alloc_stream();
     let mut rx = tunnel.register(id, format!("{method} {path_and_query}"));
@@ -388,7 +424,7 @@ async fn client_rest(State(st): State<Shared>, req: Request) -> Response {
         .collect();
     let head = ReqHead {
         method,
-        uri: path_and_query,
+        uri: route.forwarded_uri,
         headers,
     };
     let head_json = serde_json::to_vec(&head).unwrap_or_default();
@@ -472,36 +508,44 @@ fn build_response(head: RespHead, body: Body) -> Response {
 }
 
 /// Client-facing `/ws`: authenticate with the client token, then bridge the
-/// client socket to a tunneled WS session on the worker.
-async fn client_ws(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| bridge_client_ws(socket, st, "/ws"))
+/// client socket to a tunneled WS session on the selected worker.
+async fn client_ws(
+    State(st): State<Shared>,
+    OriginalUri(uri): OriginalUri,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let route = match route_target(&uri) {
+        Ok(route) => route,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    ws.on_upgrade(move |socket| bridge_client_ws(socket, st, "/ws", route.tag))
 }
 
-async fn client_forward(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {
-    // Refuse fast when the paired worker cannot serve port forwarding. Without
-    // this, an old worker silently treats the tunneled frames as terminal data
-    // and the client waits forever for OpenOk. No worker yet keeps the existing
-    // grace behavior in `bridge_client_ws`.
-    if let Some(tunnel) = st.tunnel() {
-        let unsupported = match &tunnel.caps {
-            Some(caps) => !caps.features.iter().any(|f| f == "forward"),
-            None => true, // legacy worker: predates capability negotiation
-        };
-        if unsupported {
-            tracing::warn!("paired worker does not support /forward; refusing the upgrade");
+async fn client_forward(
+    State(st): State<Shared>,
+    OriginalUri(uri): OriginalUri,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let route = match route_target(&uri) {
+        Ok(route) => route,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    if let Some(tunnel) = st.tunnel(&route.tag) {
+        if !tunnel.caps.features.iter().any(|f| f == "forward") {
+            tracing::warn!(tag = %route.tag, "paired worker does not support /forward; refusing the upgrade");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({
-                    "message": "the paired worker does not support port forwarding; upgrade the worker"
+                    "message": format!("worker {} does not support port forwarding", route.tag)
                 })),
             )
                 .into_response();
         }
     }
-    ws.on_upgrade(move |socket| bridge_client_ws(socket, st, "/forward"))
+    ws.on_upgrade(move |socket| bridge_client_ws(socket, st, "/forward", route.tag))
 }
 
-async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
+async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str, tag: Tag) {
     let (mut sink, mut stream) = socket.split();
     if !ws::ws_handshake(
         &mut sink,
@@ -514,8 +558,8 @@ async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
         return;
     }
 
-    let Some(tunnel) = wait_for_tunnel(&st).await else {
-        tracing::warn!("no worker paired within grace; closing the client socket");
+    let Some(tunnel) = wait_for_tunnel(&st, &tag).await else {
+        tracing::warn!(%tag, "no worker paired within grace; closing the client socket");
         let _ = sink.send(Message::Close(None)).await;
         return;
     };
@@ -546,7 +590,7 @@ async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
         tokio::select! {
             _ = heartbeat.tick() => {
                 if last_activity.elapsed() > idle_limit {
-                    tracing::warn!(uri, "client websocket silent past timeout; closing");
+                    tracing::warn!(%tag, uri, "client websocket silent past timeout; closing");
                     break;
                 }
                 if sink.send(Message::Ping(Default::default())).await.is_err() { break; }
@@ -596,8 +640,8 @@ async fn bridge_client_ws(socket: WebSocket, st: Shared, uri: &'static str) {
     drop(guard);
 }
 
-/// Worker-facing `/repeater`: authenticate the tunnel token, claim the single
-/// slot (reject if occupied), then run the mux writer + demux until it dies.
+/// Worker-facing `/repeater`: authenticate and identify a worker, claim its
+/// TAG, then run the mux writer + demux until the tunnel dies.
 async fn worker_attach(State(st): State<Shared>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| install_worker(socket, st))
 }
@@ -615,50 +659,49 @@ async fn install_worker(socket: WebSocket, st: Shared) {
         return;
     }
 
-    // Read the capability announcement before claiming the slot. Bounded by
-    // HELLO_GRACE: a worker that sends nothing is a legacy build, but a socket
-    // that closes during the wait must not be paired at all.
-    let caps = match tokio::time::timeout(HELLO_GRACE, stream.next()).await {
+    let hello = match tokio::time::timeout(HELLO_GRACE, stream.next()).await {
         Ok(Some(Ok(Message::Binary(bytes)))) => match TunnelFrame::decode(&bytes) {
-            Ok(frame) if frame.kind == KIND_HELLO => {
-                match serde_json::from_slice::<WorkerHello>(&frame.payload) {
-                    Ok(hello) => Some(hello),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "malformed worker hello; assuming legacy");
-                        None
-                    }
-                }
+            Ok(frame) if frame.kind == KIND_HELLO && frame.stream_id == 0 => {
+                serde_json::from_slice::<WorkerHello>(&frame.payload)
+                    .map_err(|e| format!("malformed worker hello: {e}"))
             }
-            Ok(frame) => {
-                tracing::warn!(
-                    kind = frame.kind,
-                    "first worker frame is not a hello; assuming legacy"
-                );
-                None
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "bad first worker frame; assuming legacy");
-                None
-            }
+            Ok(frame) => Err(format!(
+                "first worker frame must be HELLO on stream 0, got kind {} stream {}",
+                frame.kind, frame.stream_id
+            )),
+            Err(e) => Err(format!("bad worker hello frame: {e}")),
         },
         Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))) | Ok(None) => return,
-        Ok(Some(Ok(_))) => None, // ping/pong before hello; treat as legacy
-        Err(_) => {
-            tracing::info!("worker sent no hello within {HELLO_GRACE:?}; assuming legacy");
-            None
+        Ok(Some(Ok(_))) => Err("first worker message must be a binary HELLO".into()),
+        Err(_) => Err(format!("worker sent no hello within {HELLO_GRACE:?}")),
+    };
+    let caps = match hello {
+        Ok(caps) if caps.proto == PROTO => caps,
+        Ok(caps) => {
+            tracing::warn!(
+                proto = caps.proto,
+                expected = PROTO,
+                "worker protocol mismatch"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "refusing worker without a valid hello");
+            return;
         }
     };
-    if let Some(hello) = &caps {
-        tracing::info!(
-            version = %hello.version,
-            proto = hello.proto,
-            features = ?hello.features,
-            "worker capabilities received"
-        );
-    }
+    let tag = caps.tag.clone();
+    tracing::info!(
+        %tag,
+        version = %caps.version,
+        proto = caps.proto,
+        features = ?caps.features,
+        "worker capabilities received"
+    );
 
     let (tx, mut mux_rx) = mpsc::channel::<Vec<u8>>(MUX_BUF);
     let tunnel = Arc::new(Tunnel {
+        tag: tag.clone(),
         tx,
         next_stream: AtomicU64::new(1),
         routes: StdMutex::new(HashMap::new()),
@@ -666,21 +709,18 @@ async fn install_worker(socket: WebSocket, st: Shared) {
         evicted: tokio::sync::Notify::new(),
     });
 
-    // Claim the slot with last-writer-wins. A freshly *authenticated* worker is by
-    // definition the current one; any incumbent is stale — e.g. the half-open
-    // socket a self-upgrade re-exec left behind, which the demux/idle path has not
-    // reaped yet. Evict it (signal it to tear down) rather than rejecting the
-    // newcomer, so re-pairing is immediate instead of blocked until the old socket
-    // is noticed or the 45s idle timeout elapses.
-    let previous = {
-        let mut slot = st.slot.lock().unwrap();
-        slot.replace(tunnel.clone())
-    };
+    // A freshly authenticated worker replaces only the incumbent with its TAG.
+    // This keeps self-upgrade re-pairing immediate without disturbing other TAGs.
+    let previous = st
+        .tunnels
+        .lock()
+        .unwrap()
+        .insert(tag.clone(), tunnel.clone());
     if let Some(old) = previous {
-        tracing::warn!("evicting a previously paired worker in favor of a newer one");
+        tracing::warn!(%tag, "evicting the previous worker for this tag");
         old.evicted.notify_one();
     }
-    tracing::info!("worker paired");
+    tracing::info!(%tag, "worker paired");
 
     let writer = tokio::spawn(async move {
         while let Some(bytes) = mux_rx.recv().await {
@@ -703,7 +743,7 @@ async fn install_worker(socket: WebSocket, st: Shared) {
                     return;
                 }
                 if now_millis() - last_activity.load(Ordering::Relaxed) > IDLE_MS {
-                    tracing::warn!("worker tunnel idle past timeout; tearing down");
+                    tracing::warn!(tag = %tunnel.tag, "worker tunnel idle past timeout; tearing down");
                     return;
                 }
             }
@@ -728,7 +768,9 @@ async fn install_worker(socket: WebSocket, st: Shared) {
                     }
                     Ok(f) if f.kind == KIND_PONG => {}
                     Ok(f) => tunnel.route(f),
-                    Err(e) => tracing::warn!(error = %e, "bad tunnel frame from worker"),
+                    Err(e) => {
+                        tracing::warn!(tag = %tunnel.tag, error = %e, "bad tunnel frame from worker")
+                    }
                 }
             }
         }
@@ -737,9 +779,9 @@ async fn install_worker(socket: WebSocket, st: Shared) {
     tokio::select! {
         _ = demux => {}
         _ = heartbeat => {}
-        // A newer worker took the slot: stop serving this stale tunnel at once.
+        // A newer worker took this TAG: stop serving the stale tunnel at once.
         _ = tunnel.evicted.notified() => {
-            tracing::info!("worker tunnel evicted by a newer worker; tearing down");
+            tracing::info!(tag = %tunnel.tag, "worker tunnel evicted by a newer worker; tearing down");
         }
     }
 
@@ -748,33 +790,91 @@ async fn install_worker(socket: WebSocket, st: Shared) {
     // client would stay "connected" to a dead tunnel until its next write.
     tunnel.close();
 
-    // Free the slot only if it still holds *this* tunnel. After an eviction the
-    // slot already points at the newer worker, so this `Arc::ptr_eq` guard leaves
-    // it untouched — the incumbent must never clear its successor's slot.
+    // An evicted tunnel must not remove its successor or any other TAG.
     {
-        let mut slot = st.slot.lock().unwrap();
-        if slot.as_ref().is_some_and(|t| Arc::ptr_eq(t, &tunnel)) {
-            *slot = None;
+        let mut tunnels = st.tunnels.lock().unwrap();
+        let is_current = tunnels
+            .get(&tag)
+            .is_some_and(|current| Arc::ptr_eq(current, &tunnel));
+        if is_current {
+            tunnels.remove(&tag);
         }
     }
     writer.abort();
-    tracing::info!("worker unpaired");
+    tracing::info!(%tag, "worker unpaired");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn test_tunnel(tag: &str) -> (Tunnel, mpsc::Receiver<Vec<u8>>) {
+        let (tx, mux_rx) = mpsc::channel(8);
+        let tag = Tag::parse(tag).unwrap();
+        (
+            Tunnel {
+                tag: tag.clone(),
+                tx,
+                next_stream: AtomicU64::new(1),
+                routes: StdMutex::new(HashMap::new()),
+                caps: WorkerHello {
+                    proto: PROTO,
+                    version: "test".into(),
+                    tag,
+                    features: vec!["ws".into(), "forward".into()],
+                },
+                evicted: tokio::sync::Notify::new(),
+            },
+            mux_rx,
+        )
+    }
+
+    #[test]
+    fn route_target_is_strict_and_preserves_other_query_pairs() {
+        let uri: Uri = "/api/fs?path=%2Ftmp%2Fa&tag=worker-a&x=a%20b&&x="
+            .parse()
+            .unwrap();
+        let route = route_target(&uri).unwrap();
+        assert_eq!(route.tag.as_str(), "worker-a");
+        assert_eq!(route.forwarded_uri, "/api/fs?path=%2Ftmp%2Fa&x=a%20b&&x=");
+
+        for invalid in [
+            "/health",
+            "/health?tag=",
+            "/health?tag=bad.tag",
+            "/health?tag=a&tag=a",
+            "/health?tag=a&%74ag=b",
+        ] {
+            assert!(
+                route_target(&invalid.parse().unwrap()).is_err(),
+                "{invalid}"
+            );
+        }
+        let encoded: Uri = "/health?%74ag=A".parse().unwrap();
+        assert_eq!(route_target(&encoded).unwrap().tag.as_str(), "A");
+    }
+
+    #[tokio::test]
+    async fn stream_ids_and_close_are_scoped_to_one_tunnel() {
+        let (a, _a_mux) = test_tunnel("a");
+        let (b, _b_mux) = test_tunnel("b");
+        assert_eq!(a.alloc_stream(), 1);
+        assert_eq!(b.alloc_stream(), 1);
+        let mut a_rx = a.register(1, "/ws");
+        let mut b_rx = b.register(1, "/ws");
+        a.route(TunnelFrame::new(KIND_WS_BIN, 1, b"from-a".to_vec()));
+        b.route(TunnelFrame::new(KIND_WS_BIN, 1, b"from-b".to_vec()));
+        assert_eq!(a_rx.recv().await.unwrap().payload, b"from-a");
+        assert_eq!(b_rx.recv().await.unwrap().payload, b"from-b");
+
+        a.close();
+        b.route(TunnelFrame::new(KIND_WS_BIN, 1, b"still-b".to_vec()));
+        assert_eq!(b_rx.recv().await.unwrap().payload, b"still-b");
+    }
+
     #[tokio::test]
     async fn a_full_stream_queue_resets_only_that_stream() {
-        let (tx, mut mux_rx) = mpsc::channel(8);
-        let tunnel = Tunnel {
-            tx,
-            next_stream: AtomicU64::new(1),
-            routes: StdMutex::new(HashMap::new()),
-            caps: None,
-            evicted: tokio::sync::Notify::new(),
-        };
+        let (tunnel, mut mux_rx) = test_tunnel("a");
 
         let stalled = tunnel.alloc_stream();
         let mut stalled_rx = tunnel.register(stalled, "/ws");

@@ -38,6 +38,65 @@ test("a wrong token is rejected and blocks the Add dialog", async ({
   await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
 });
 
+test("a tagged service connects, persists, displays its TAG, and keeps it read-only", async ({
+  page,
+}) => {
+  await page.getByTitle("Add service").click();
+  const dialog = page.getByRole("dialog", { name: "Add hosting service" });
+  await dialog.getByPlaceholder("Laptop / prod-box").fill("Tagged PW Host");
+  await dialog.getByRole("radio", { name: "http", exact: true }).check();
+  await dialog.getByPlaceholder("hostname or IP").fill(HOST);
+  await dialog.getByPlaceholder("8787").fill(PORT);
+  await dialog.locator('input[type="password"]').fill(TOKEN);
+
+  await dialog.getByLabel("TAG", { exact: true }).fill("bad tag");
+  await expect(dialog.getByRole("button", { name: "Add" })).toBeDisabled();
+  await dialog.getByLabel("TAG", { exact: true }).fill("worker-A");
+  await dialog.getByRole("button", { name: "Add" }).click();
+
+  await expect(dialog).toBeHidden();
+  const service = page.locator(".service", { hasText: "Tagged PW Host" });
+  await expect(service.locator(".dot--online")).toBeVisible({ timeout: 15000 });
+  await service.locator(".service__name").click();
+  await expect(
+    page.locator(".service-panel__row", { hasText: "TAG" }),
+  ).toContainText("worker-A");
+
+  await page.reload();
+  const persisted = page.locator(".service", { hasText: "Tagged PW Host" });
+  await expect(persisted.locator(".dot--online")).toBeVisible({
+    timeout: 15000,
+  });
+  const stored = await page.evaluate(() => {
+    const state = JSON.parse(localStorage.getItem("switchboard")!).state;
+    return state.services[0];
+  });
+  expect(stored).toMatchObject({ name: "Tagged PW Host", tag: "worker-A" });
+
+  await persisted.locator(".service__head").hover();
+  await persisted.getByTitle("Service actions").click();
+  await page.getByRole("menuitem", { name: "Edit service" }).click();
+  const edit = page.getByRole("dialog", { name: "Edit hosting service" });
+  const tag = edit.getByLabel("TAG", { exact: true });
+  await expect(tag).toHaveValue("worker-A");
+  await expect(tag).toHaveAttribute("readonly", "");
+  await expect(tag).not.toBeEditable();
+  await expect(edit).toContainText(
+    "To connect to another TAG, create a new service",
+  );
+
+  await edit.getByRole("button", { name: "Save" }).click();
+  await expect(edit).toBeHidden();
+  await expect(persisted.locator(".dot--online")).toBeVisible({
+    timeout: 15000,
+  });
+  const afterEdit = await page.evaluate(() => {
+    const state = JSON.parse(localStorage.getItem("switchboard")!).state;
+    return state.services[0];
+  });
+  expect(afterEdit.tag).toBe("worker-A");
+});
+
 test("editing a service's token rebuilds the connection", async ({ page }) => {
   // Seed a service whose token is wrong, so it can never connect: it should be
   // registered but offline. Editing it to the right token must rebuild the pool

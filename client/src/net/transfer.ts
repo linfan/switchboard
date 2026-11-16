@@ -18,15 +18,10 @@
 //! (like `net/editors.ts`), so the store holds plain data and a component that
 //! unmounts mid-transfer doesn't strand it.
 
+import type { ServiceRef } from "../store/types";
 import { cbFromPin, fromHex, hex, restSignHeaders, sha256 } from "./swbauth";
 import { assetUrl, invoke, isTauri } from "./tauri";
-
-interface ServiceRef {
-  url: string;
-  token: string;
-  /** Pinned leaf-cert fingerprint (hex); absent for plain-HTTP services. */
-  certFingerprint?: string;
-}
+import { withServiceTag } from "./url";
 
 function baseUrl(service: ServiceRef): string {
   return service.url.replace(/\/+$/, "");
@@ -261,7 +256,10 @@ async function downloadOne(
   id: number,
   hooks?: TransferHooks,
 ): Promise<boolean> {
-  const reqPath = `/api/fs/download?path=${encodeURIComponent(file.path)}`;
+  const reqPath = withServiceTag(
+    `/api/fs/download?path=${encodeURIComponent(file.path)}`,
+    service.tag,
+  );
   const url = `${baseUrl(service)}${reqPath}`;
   // A download has no request body; the MAC covers the empty-body hash.
   const emptyHash = await sha256(new Uint8Array(0));
@@ -339,16 +337,18 @@ export interface Preview {
 }
 
 /**
- * Cache file name for a preview: hex SHA-256 over service + path + mtime, so an
+ * Cache file name for a preview: hex SHA-256 over service + tag + path + mtime, so an
  * edited file gets its own file instead of a stale hit. Truncated to 128 bits,
  * which is ample for names that only have to not collide.
  */
 async function previewKey(
-  serviceUrl: string,
+  service: ServiceRef,
   path: string,
   mtime: number,
 ): Promise<string> {
-  const material = new TextEncoder().encode(`${serviceUrl} ${path} ${mtime}`);
+  const material = new TextEncoder().encode(
+    `${service.url}\0${service.tag ?? ""}\0${path}\0${mtime}`,
+  );
   return hex(await sha256(material)).slice(0, 32);
 }
 
@@ -365,7 +365,10 @@ export async function openPreview(
   ext: string,
   mtime: number,
 ): Promise<Preview> {
-  const reqPath = `/api/fs/download?path=${encodeURIComponent(path)}`;
+  const reqPath = withServiceTag(
+    `/api/fs/download?path=${encodeURIComponent(path)}`,
+    service.tag,
+  );
   const url = `${baseUrl(service)}${reqPath}`;
   // Like a download, this has no request body; the MAC covers the empty-body hash.
   const emptyHash = await sha256(new Uint8Array(0));
@@ -376,7 +379,7 @@ export async function openPreview(
       url,
       headers: Object.entries(headers),
       pin: service.certFingerprint ?? null,
-      key: await previewKey(service.url, path, mtime),
+      key: await previewKey(service, path, mtime),
       ext,
     });
     return {
@@ -445,9 +448,12 @@ async function uploadFromPath(
   id: number,
   hooks?: TransferHooks,
 ): Promise<boolean> {
-  const reqPath = `/api/fs/upload?dir=${encodeURIComponent(
-    dir,
-  )}&name=${encodeURIComponent(basename(src))}`;
+  const reqPath = withServiceTag(
+    `/api/fs/upload?dir=${encodeURIComponent(
+      dir,
+    )}&name=${encodeURIComponent(basename(src))}`,
+    service.tag,
+  );
   const onProgress = await progressChannel(id, hooks);
   return tracked(
     id,
@@ -478,9 +484,12 @@ async function uploadFromBrowser(
   id: number,
   hooks?: TransferHooks,
 ): Promise<boolean> {
-  const reqPath = `/api/fs/upload?dir=${encodeURIComponent(
-    dir,
-  )}&name=${encodeURIComponent(file.name)}`;
+  const reqPath = withServiceTag(
+    `/api/fs/upload?dir=${encodeURIComponent(
+      dir,
+    )}&name=${encodeURIComponent(file.name)}`,
+    service.tag,
+  );
   const abort = new AbortController();
   const done = await tracked(
     id,
@@ -517,7 +526,7 @@ async function uploadFromBrowser(
 export async function uploadBinaryUpgrade(
   service: ServiceRef,
 ): Promise<boolean> {
-  const reqPath = `/api/admin/upgrade/upload`;
+  const reqPath = withServiceTag(`/api/admin/upgrade/upload`, service.tag);
   if (isTauri) {
     const src = await pickTauriFile();
     if (!src) return false;

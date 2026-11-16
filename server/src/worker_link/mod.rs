@@ -25,7 +25,7 @@ use rustls::ClientConfig;
 use switchboard_shared::{
     auth::{from_hex, hex, random_nonce, ws_mac, AuthMsg, NONCE_LEN},
     tunnel::{
-        ReqHead, RespHead, TunnelFrame, WorkerHello, WsOpen, BODY_CHUNK, FEATURES, KIND_HELLO,
+        ReqHead, RespHead, Tag, TunnelFrame, WorkerHello, WsOpen, BODY_CHUNK, FEATURES, KIND_HELLO,
         KIND_PING, KIND_PONG, KIND_REQ_BODY, KIND_REQ_END, KIND_REQ_HEAD, KIND_RESP_BODY,
         KIND_RESP_END, KIND_RESP_HEAD, KIND_RST, KIND_WS_BIN, KIND_WS_CLOSE, KIND_WS_OPEN,
         KIND_WS_TEXT, PROTO,
@@ -80,6 +80,11 @@ pub async fn run(state: SharedState) -> Result<()> {
         .repeater_ca
         .clone()
         .ok_or_else(|| anyhow!("worker-repeater-client requires SWITCHBOARD_REPEATER_CA"))?;
+    let tag = state
+        .config
+        .tag
+        .clone()
+        .ok_or_else(|| anyhow!("worker-repeater-client requires SWITCHBOARD_TAG"))?;
 
     // The pin (and channel binding `cb`) is SHA-256 of the repeater's leaf DER.
     let pin = leaf_der_fingerprint(&ca_path)
@@ -95,6 +100,7 @@ pub async fn run(state: SharedState) -> Result<()> {
             token.as_bytes(),
             &pin,
             tls.clone(),
+            &tag,
             TUNNEL_IDLE,
         )
         .await
@@ -139,6 +145,7 @@ async fn serve_once(
     token: &[u8],
     cb: &[u8],
     tls: Arc<ClientConfig>,
+    tag: &Tag,
     idle_timeout: Duration,
 ) -> Result<Outcome> {
     let url = format!("wss://{repeater_addr}/repeater");
@@ -150,14 +157,13 @@ async fn serve_once(
 
     // SWB-WS-v1 handshake (worker is the "client" proving the tunnel token).
     tunnel_auth(&mut sink, &mut stream, token, cb).await?;
-    tracing::info!(%repeater_addr, "repeater tunnel authenticated");
+    tracing::info!(%repeater_addr, %tag, "repeater tunnel authenticated");
 
-    // Announce capabilities before any other frame so the repeater can route
-    // only endpoints this worker actually serves. Older repeaters ignore the
-    // unknown kind with a warning; older workers never send it.
+    // Announce identity and capabilities before any other frame.
     let hello = WorkerHello {
         proto: PROTO,
         version: crate::version::full(),
+        tag: tag.clone(),
         features: FEATURES.iter().map(|f| (*f).into()).collect(),
     };
     let hello = TunnelFrame::new(KIND_HELLO, 0, serde_json::to_vec(&hello)?);
@@ -168,8 +174,8 @@ async fn serve_once(
     // Single writer task owns the socket sink; every stream funnels encoded
     // frames through this one bounded channel. When the channel drains (the
     // session tore down on purpose — e.g. a self-upgrade unpair), it sends a
-    // courteous WS Close so the repeater frees its worker slot at once instead
-    // of waiting to notice a dropped socket.
+    // courteous WS Close so the repeater frees its TAG at once instead of waiting
+    // to notice a dropped socket.
     let (mux_tx, mut mux_rx) = mpsc::channel::<Vec<u8>>(MUX_BUF);
     let writer = tokio::spawn(async move {
         while let Some(bytes) = mux_rx.recv().await {
@@ -268,7 +274,7 @@ async fn demux(
             Err(_) => {
                 return Err(anyhow!(
                     "no frame from the repeater in {idle_timeout:?}; tunnel is silently dead"
-                ))
+                ));
             }
         };
         let bytes = match msg? {
@@ -590,7 +596,7 @@ async fn tunnel_auth(
             Some(Ok(WsMessage::Text(t))) => match serde_json::from_str::<AuthMsg>(t.as_str()) {
                 Ok(AuthMsg::AuthOk) => return Ok(()),
                 Ok(AuthMsg::AuthError { message }) => {
-                    return Err(anyhow!("repeater rejected tunnel auth: {message}"))
+                    return Err(anyhow!("repeater rejected tunnel auth: {message}"));
                 }
                 _ => continue,
             },

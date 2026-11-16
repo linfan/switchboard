@@ -13,6 +13,7 @@ const service: Service = {
   name: "Worker",
   url: "https://worker.test",
   token: "secret",
+  tag: "worker-a",
   certFingerprint: "aabb",
 };
 
@@ -49,8 +50,15 @@ describe("nativeConfig", () => {
       remotePort: 5432,
       serviceUrl: "https://worker.test",
       token: "secret",
+      tag: "worker-a",
       certFingerprint: "aabb",
     });
+  });
+
+  it("keeps TAG absent for direct services", () => {
+    expect(nativeConfig(forward, { ...service, tag: undefined }).tag).toBe(
+      undefined,
+    );
   });
 });
 
@@ -96,6 +104,43 @@ describe("PortForwardCoordinator", () => {
       status: "stopped",
       activeConnections: 0,
     });
+    coordinator.stop();
+  });
+
+  it("stops and rebuilds the native session when the service TAG changes", async () => {
+    const bridge: PortForwardBridge = {
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+      list: vi.fn(async () => [
+        {
+          id: "f1",
+          localPort: 5433,
+          remotePort: 5432,
+          activeConnections: 0,
+          connected: true,
+          lastError: null,
+        },
+      ]),
+    };
+    const coordinator = new PortForwardCoordinator({
+      bridge,
+      desktop: () => true,
+      pollMs: 60_000,
+    });
+    useStore.getState().addService(service);
+    useStore.getState().addPortForward(forward);
+    coordinator.start();
+    await settle();
+
+    useStore.setState((state) => ({
+      services: state.services.map((item) => ({ ...item, tag: "worker-b" })),
+    }));
+    await settle();
+
+    expect(bridge.stop).toHaveBeenCalledWith("f1");
+    expect(bridge.start).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tag: "worker-b" }),
+    );
     coordinator.stop();
   });
 

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use switchboard_shared::{
     auth::{from_hex, hex, random_nonce, ws_mac, AuthMsg, NONCE_LEN},
     port_forward::{PortForwardFrame, MAX_DATA_LEN},
+    tunnel::Tag,
 };
 use tauri::State;
 use tokio::{
@@ -54,6 +55,7 @@ pub struct PortForwardConfig {
     pub remote_port: u16,
     pub service_url: String,
     pub token: String,
+    pub tag: Option<Tag>,
     pub cert_fingerprint: Option<String>,
 }
 
@@ -177,7 +179,7 @@ fn validate_config(config: &PortForwardConfig) -> Result<(), String> {
     if config.token.is_empty() {
         return Err("service token cannot be empty".into());
     }
-    forward_url(&config.service_url)?;
+    forward_url(&config.service_url, config.tag.as_ref())?;
     if config.service_url.trim_start().starts_with("https://")
         && config.cert_fingerprint.as_deref().is_none()
     {
@@ -616,7 +618,7 @@ async fn bridge_local(
 async fn connect_forward(
     config: PortForwardConfig,
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, String> {
-    let url = forward_url(&config.service_url)?;
+    let url = forward_url(&config.service_url, config.tag.as_ref())?;
     let channel_binding = match config.cert_fingerprint.as_deref() {
         Some(fingerprint) => {
             from_hex(fingerprint).ok_or_else(|| "invalid certificate fingerprint".to_string())?
@@ -695,15 +697,19 @@ async fn connect_forward(
     }
 }
 
-fn forward_url(base: &str) -> Result<String, String> {
+fn forward_url(base: &str, tag: Option<&Tag>) -> Result<String, String> {
     let trimmed = base.trim().trim_end_matches('/');
-    if let Some(rest) = trimmed.strip_prefix("http://") {
-        return Ok(format!("ws://{rest}/forward"));
-    }
-    if let Some(rest) = trimmed.strip_prefix("https://") {
-        return Ok(format!("wss://{rest}/forward"));
-    }
-    Err("service URL must start with http:// or https://".into())
+    let url = if let Some(rest) = trimmed.strip_prefix("http://") {
+        format!("ws://{rest}/forward")
+    } else if let Some(rest) = trimmed.strip_prefix("https://") {
+        format!("wss://{rest}/forward")
+    } else {
+        return Err("service URL must start with http:// or https://".into());
+    };
+    Ok(match tag {
+        Some(tag) => format!("{url}?tag={tag}"),
+        None => url,
+    })
 }
 
 #[cfg(test)]
@@ -715,7 +721,26 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::{mpsc, oneshot, watch};
 
-    use super::{run_connected, with_jitter};
+    use super::{forward_url, run_connected, with_jitter};
+    use switchboard_shared::tunnel::Tag;
+
+    #[test]
+    fn forward_urls_carry_an_optional_tag() {
+        assert_eq!(
+            forward_url("http://127.0.0.1:8787/", None).unwrap(),
+            "ws://127.0.0.1:8787/forward"
+        );
+        assert_eq!(
+            forward_url("https://worker.test", None).unwrap(),
+            "wss://worker.test/forward"
+        );
+        let tag: Tag = serde_json::from_str("\"worker_A-1\"").unwrap();
+        assert_eq!(
+            forward_url("https://worker.test/", Some(&tag)).unwrap(),
+            "wss://worker.test/forward?tag=worker_A-1"
+        );
+        assert!(serde_json::from_str::<Tag>("\"bad.tag\"").is_err());
+    }
 
     #[test]
     fn jitter_adds_at_most_a_quarter() {

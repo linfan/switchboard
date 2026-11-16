@@ -40,6 +40,7 @@ async fn test_state() -> SharedState {
             repeater_addr: None,
             repeater_token: None,
             repeater_ca: None,
+            tag: Some("worker-a".parse().unwrap()),
             log_file: None,
         },
         store,

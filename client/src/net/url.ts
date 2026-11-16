@@ -14,6 +14,19 @@ export interface ServiceAddr {
 /** Default hosting-service port; applied when the port field is left blank. */
 export const DEFAULT_PORT = "8787";
 
+const SERVICE_TAG = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+export function isValidServiceTag(tag: string): boolean {
+  return SERVICE_TAG.test(tag);
+}
+
+/** Add the repeater routing tag to an exact request target. */
+export function withServiceTag(pathAndQuery: string, tag?: string): string {
+  if (tag === undefined) return pathAndQuery;
+  if (!isValidServiceTag(tag)) throw new Error("Invalid service TAG.");
+  return `${pathAndQuery}${pathAndQuery.includes("?") ? "&" : "?"}tag=${tag}`;
+}
+
 /** Split a stored service URL into its parts (for editing an existing entry). */
 export function parseServiceUrl(url: string): ServiceAddr {
   try {

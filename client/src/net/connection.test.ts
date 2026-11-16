@@ -125,6 +125,7 @@ function makeDeps(over: {
   cursors?: Record<string, number>;
   now?: () => number;
   onReady?: () => void;
+  tag?: string;
   wake?: { checkMs: number; driftMs: number };
   heartbeat?: { intervalMs: number; timeoutMs: number };
 }) {
@@ -136,6 +137,7 @@ function makeDeps(over: {
     clientId: "c1",
     url: "http://host:8787",
     token: "tok",
+    tag: over.tag,
     getCursors: () => cursors,
     onMessage: (m: ServerMsg) => messages.push(m),
     onBinary: (b: Uint8Array) => binaries.push(b),
@@ -162,6 +164,20 @@ describe("toWsUrl", () => {
   it("maps http->ws and https->wss with no token in the URL", () => {
     expect(toWsUrl("http://127.0.0.1:8787")).toBe("ws://127.0.0.1:8787/ws");
     expect(toWsUrl("https://host/")).toBe("wss://host/ws");
+  });
+
+  it("adds a TAG without changing direct URLs and rejects invalid TAGs", () => {
+    expect(toWsUrl("https://host/", "worker-A")).toBe(
+      "wss://host/ws?tag=worker-A",
+    );
+    expect(() => toWsUrl("https://host", "")).toThrow("Invalid service TAG.");
+  });
+
+  it("uses the manager's TAG when opening the socket", () => {
+    const { mgr } = mkManager({ tag: "worker-A" });
+    mgr.start();
+    expect(FakeSocket.last().url).toBe("ws://host:8787/ws?tag=worker-A");
+    mgr.stop();
   });
 });
 

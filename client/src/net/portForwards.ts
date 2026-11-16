@@ -10,6 +10,7 @@ export interface NativePortForwardConfig {
   remotePort: number;
   serviceUrl: string;
   token: string;
+  tag?: string;
   certFingerprint?: string;
 }
 
@@ -46,6 +47,7 @@ export function nativeConfig(
     remotePort: forward.remotePort,
     serviceUrl: service.url,
     token: service.token,
+    tag: service.tag,
     certFingerprint: service.certFingerprint,
   };
 }
@@ -56,6 +58,7 @@ function configKey(forward: PortForward, service: Service): string {
     forward.remotePort,
     service.url,
     service.token,
+    service.tag ?? "",
     service.certFingerprint ?? "",
   ].join(" ");
 }

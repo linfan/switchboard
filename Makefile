@@ -40,12 +40,13 @@ SERVER_ADDR ?= 127.0.0.1:8787
 SERVER_TOKEN ?= dev-token
 SERVER_DATA ?= server/data/switchboard.db
 # Repeater mode: a stable-IP relay (REPEATER_ADDR is the worker-facing leg) that
-# forwards client traffic to one worker that dials out. REPEATER_CA is the PEM
+# forwards client traffic by TAG to workers that dial out. REPEATER_CA is the PEM
 # whose leaf cert the dialing worker pins (the repeater's own cert by default).
 REPEATER_ADDR ?= 127.0.0.1:8788
 REPEATER_TOKEN ?= dev-repeater-token
 REPEATER_CA ?= server/data/switchboard-cert.pem
 REPEATER_DATA ?= server/data/switchboard-worker.db
+REPEATER_TAG ?= worker-a
 
 # `make set-version x.y.z` — the version is a positional extra goal, so lift it
 # out of MAKECMDGOALS and give it a no-op rule of its own (otherwise make fails
@@ -127,10 +128,11 @@ run-repeater: ## Run a repeater relay (client-facing SERVER_ADDR + worker-facing
 	SWITCHBOARD_REPEATER_TOKEN=$(REPEATER_TOKEN) \
 	RUST_LOG=$${RUST_LOG:-info} \
 	$(CARGO) run -p switchboard-server
-run-repeater-client: ## Run a worker that dials out to a repeater (no client-facing bind; pins REPEATER_CA)
+run-repeater-client: ## Run a TAG-addressed worker that dials out (REPEATER_TAG; pins REPEATER_CA)
 	SWITCHBOARD_REPEATER_ADDR=$(REPEATER_ADDR) \
 	SWITCHBOARD_REPEATER_TOKEN=$(REPEATER_TOKEN) \
 	SWITCHBOARD_REPEATER_CA=$(REPEATER_CA) \
+	SWITCHBOARD_TAG=$(REPEATER_TAG) \
 	SWITCHBOARD_DB=$(REPEATER_DATA) \
 	RUST_LOG=$${RUST_LOG:-info} \
 	$(CARGO) run -p switchboard-server

@@ -19,8 +19,8 @@ pub struct AppState {
     pub nonce_cache: ReplayCache,
     /// Fired to ask the outbound repeater tunnel (worker-repeater-client role) to
     /// close gracefully — used just before a self-upgrade re-exec so the repeater
-    /// frees its single worker slot immediately, instead of the re-exec'd process
-    /// racing the half-open socket left behind. A no-op for the direct worker and
+    /// frees this worker's TAG immediately, instead of the re-exec'd process racing
+    /// the half-open socket left behind. A no-op for the direct worker and
     /// repeater roles, which have no such tunnel waiting on it.
     pub tunnel_shutdown: Arc<Notify>,
 }

@@ -24,9 +24,9 @@ Each task is an independent conversation with its own isolated context.
   HMAC-SHA256, so a captured transcript can't be replayed or relayed onto another
   channel.
 - **Repeater mode (no stable IP required).** A stable-IP **repeater** relays
-  traffic to one **worker that dials out**; both sides connect outbound. The
-  repeater forwards opaque bytes, so it's fully transparent — the client points at
-  a URL + token exactly as with a direct worker.
+  traffic to multiple **workers that dial out**; both sides connect outbound. Each
+  worker registers a TAG, and the client selects it with URL + token + TAG. The
+  repeater forwards opaque bytes over isolated per-worker tunnels.
 
 ## Repository layout
 | Path       | What |

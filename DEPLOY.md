@@ -58,21 +58,27 @@ allows inbound TCP on the port.
 
 ### Running behind a repeater
 
-For a host with no stable inbound IP, run a **repeater** on a stable-IP box and
-have the worker dial out to it. On the repeater:
+For hosts with no stable inbound IP, run a **repeater** on a stable-IP box and
+have each worker dial out with a unique TAG. On the repeater:
 
 ```bash
 make run-repeater        # client-facing SERVER_ADDR + worker-facing REPEATER_ADDR (both HTTPS)
 ```
 
-On the worker box (no client-facing bind; it pins the repeater's cert PEM):
+On each worker box (no client-facing bind; it pins the repeater's cert PEM), use a
+different TAG and database. Two local workers can be started like this:
 
 ```bash
-make run-repeater-client # dials SWITCHBOARD_REPEATER_ADDR, pins SWITCHBOARD_REPEATER_CA
+REPEATER_TAG=worker-a REPEATER_DATA=server/data/worker-a.db SWITCHBOARD_NAME=worker-a make run-repeater-client
+REPEATER_TAG=worker-b REPEATER_DATA=server/data/worker-b.db SWITCHBOARD_NAME=worker-b make run-repeater-client
 ```
 
-Point the client at the **repeater's** `SWITCHBOARD_ADDR` + `SWITCHBOARD_TOKEN` —
-it behaves identically to a direct worker.
+Point each client Service at the **repeater's** `SWITCHBOARD_ADDR` +
+`SWITCHBOARD_TOKEN` and enter the worker TAG. TAGs are 1–64 ASCII letters, digits,
+`_` or `-`, start with a letter or digit, and are case-sensitive. A Service's TAG
+cannot be edited after creation; add another Service to connect to a different
+worker. TAG selects a route but is **not** an authorization boundary: the existing
+client and repeater tokens remain shared across TAGs.
 
 Prefer the browser during development? `cd client && npm run dev` serves the same
 UI at http://localhost:5173. The browser build uses the webview's own
@@ -110,8 +116,8 @@ it dials out and needs no client-facing bind.
 ### Repeater environment variables
 
 Set `SWITCHBOARD_MODE=repeater` to run the relay. It binds a client-facing **and**
-a worker-facing HTTPS listener, forwards opaque bytes to the one paired worker,
-and runs no tasks itself.
+a worker-facing HTTPS listener, forwards opaque bytes to the worker selected by
+TAG, and runs no tasks itself. Multiple TAG-addressed workers can share it.
 
 | Var | Default | Meaning |
 |-----|---------|---------|
@@ -135,6 +141,7 @@ by this role — the repeater itself never uses it.
 | `SWITCHBOARD_REPEATER_ADDR` | — | Repeater address to dial |
 | `SWITCHBOARD_REPEATER_TOKEN` | — | Shared secret for the worker↔repeater tunnel |
 | `SWITCHBOARD_REPEATER_CA` | — | PEM whose leaf cert the worker pins on the tunnel |
+| `SWITCHBOARD_TAG` | — | Required unique route TAG announced in the worker HELLO |
 | `SWITCHBOARD_DB` / `SWITCHBOARD_NAME` / `SWITCHBOARD_LOG` | as above | Same semantics as the server table |
 
 ### Log file rotation (`SWITCHBOARD_LOG`)

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { listDir } from "../net/rest";
 import type { FsListing } from "../protocol";
+import type { ServiceRef } from "../store/types";
 import { Modal } from "./Modal";
 
 /**
@@ -15,7 +16,7 @@ export function FolderPicker({
   onPick,
   onClose,
 }: {
-  service: { url: string; token: string };
+  service: ServiceRef;
   initialPath?: string;
   onPick: (path: string) => void;
   onClose: () => void;

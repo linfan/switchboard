@@ -41,15 +41,14 @@ fn strip_verbatim(text: &str) -> Option<String> {
     // `\\?\C:\dir` is a local disk, where the prefix is pure noise.
     let plain = if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{share}")
-    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+    } else {
+        let rest = text.strip_prefix(r"\\?\")?;
         let mut chars = rest.chars();
         // Anything that isn't `<letter>:` is some other verbatim device.
         if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) || chars.next() != Some(':') {
             return None;
         }
         rest.to_owned()
-    } else {
-        return None;
     };
     if plain.len() > MAX_PATH {
         return None;

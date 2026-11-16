@@ -403,8 +403,8 @@ fn schedule_restart(state: SharedState) {
         // that response travels back *through* the tunnel, so this must happen
         // before we close it.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        // Gracefully unpair from the repeater (if we're a repeater-client) so its
-        // single worker slot is freed before the re-exec'd process re-dials —
+        // Gracefully unpair from the repeater (if we're a repeater-client) so our
+        // TAG is freed before the re-exec'd process re-dials —
         // otherwise the newcomer races the half-open socket we'd leave behind. A
         // no-op for the direct role (nothing waits on this).
         state.tunnel_shutdown.notify_waiters();

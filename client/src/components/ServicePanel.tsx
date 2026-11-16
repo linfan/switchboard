@@ -205,7 +205,10 @@ export function ServicePanel({ service }: { service: Service }) {
         />
         <div>
           <span className="panel__title">{service.name}</span>
-          <span className="service-panel__url">{service.url}</span>
+          <span className="service-panel__url">
+            {service.url}
+            {service.tag ? ` · TAG ${service.tag}` : ""}
+          </span>
         </div>
         <span className="panel__spacer" />
         <button
@@ -239,6 +242,10 @@ export function ServicePanel({ service }: { service: Service }) {
             <div className="service-panel__row">
               <dt>Endpoint</dt>
               <dd>{service.url}</dd>
+            </div>
+            <div className="service-panel__row">
+              <dt>TAG</dt>
+              <dd>{service.tag ?? "Not set"}</dd>
             </div>
             {rt?.info && (
               <div className="service-panel__row">

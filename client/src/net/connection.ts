@@ -12,6 +12,7 @@ import type { ClientMsg, ServerMsg } from "../protocol";
 import type { ConnStatus } from "../store/types";
 import { encodeInput } from "./frame";
 import { logToBackend } from "./log";
+import { withServiceTag } from "./url";
 import {
   cbFromPin,
   fromHex,
@@ -89,6 +90,8 @@ export interface ConnectionDeps {
   url: string;
   /** Shared secret. Never transmitted — used to answer the WS auth challenge. */
   token: string;
+  /** Repeater worker tag; absent for an untagged direct connection. */
+  tag?: string;
   /**
    * Pinned leaf-cert fingerprint (hex) of the server, mixed into the WS auth
    * proof as the channel binding. Absent for plain-HTTP services.
@@ -160,11 +163,11 @@ interface QueuedInput {
  * Convert an http(s) base URL into the service's ws(s) endpoint. No credential
  * is carried in the URL — the token is proven via the SWB-WS-v1 handshake.
  */
-export function toWsUrl(base: string): string {
+export function toWsUrl(base: string, tag?: string): string {
   const trimmed = base.replace(/\/+$/, "");
   const scheme = /^https/i.test(trimmed) ? "wss" : "ws";
   const rest = trimmed.replace(/^https?/i, "");
-  return `${scheme}${rest}/ws`;
+  return `${scheme}${rest}${withServiceTag("/ws", tag)}`;
 }
 
 export class ConnectionManager {
@@ -323,7 +326,7 @@ export class ConnectionManager {
       attempt: this.attempt,
     });
 
-    const url = toWsUrl(this.d.url);
+    const url = toWsUrl(this.d.url, this.d.tag);
     let ws: WebSocketLike;
     try {
       ws = this.wsFactory(url);

@@ -68,7 +68,7 @@ pub fn from_hex(s: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity(s.len() / 2);
-    for pair in s.chunks_exact(2) {
+    for pair in s.as_chunks::<2>().0 {
         let hi = (pair[0] as char).to_digit(16)?;
         let lo = (pair[1] as char).to_digit(16)?;
         out.push((hi << 4 | lo) as u8);

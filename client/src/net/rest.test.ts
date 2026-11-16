@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { probeService } from "./rest";
+import type { ServiceRef } from "../store/types";
+import { listDir, probeService } from "./rest";
+import { cbFromPin, fromHex, restSignHeaders, sha256 } from "./swbauth";
 
 const svc = { url: "http://host:8787", token: "tok" };
 
@@ -31,6 +33,24 @@ function fetchCalls(): [string, { headers: Record<string, string> }][] {
   return stub.mock.calls;
 }
 
+async function expectMacTarget(
+  init: { headers: Record<string, string> },
+  service: ServiceRef,
+  target: string,
+): Promise<void> {
+  const headers = init.headers;
+  const expected = await restSignHeaders({
+    token: service.token,
+    method: "GET",
+    pathAndQuery: target,
+    bodyHash: await sha256(new Uint8Array(0)),
+    cb: cbFromPin(service.certFingerprint),
+    ts: Number(headers["x-swb-ts"]),
+    nonce: fromHex(headers["x-swb-nonce"]),
+  });
+  expect(headers["x-swb-mac"]).toBe(expected["x-swb-mac"]);
+}
+
 describe("probeService", () => {
   it("returns the service info on success and signs without a bearer token", async () => {
     const info = { name: "Box", version: "1.0.0" };
@@ -50,6 +70,22 @@ describe("probeService", () => {
     await probeService({ ...svc, url: "http://host:8787/" });
     const [url] = fetchCalls()[0];
     expect(url).toBe("http://host:8787/api/info");
+  });
+
+  it("uses one tagged target for the browser URL and MAC", async () => {
+    const tagged = { ...svc, tag: "worker-A" };
+    mockFetch(
+      () =>
+        new Response(JSON.stringify({ name: "Box", version: "1.0.0" }), {
+          status: 200,
+        }),
+    );
+    await probeService(tagged);
+
+    expect(fetchCalls()).toHaveLength(1);
+    const [url, init] = fetchCalls()[0];
+    expect(url).toBe("http://host:8787/api/info?tag=worker-A");
+    await expectMacTarget(init, tagged, "/api/info?tag=worker-A");
   });
 
   it("reports a wrong token distinctly on 401", async () => {
@@ -97,5 +133,27 @@ describe("probeService", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("apiRequest", () => {
+  it("signs the exact tagged target used by ordinary REST calls", async () => {
+    const tagged = { ...svc, tag: "worker-A" };
+    mockFetch(() => new Response("{}", { status: 200 }));
+    await listDir(tagged, "/tmp");
+
+    const [url, init] = fetchCalls()[0];
+    const target = "/api/fs?path=%2Ftmp&tag=worker-A";
+    expect(url).toBe(`http://host:8787${target}`);
+    await expectMacTarget(init, tagged, target);
+  });
+
+  it("preserves untagged direct REST targets", async () => {
+    mockFetch(() => new Response("{}", { status: 200 }));
+    await listDir(svc);
+
+    const [url, init] = fetchCalls()[0];
+    expect(url).toBe("http://host:8787/api/fs");
+    await expectMacTarget(init, svc, "/api/fs");
   });
 });

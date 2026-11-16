@@ -13,15 +13,10 @@ import type {
   GitWorktree,
   ServiceInfo,
 } from "../protocol";
+import type { ServiceRef } from "../store/types";
 import { invoke, isTauri } from "./tauri";
 import { cbFromPin, restSignHeaders, sha256 } from "./swbauth";
-
-interface ServiceRef {
-  url: string;
-  token: string;
-  /** Pinned leaf-cert fingerprint (hex); absent for plain-HTTP services. */
-  certFingerprint?: string;
-}
+import { withServiceTag } from "./url";
 
 /**
  * Default time `probeService` waits for the server before giving up; the
@@ -127,10 +122,11 @@ async function apiRequest<T>(
   body?: unknown,
 ): Promise<T> {
   const base = service.url.replace(/\/+$/, "");
-  const url = `${base}${path}`;
+  const target = withServiceTag(path, service.tag);
+  const url = `${base}${target}`;
   const payload = body === undefined ? null : JSON.stringify(body);
   const bodyBytes = payload === null ? null : new TextEncoder().encode(payload);
-  const headers = await signHeaders(service, method, path, bodyBytes);
+  const headers = await signHeaders(service, method, target, bodyBytes);
   if (isTauri) {
     const res = await bridge(
       method,
@@ -200,10 +196,17 @@ export async function probeService(
 
   if (isTauri) {
     // 1. Capture the leaf-cert fingerprint via unauthenticated `/health`.
+    const healthTarget = withServiceTag("/health", service.tag);
     let health: BridgeResponse;
     try {
       health = await withTimeout(
-        bridge("GET", `${base}/health`, {}, null, service.certFingerprint),
+        bridge(
+          "GET",
+          `${base}${healthTarget}`,
+          {},
+          null,
+          service.certFingerprint,
+        ),
         timeoutMs,
       );
     } catch (e) {
@@ -215,11 +218,12 @@ export async function probeService(
     const fp = health.cert_fp ?? undefined; // absent on plain HTTP
     const probed: ServiceRef = { ...service, certFingerprint: fp };
     // 2. Signed `/api/info`, channel-bound to the just-captured fingerprint.
+    const infoTarget = withServiceTag("/api/info", service.tag);
     let res: BridgeResponse;
     try {
-      const headers = await signHeaders(probed, "GET", "/api/info", null);
+      const headers = await signHeaders(probed, "GET", infoTarget, null);
       res = await withTimeout(
-        bridge("GET", `${base}/api/info`, headers, null, fp),
+        bridge("GET", `${base}${infoTarget}`, headers, null, fp),
         timeoutMs,
       );
     } catch (e) {
@@ -236,8 +240,9 @@ export async function probeService(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
   try {
-    const headers = await signHeaders(service, "GET", "/api/info", null);
-    res = await fetch(`${base}/api/info`, {
+    const infoTarget = withServiceTag("/api/info", service.tag);
+    const headers = await signHeaders(service, "GET", infoTarget, null);
+    res = await fetch(`${base}${infoTarget}`, {
       headers,
       signal: controller.signal,
     });

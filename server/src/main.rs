@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(host::shim::run());
     }
 
-    let config = Config::from_env();
+    let config = Config::from_env()?;
 
     // Route logs to a size-based rolling file when `SWITCHBOARD_LOG` is set;
     // otherwise keep the stdout subscriber, colorized only where the escapes
@@ -145,7 +145,7 @@ async fn run_pty_host() -> anyhow::Result<()> {
 /// The worker that dials out: run PTYs locally, but serve every client through a
 /// reverse tunnel to the repeater instead of binding a client-facing port.
 async fn run_worker_repeater_client(config: Config) -> anyhow::Result<()> {
-    tracing::info!(repeater = ?config.repeater_addr, "worker-repeater-client");
+    tracing::info!(repeater = ?config.repeater_addr, tag = ?config.tag, "worker-repeater-client");
 
     let store = Store::connect(&config.db_path).await?;
     let tasks = TaskManager::new(store.clone(), &config.db_path);

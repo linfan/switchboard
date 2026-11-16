@@ -1,5 +1,8 @@
 //! Runtime configuration, sourced from environment variables.
 
+use anyhow::{anyhow, Result};
+use switchboard_shared::tunnel::Tag;
+
 use crate::log_file::LogFileConfig;
 
 /// Explicit deployment mode selector (`SWITCHBOARD_MODE`). A `Repeater` forwards
@@ -17,8 +20,8 @@ pub enum Mode {
 pub enum Role {
     /// Today's default: bind `SWITCHBOARD_ADDR`, serve the API + WS, run PTYs.
     WorkerDirect,
-    /// Bind a client-facing and a worker-facing address; forward opaquely to the
-    /// one paired worker. Runs no tasks itself.
+    /// Bind client-facing and worker-facing addresses; forward opaquely to the
+    /// worker selected by TAG. Runs no tasks itself.
     Repeater,
     /// Run PTYs locally but, instead of binding, dial the repeater and serve all
     /// client traffic through the reverse tunnel.
@@ -57,6 +60,8 @@ pub struct Config {
     /// Path to a PEM whose leaf cert the worker pins for the repeater tunnel
     /// (`SWITCHBOARD_REPEATER_CA`). Worker-repeater-client side only.
     pub repeater_ca: Option<String>,
+    /// Route tag announced by a worker-repeater-client (`SWITCHBOARD_TAG`).
+    pub tag: Option<Tag>,
     /// Size-based rolling log file (`SWITCHBOARD_LOG`). `None` logs to stdout.
     pub log_file: Option<LogFileConfig>,
 }
@@ -75,13 +80,17 @@ pub struct TlsConfig {
 }
 
 impl Config {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self> {
         // Read the role-selecting vars raw (presence matters) before defaulting.
         let addr_env = env_opt("SWITCHBOARD_ADDR");
         let token_env = env_opt("SWITCHBOARD_TOKEN");
         let repeater_addr = env_opt("SWITCHBOARD_REPEATER_ADDR");
         let repeater_token = env_opt("SWITCHBOARD_REPEATER_TOKEN");
         let repeater_ca = env_opt("SWITCHBOARD_REPEATER_CA");
+        let tag = env_opt("SWITCHBOARD_TAG")
+            .map(|value| value.parse())
+            .transpose()
+            .map_err(|e| anyhow!("invalid SWITCHBOARD_TAG: {e}"))?;
 
         let mode = match env("SWITCHBOARD_MODE", "worker")
             .to_ascii_lowercase()
@@ -104,6 +113,9 @@ impl Config {
             }
             Mode::Worker => Role::WorkerDirect,
         };
+        if role == Role::WorkerRepeaterClient && tag.is_none() {
+            return Err(anyhow!("worker-repeater-client requires SWITCHBOARD_TAG"));
+        }
 
         let addr = addr_env.unwrap_or_else(|| "127.0.0.1:8787".to_string());
         // The worker-repeater-client authenticates only the tunnel, so it carries
@@ -152,7 +164,7 @@ impl Config {
         } else {
             None
         };
-        Self {
+        Ok(Self {
             role,
             addr,
             token,
@@ -163,8 +175,9 @@ impl Config {
             repeater_addr,
             repeater_token,
             repeater_ca,
+            tag,
             log_file,
-        }
+        })
     }
 }
 

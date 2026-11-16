@@ -4,6 +4,7 @@ import { probeService } from "../net/rest";
 import {
   buildServiceUrl,
   DEFAULT_PORT,
+  isValidServiceTag,
   parseServiceUrl,
   type ServiceAddr,
 } from "../net/url";
@@ -39,16 +40,23 @@ export function AddServiceDialog({
   const [host, setHost] = useState(initial.host);
   const [port, setPort] = useState(initial.port);
   const [token, setToken] = useState(service?.token ?? "");
+  const [tag, setTag] = useState(service?.tag ?? "");
   const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState<string | undefined>();
 
   const portOk = port.trim() === "" || /^\d+$/.test(port.trim());
-  const valid = name.trim() !== "" && host.trim() !== "" && portOk;
+  const tagOk = tag === "" || isValidServiceTag(tag);
+  const valid = name.trim() !== "" && host.trim() !== "" && portOk && tagOk;
 
   const submit = async () => {
     if (!valid || verifying) return;
     const url = buildServiceUrl({ protocol, host, port });
-    const svc = { name: name.trim(), url, token };
+    const svc = {
+      name: name.trim(),
+      url,
+      token,
+      tag: tag === "" ? undefined : tag,
+    };
     setVerifying(true);
     setError(undefined);
     let certFingerprint: string | undefined;
@@ -152,6 +160,23 @@ export function AddServiceDialog({
           onChange={(e) => setToken(e.target.value)}
         />
       </label>
+      <label className="field">
+        <span>TAG</span>
+        <input
+          value={tag}
+          placeholder="worker-a"
+          readOnly={editing}
+          aria-label="TAG"
+          onChange={(e) => setTag(e.target.value)}
+        />
+      </label>
+      <p className={`hint ${tagOk ? "hint--muted" : "hint--error"}`}>
+        {editing
+          ? "TAG is immutable. To connect to another TAG, create a new service."
+          : tagOk
+            ? "1–64 letters, digits, _ or -, starting with a letter or digit. Required for repeaters; optional for direct workers. Cannot be changed after creation."
+            : "Invalid TAG. Use 1–64 letters, digits, _ or -, starting with a letter or digit."}
+      </p>
       {error && <p className="hint hint--error">{error}</p>}
     </Modal>
   );

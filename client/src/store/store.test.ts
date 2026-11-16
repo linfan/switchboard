@@ -233,6 +233,82 @@ describe("applyMsg", () => {
   });
 });
 
+describe("service identity", () => {
+  it("keeps TAG immutable even when a runtime patch tries to replace it", () => {
+    const st = useStore.getState();
+    st.addService({
+      id: "s1",
+      name: "S1",
+      url: "http://a",
+      token: "old",
+      tag: "worker-A",
+    });
+
+    st.updateService("s1", { name: "Renamed", token: "new" });
+    (
+      useStore.getState().updateService as (
+        id: string,
+        patch: Record<string, unknown>,
+      ) => void
+    )("s1", { tag: "worker-B" });
+
+    expect(useStore.getState().services[0]).toEqual({
+      id: "s1",
+      name: "Renamed",
+      url: "http://a",
+      token: "new",
+      tag: "worker-A",
+    });
+  });
+
+  it("does not add a TAG to an untagged direct service through a bypass patch", () => {
+    useStore.getState().addService({
+      id: "direct",
+      name: "Direct",
+      url: "http://a",
+      token: "t",
+    });
+    (
+      useStore.getState().updateService as (
+        id: string,
+        patch: Record<string, unknown>,
+      ) => void
+    )("direct", { tag: "worker-A" });
+
+    expect(useStore.getState().services[0].tag).toBeUndefined();
+  });
+
+  it("uses distinct service ids to isolate identical task ids across TAGs", () => {
+    const st = useStore.getState();
+    st.addService({
+      id: "a",
+      name: "A",
+      url: "http://same",
+      token: "t",
+      tag: "worker-A",
+    });
+    st.addService({
+      id: "b",
+      name: "B",
+      url: "http://same",
+      token: "t",
+      tag: "worker-B",
+    });
+    seedTask("a", "shared");
+    seedTask("b", "shared");
+    st.setCursor("a", "shared", 9);
+
+    expect(
+      useStore.getState().conversations[convKey("a", "shared")],
+    ).toBeTruthy();
+    expect(
+      useStore.getState().conversations[convKey("b", "shared")],
+    ).toBeTruthy();
+    expect(useStore.getState().cursorsFor("a")).toEqual({ shared: 9 });
+    expect(useStore.getState().cursorsFor("b")).toEqual({});
+  });
+});
+
 describe("removeService", () => {
   it("removes the service and all associated state", () => {
     const st = useStore.getState();

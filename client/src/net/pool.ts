@@ -18,6 +18,7 @@ interface ServiceConfig {
   id: string;
   url: string;
   token: string;
+  tag?: string;
   certFingerprint?: string;
 }
 
@@ -30,6 +31,7 @@ function configKey(svc: ServiceConfig, s: Settings): string {
   return [
     svc.url,
     svc.token,
+    svc.tag ?? "",
     svc.certFingerprint ?? "",
     s.reconnectBaseMs,
     s.reconnectMaxMs,
@@ -117,6 +119,7 @@ export class ConnectionPool {
           clientId: id,
           url: svc.url,
           token: svc.token,
+          tag: svc.tag,
           certFingerprint: svc.certFingerprint,
           reconnect: {
             baseDelayMs: settings.reconnectBaseMs,

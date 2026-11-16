@@ -33,6 +33,7 @@ import {
   tabKey,
   WORKING_COMMIT,
   type DiffLayout,
+  type ServiceRef,
   type Transfer,
   type Workspace,
 } from "../store/types";
@@ -46,8 +47,6 @@ import {
   visibleFilePaths,
   type Selection,
 } from "./treeSelection";
-
-type ServiceRef = { url: string; token: string };
 
 /**
  * Resolve `path` against the tree rooted at `root`, returning the resolved

@@ -27,7 +27,12 @@ import { formatBytes, mediaForPath, type MediaKind } from "../net/media";
 import { gitFileDiff, readFile, statPath, writeFile } from "../net/rest";
 import { openPreview, type Preview } from "../net/transfer";
 import { useStore } from "../store/store";
-import { tabKey, type DiffLayout, type OpenFile } from "../store/types";
+import {
+  tabKey,
+  type DiffLayout,
+  type OpenFile,
+  type ServiceRef,
+} from "../store/types";
 import { ContextMenu } from "./Menu";
 
 const PREVIEW_CAP_KEY = {
@@ -165,7 +170,7 @@ export function EditorArea({
   onRevealInTree,
 }: {
   workspaceId: string;
-  service: { url: string; token: string };
+  service: ServiceRef;
   cwd: string;
   tabs: OpenFile[];
   activeKey?: string;

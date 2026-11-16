@@ -45,6 +45,7 @@ async fn build_state() -> Arc<AppState> {
             repeater_addr: None,
             repeater_token: None,
             repeater_ca: None,
+            tag: None,
             log_file: None,
         },
         store,

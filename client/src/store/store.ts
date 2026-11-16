@@ -115,7 +115,10 @@ export interface AppState {
 
   // --- service management -------------------------------------------------
   addService: (svc: Omit<Service, "id"> & { id?: string }) => string;
-  updateService: (id: string, patch: Partial<Omit<Service, "id">>) => void;
+  updateService: (
+    id: string,
+    patch: Partial<Omit<Service, "id" | "tag">>,
+  ) => void;
   removeService: (id: string) => void;
   /** Reorder the service list: move `fromId` into `toId`'s slot. */
   moveService: (fromId: string, toId: string) => void;
@@ -292,7 +295,7 @@ export const useStore = create<AppState>()(
       updateService: (id, patch) =>
         set((s) => ({
           services: s.services.map((sv) =>
-            sv.id === id ? { ...sv, ...patch } : sv,
+            sv.id === id ? { ...sv, ...patch, tag: sv.tag } : sv,
           ),
         })),
 

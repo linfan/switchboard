@@ -121,32 +121,37 @@ For a worker host **without** a stable, client-reachable IP, a **repeater** with
 stable IP sits in the middle. Both the worker and the client dial *out* to it:
 
 ```
- client ──REST/WS──▶ repeater :SWITCHBOARD_ADDR        repeater :SWITCHBOARD_REPEATER_ADDR ◀──wss── worker (dials out)
-                     (validates SWITCHBOARD_TOKEN)       (validates SWITCHBOARD_REPEATER_TOKEN)     │ runs TaskManager/PTYs
-                              └──────── one multiplexed reverse tunnel (single WS) ─────────────────┘   locally
+ client ?tag=A ──REST/WS──▶ repeater :SWITCHBOARD_ADDR     repeater :SWITCHBOARD_REPEATER_ADDR ◀──wss── worker A
+ client ?tag=B ──REST/WS──▶ (validates SWITCHBOARD_TOKEN)  (validates SWITCHBOARD_REPEATER_TOKEN) ◀──wss── worker B
+                                      TAG registry: A → tunnel A, B → tunnel B
 ```
 
 - **One binary, three roles**, selected by env: **worker-direct** (today's
   default — binds `SWITCHBOARD_ADDR`, runs PTYs), **repeater**
   (`SWITCHBOARD_MODE=repeater` — binds a client-facing and a worker-facing HTTPS
   listener, runs nothing), and **worker-repeater-client** (a worker with no
-  `SWITCHBOARD_ADDR`/`SWITCHBOARD_TOKEN` but a `SWITCHBOARD_REPEATER_*` target —
-  dials out and serves all client traffic through the tunnel).
+  `SWITCHBOARD_ADDR`/`SWITCHBOARD_TOKEN` but a `SWITCHBOARD_REPEATER_*` target and
+  required `SWITCHBOARD_TAG` — dials out and serves client traffic through its tunnel).
 - **Transparent by construction.** The repeater forwards **opaque application
-  bytes** over a single WebSocket, multiplexing every client interaction by a
-  `u64` stream id (`shared/src/tunnel.rs`). It never parses API semantics, so any
-  new REST route or `ClientMsg`/`ServerMsg` variant works with no repeater change.
-  `/health` is answered locally (reports paired/unpaired) so liveness works with no
-  worker.
+  bytes** over each worker's WebSocket, multiplexing interactions by a `u64` stream
+  id (`shared/src/tunnel.rs`). Stream ids and route tables are scoped to one Tunnel,
+  so different workers may safely reuse the same ids. `/health?tag=...` reports only
+  that TAG's paired state.
+- **Strict TAG routing.** Protocol 2 requires an authenticated worker's first frame
+  to be a HELLO containing its valid TAG. Every client REST/WS/forward/health request
+  must contain exactly one valid `tag` query parameter; there is no legacy/default
+  fallback. REST authentication covers the original tagged path+query. The repeater
+  removes only that routing parameter before forwarding, preserving the remaining
+  raw query. A client Service's TAG is immutable; another TAG requires another Service.
 - **Auth terminated per hop.** The repeater validates the client's `SWB-v1` proof
   at ingress (its own cert is the `cb`) and authenticates the worker tunnel with
   `SWITCHBOARD_REPEATER_TOKEN` — **no client credential ever crosses the tunnel**.
-- **Single worker, self-healing.** Only one worker pairs at a time; a second is
-  rejected until the first's tunnel dies (TCP close or missed heartbeat). Bodies
-  are chunked with app-level `PING`/`PONG` heartbeats + idle timeout; a client
-  disconnect sends `RST` to cancel in-flight worker work. If no worker is paired
-  when a request arrives, the repeater waits a short grace window, then fails
-  (REST `502` / WS close) and the client's existing backoff retries.
+  TAG is not an authorization boundary: these tokens remain shared across TAGs.
+- **Per-TAG replacement and failure isolation.** A new worker replaces only the old
+  tunnel with the same TAG. Delayed cleanup checks the exact Tunnel instance, and
+  disconnects, `RST`, backpressure and heartbeat teardown never clear another TAG.
+  If the selected TAG has no worker, the repeater waits a short grace window, then
+  fails (REST `502` / WS close) and the client's existing backoff retries.
 
 ## Agent integration
 

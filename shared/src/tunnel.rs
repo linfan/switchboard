@@ -1,11 +1,12 @@
 //! Reverse-tunnel multiplexing codec for **repeater mode**.
 //!
-//! A repeater with no local task execution forwards every client interaction to a
-//! single paired worker over one worker↔repeater WebSocket. Many client
-//! interactions (REST request/response exchanges and full WS sessions) are
-//! multiplexed over that one connection, each tagged by a `u64` **stream id**. The
-//! repeater never interprets application semantics — it shuttles opaque payloads —
-//! so new REST routes and new control messages tunnel transparently.
+//! A repeater with no local task execution forwards every client interaction to
+//! the worker selected by its route tag. Each worker has its own WebSocket and
+//! stream-id namespace. Many client interactions (REST request/response exchanges
+//! and full WS sessions) are multiplexed over that connection, each identified by
+//! a `u64` **stream id**. The repeater never interprets application semantics — it
+//! shuttles opaque payloads — so new REST routes and control messages tunnel
+//! transparently.
 //!
 //! Wire layout (big-endian), one [`TunnelFrame`] per WebSocket **binary** message:
 //!
@@ -82,6 +83,66 @@ pub struct WsOpen {
     pub uri: String,
 }
 
+/// A validated worker route tag.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct Tag(String);
+
+impl Tag {
+    pub fn parse(value: &str) -> Result<Self, InvalidTag> {
+        let valid = (1..=64).contains(&value.len())
+            && value
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        valid.then(|| Self(value.to_string())).ok_or(InvalidTag)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for Tag {
+    type Err = InvalidTag;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl std::fmt::Display for Tag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Tag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidTag;
+
+impl std::fmt::Display for InvalidTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "tag must be 1-64 ASCII letters, digits, '_' or '-', starting with a letter or digit",
+        )
+    }
+}
+
+impl std::error::Error for InvalidTag {}
+
 /// A worker's capabilities (`HELLO` payload). Feature names, not a version
 /// comparison, decide what the repeater may route: `version` is informational.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,12 +151,14 @@ pub struct WorkerHello {
     pub proto: u32,
     /// Worker crate version, for diagnostics.
     pub version: String,
+    /// Route tag clients use to select this worker.
+    pub tag: Tag,
     /// Endpoints the worker serves, e.g. `["ws", "forward"]`.
     pub features: Vec<String>,
 }
 
 /// The protocol revision this build speaks.
-pub const PROTO: u32 = 1;
+pub const PROTO: u32 = 2;
 
 /// Features this build advertises. The repeater routes `/ws` and `/forward`
 /// only when the paired worker lists them.
@@ -253,6 +316,29 @@ mod tests {
     }
 
     #[test]
+    fn validates_route_tags() {
+        for valid in ["a", "A", "worker-1", "worker_a", &"a".repeat(64)] {
+            assert_eq!(Tag::parse(valid).unwrap().as_str(), valid);
+        }
+        for invalid in [
+            "",
+            " worker-a",
+            "worker-a ",
+            "_worker",
+            "-worker",
+            "worker/a",
+            "worker.a",
+            "worker a",
+            "wörker",
+            &"a".repeat(65),
+        ] {
+            assert!(Tag::parse(invalid).is_err(), "accepted {invalid:?}");
+        }
+        assert_ne!(Tag::parse("A").unwrap(), Tag::parse("a").unwrap());
+        assert!(serde_json::from_str::<Tag>(r#""bad tag""#).is_err());
+    }
+
+    #[test]
     fn heads_json_round_trip() {
         let head = ReqHead {
             method: "POST".into(),
@@ -284,6 +370,7 @@ mod tests {
         let hello = WorkerHello {
             proto: PROTO,
             version: "0.6.0".into(),
+            tag: Tag::parse("worker-a").unwrap(),
             features: FEATURES.iter().map(|f| (*f).into()).collect(),
         };
         assert_eq!(
