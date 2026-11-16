@@ -388,6 +388,15 @@ pub async fn download_file(
             }
 
             let mut progress = ProgressEmitter::new(on_progress, resp.content_length());
+            // A folder download recreates the tree locally, so the destination's
+            // parents may not exist yet.
+            if let Some(parent) = std::path::Path::new(&dest).parent() {
+                if !parent.as_os_str().is_empty() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+            }
             let mut file = tokio::fs::File::create(&dest)
                 .await
                 .map_err(|e| e.to_string())?;

@@ -103,8 +103,11 @@ test("a folder row copies its own relative path", async ({ page }) => {
   await page
     .locator(".weditor__row--dir", { hasText: "net" })
     .click({ button: "right" });
-  await expect(page.locator(".menu__item--sub")).toHaveText("Copy folder path");
-  await page.locator(".menu__item--sub").hover();
+  const copy = page.locator(".menu__item--sub", {
+    hasText: "Copy folder path",
+  });
+  await expect(copy).toHaveText("Copy folder path");
+  await copy.hover();
   await page.locator(".menu--sub .menu__item", { hasText: "Relative" }).click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
     "src/net",
@@ -117,8 +120,11 @@ test("the workspace root itself copies '.' as its relative path", async ({
   await page
     .locator(".weditor__tree")
     .click({ button: "right", position: { x: 20, y: 260 } });
-  await expect(page.locator(".menu__item--sub")).toHaveText("Copy folder path");
-  await page.locator(".menu__item--sub").hover();
+  const copy = page.locator(".menu__item--sub", {
+    hasText: "Copy folder path",
+  });
+  await expect(copy).toHaveText("Copy folder path");
+  await copy.hover();
   await page.locator(".menu--sub .menu__item", { hasText: "Relative" }).click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(".");
 });

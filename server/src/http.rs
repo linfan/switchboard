@@ -1,7 +1,7 @@
 //! REST API: health, service info, and task CRUD.
 
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, StatusCode},
     middleware,
@@ -11,6 +11,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::io::AsyncReadExt;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use switchboard_shared::{
@@ -18,7 +19,14 @@ use switchboard_shared::{
     GitWorktree, ServiceInfo, TaskInfo,
 };
 
-use crate::{auth, editor, error::AppResult, fs, state::SharedState, task::CreateParams, ws};
+use crate::{
+    auth, editor,
+    error::{AppError, AppResult},
+    fs,
+    state::SharedState,
+    task::CreateParams,
+    ws,
+};
 
 /// Build the full application router. `require_auth` gates the per-request
 /// SWB-v1 signature check: `true` for a directly-connected worker or a
@@ -40,6 +48,7 @@ pub fn router(state: SharedState, require_auth: bool) -> Router {
             post(upload_file).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
         .route("/fs/download", get(download_file))
+        .route("/fs/archive", get(download_archive))
         .route("/file", get(read_file).put(write_file))
         .route("/git/info", get(git_info))
         .route("/git/branches", get(git_branches))
@@ -167,19 +176,78 @@ async fn upload_file(Query(q): Query<UploadQuery>, body: Bytes) -> AppResult<Sta
 /// Stream a file's raw bytes for download (client saves it locally).
 async fn download_file(Query(q): Query<PathQuery>) -> AppResult<Response> {
     let (name, bytes) = fs::read_bytes(&q.path)?;
-    // A quoted filename with quotes/backslashes escaped keeps the header valid.
-    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
     Ok((
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{escaped}\""),
-            ),
+            (header::CONTENT_DISPOSITION, content_disposition(&name)),
         ],
         bytes,
     )
         .into_response())
+}
+
+/// Zip a folder and stream the archive back. The archive is staged in a temp
+/// file (off the async runtime's threads) and that file is deleted once the
+/// response body is dropped, so a cancelled or interrupted download leaves
+/// nothing behind.
+async fn download_archive(Query(q): Query<PathQuery>) -> AppResult<Response> {
+    let path = q.path;
+    let (name, temp) = tokio::task::spawn_blocking(move || fs::zip_dir(&path))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("archive task failed: {e}")))??;
+    let file = tokio::fs::File::open(&temp)
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("cannot open temp archive: {e}")))?;
+    let size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+
+    // The tuple is dropped file first and temp path second, so the handle closes
+    // before the unlink — Windows refuses to remove an open file.
+    let body = futures::stream::unfold(
+        (file, temp, vec![0u8; 64 * 1024]),
+        |(mut file, temp, mut buf)| async move {
+            match file.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    let chunk = Bytes::copy_from_slice(&buf[..n]);
+                    Some((Ok::<_, std::io::Error>(chunk), (file, temp, buf)))
+                }
+                Err(e) => Some((Err(e), (file, temp, buf))),
+            }
+        },
+    );
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_LENGTH, size.to_string()),
+            (header::CONTENT_DISPOSITION, content_disposition(&name)),
+        ],
+        Body::from_stream(body),
+    )
+        .into_response())
+}
+
+/// `Content-Disposition` for a download: an ASCII fallback plus the RFC 5987
+/// UTF-8 form, so non-ASCII folder names survive in browsers and native clients.
+fn content_disposition(name: &str) -> String {
+    let ascii: String = name
+        .chars()
+        .map(|c| match c {
+            c if c.is_ascii_alphanumeric() => c,
+            ' ' | '.' | '-' | '_' | '(' | ')' => c,
+            _ => '_',
+        })
+        .collect();
+    let encoded: String = name
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
 }
 
 #[derive(Deserialize)]

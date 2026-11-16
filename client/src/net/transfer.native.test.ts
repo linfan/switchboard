@@ -4,6 +4,7 @@ import type { ServiceRef } from "../store/types";
 import { cbFromPin, fromHex, restSignHeaders, sha256 } from "./swbauth";
 import {
   downloadFiles,
+  downloadFolderFiles,
   openPreview,
   uploadBinaryUpgrade,
   uploadFiles,
@@ -28,6 +29,21 @@ vi.mock("./tauri", () => ({
       case "download_file":
       case "upload_file":
         return true;
+      case "http_request": {
+        // Only the folder walk uses the JSON bridge; answer its listings.
+        const path = new URL(String(args?.url)).searchParams.get("path");
+        const entries =
+          path === "/host/proj"
+            ? [
+                { name: "a.txt", path: "/host/proj/a.txt", is_dir: false },
+                { name: "sub", path: "/host/proj/sub", is_dir: true },
+              ]
+            : [{ name: "b.txt", path: "/host/proj/sub/b.txt", is_dir: false }];
+        return {
+          status: 200,
+          body: JSON.stringify({ path, parent: null, entries }),
+        };
+      }
       default:
         return undefined;
     }
@@ -157,5 +173,21 @@ describe("native tagged transfers", () => {
       target,
       fromHex(bridge.fileHash),
     );
+  });
+
+  it("writes a folder tree to nested local destinations", async () => {
+    bridge.paths = ["/local"];
+
+    await expect(
+      downloadFolderFiles(svc, "/host/proj", 10),
+    ).resolves.toMatchObject({
+      done: ["a.txt", "sub/b.txt"],
+      failed: [],
+    });
+
+    const dests = bridge.calls
+      .filter((call) => call.cmd === "download_file")
+      .map((call) => call.args!.dest);
+    expect(dests).toEqual(["/local/proj/a.txt", "/local/proj/sub/b.txt"]);
   });
 });

@@ -19,6 +19,7 @@
 //! unmounts mid-transfer doesn't strand it.
 
 import type { ServiceRef } from "../store/types";
+import { listDir } from "./rest";
 import { cbFromPin, fromHex, hex, restSignHeaders, sha256 } from "./swbauth";
 import { assetUrl, invoke, isTauri } from "./tauri";
 import { withServiceTag } from "./url";
@@ -260,11 +261,27 @@ async function downloadOne(
     `/api/fs/download?path=${encodeURIComponent(file.path)}`,
     service.tag,
   );
+  return downloadGet(service, reqPath, file.name, file.dest, id, hooks);
+}
+
+/**
+ * Run one signed GET transfer. Tauri streams the bytes straight to `dest` on the
+ * native side; the browser gathers a blob and either hands it to `writeBlob`
+ * (folder downloads) or saves it through a download anchor.
+ */
+async function downloadGet(
+  service: ServiceRef,
+  reqPath: string,
+  name: string,
+  dest: string,
+  id: number,
+  hooks?: TransferHooks,
+  writeBlob?: (blob: Blob) => Promise<void>,
+): Promise<boolean> {
   const url = `${baseUrl(service)}${reqPath}`;
   // A download has no request body; the MAC covers the empty-body hash.
   const emptyHash = await sha256(new Uint8Array(0));
   const headers = await signHeaders(service, "GET", reqPath, emptyHash);
-  const { name, dest } = file;
 
   if (isTauri) {
     // The size is only known once the response headers land, so the row starts
@@ -286,7 +303,7 @@ async function downloadOne(
   }
 
   // Browser: stream the bytes (counting them for progress) and hand the
-  // assembled blob to a download anchor.
+  // assembled blob to the caller.
   const abort = new AbortController();
   const blob = await tracked(
     id,
@@ -317,6 +334,11 @@ async function downloadOne(
   });
   if (!blob) return false;
 
+  if (writeBlob) {
+    await writeBlob(blob);
+    return true;
+  }
+
   const href = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = href;
@@ -326,6 +348,244 @@ async function downloadOne(
   a.remove();
   URL.revokeObjectURL(href);
   return true;
+}
+
+/** A folder's own name, safe to reuse as a local folder or archive name. */
+function folderName(dir: string): string {
+  const name = basename(dir);
+  return name && name !== "." && name !== ".." ? name : "folder";
+}
+
+/**
+ * Download directory `dir` as a zip, zipped on the host. One save dialog, one
+ * transfer row; the host deletes its temporary archive once the body is done.
+ */
+export async function downloadArchive(
+  service: ServiceRef,
+  dir: string,
+  hooks?: TransferHooks,
+): Promise<BatchOutcome> {
+  const name = `${folderName(dir)}.zip`;
+  const dest = await chooseArchiveDest(name);
+  if (dest === null) {
+    const outcome = emptyOutcome();
+    outcome.cancelled = 1;
+    return outcome;
+  }
+  const reqPath = withServiceTag(
+    `/api/fs/archive?path=${encodeURIComponent(dir)}`,
+    service.tag,
+  );
+  return runBatch([{ name, dest }], hooks, (item, id) =>
+    downloadGet(service, reqPath, item.name, item.dest, id, hooks),
+  );
+}
+
+/** Where the archive goes, asking once; `null` when the user backed out. */
+async function chooseArchiveDest(name: string): Promise<string | null> {
+  if (!isTauri) return name;
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  return await save({ defaultPath: name });
+}
+
+/** One file found by a folder walk: its host path and structure-relative path. */
+interface FolderFile {
+  path: string;
+  rel: string;
+}
+
+/**
+ * Download every file under directory `dir`, recreating the folder and its
+ * subdirectories at the user's chosen local location. Files are capped at `max`
+ * like any other batch; a larger tree has to go through {@link downloadArchive}.
+ */
+export async function downloadFolderFiles(
+  service: ServiceRef,
+  dir: string,
+  max: number,
+  hooks?: TransferHooks,
+): Promise<BatchOutcome> {
+  const top = folderName(dir);
+
+  if (isTauri) {
+    const files = await listTree(service, dir, max);
+    if (files.length === 0) return emptyOutcome();
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const parent = await open({
+      title: `Choose a folder for "${top}"`,
+      directory: true,
+      multiple: false,
+    });
+    if (typeof parent !== "string") {
+      const outcome = emptyOutcome();
+      outcome.cancelled = files.length;
+      return outcome;
+    }
+    const sep = parent.includes("\\") ? "\\" : "/";
+    const root = joinLocalPath(parent, top);
+    return runBatch(
+      files.map((file) => ({
+        ...file,
+        name: file.rel,
+        dest: joinLocalPath(root, file.rel.replace(/\//g, sep)),
+      })),
+      hooks,
+      (item, id) =>
+        downloadOne(
+          service,
+          { path: item.path, name: item.name, dest: item.dest },
+          id,
+          hooks,
+        ),
+    );
+  }
+
+  // Browser: the directory picker must run while the click's user activation is
+  // still alive, so ask for the destination before the tree walk.
+  const root = await pickFolderRoot(top);
+  if (!root) {
+    const outcome = emptyOutcome();
+    outcome.cancelled = 1;
+    return outcome;
+  }
+  const files = await listTree(service, dir, max);
+  if (files.length === 0) return emptyOutcome();
+
+  // Structure below the picked folder, created lazily and remembered so a
+  // directory is asked for once per download.
+  const dirs = new Map<string, Promise<BrowserDirHandle>>([
+    ["", Promise.resolve(root)],
+  ]);
+  const dirFor = (rel: string): Promise<BrowserDirHandle> => {
+    const cached = dirs.get(rel);
+    if (cached) return cached;
+    const cut = rel.lastIndexOf("/");
+    const parentRel = cut === -1 ? "" : rel.slice(0, cut);
+    const child = rel.slice(cut + 1);
+    const handle = dirFor(parentRel).then((d) =>
+      d.getDirectoryHandle(child, { create: true }),
+    );
+    dirs.set(rel, handle);
+    return handle;
+  };
+
+  return runBatch(
+    files.map((file) => ({ ...file, name: file.rel })),
+    hooks,
+    (item, id) => {
+      const cut = item.rel.lastIndexOf("/");
+      const dirRel = cut === -1 ? "" : item.rel.slice(0, cut);
+      const fileName = item.rel.slice(cut + 1);
+      const reqPath = withServiceTag(
+        `/api/fs/download?path=${encodeURIComponent(item.path)}`,
+        service.tag,
+      );
+      return downloadGet(
+        service,
+        reqPath,
+        item.name,
+        item.name,
+        id,
+        hooks,
+        async (blob) => {
+          const parent = await dirFor(dirRel);
+          const file = await parent.getFileHandle(fileName, { create: true });
+          const writable = await file.createWritable();
+          await writable.write(blob);
+          await writable.close();
+        },
+      );
+    },
+  );
+}
+
+/**
+ * Collect every file under `dir`, with paths relative to it (`/`-joined). The
+ * walk stops as soon as one file over `max` appears, so a huge tree fails fast
+ * instead of listing itself completely.
+ */
+async function listTree(
+  service: ServiceRef,
+  dir: string,
+  max: number,
+): Promise<FolderFile[]> {
+  const files: FolderFile[] = [];
+
+  async function walk(path: string, rel: string): Promise<void> {
+    const listing = await listDir(service, path);
+    for (const entry of listing.entries) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.is_dir) {
+        await walk(entry.path, childRel);
+        continue;
+      }
+      if (files.length >= max) {
+        throw new Error(
+          `Folder has more than ${max} files — use Download → As archive, ` +
+            `or raise Settings → Max files per download.`,
+        );
+      }
+      files.push({ path: entry.path, rel: childRel });
+    }
+  }
+
+  await walk(dir, "");
+  return files;
+}
+
+/** The slice of the File System Access API used for browser folder downloads. */
+interface BrowserDirHandle {
+  getDirectoryHandle(
+    name: string,
+    options?: { create?: boolean },
+  ): Promise<BrowserDirHandle>;
+  getFileHandle(
+    name: string,
+    options?: { create?: boolean },
+  ): Promise<BrowserFileHandle>;
+}
+
+interface BrowserFileHandle {
+  createWritable(): Promise<{
+    write(data: Blob): Promise<void>;
+    close(): Promise<void>;
+  }>;
+}
+
+type DirectoryPicker = (options?: {
+  mode?: "read" | "readwrite";
+}) => Promise<BrowserDirHandle>;
+
+/**
+ * Ask the browser for a destination directory and return it, creating `name`
+ * inside it. `null` when the user dismissed the picker. Not in `lib.dom` yet, so
+ * the API is typed locally; browsers without it can still use the archive path.
+ */
+async function pickFolderRoot(name: string): Promise<BrowserDirHandle | null> {
+  const picker = (
+    window as unknown as { showDirectoryPicker?: DirectoryPicker }
+  ).showDirectoryPicker;
+  if (!picker) {
+    throw new Error(
+      "This browser can't save a folder — use Download → As archive instead.",
+    );
+  }
+  let parent: BrowserDirHandle;
+  try {
+    parent = await picker.call(window, { mode: "readwrite" });
+  } catch (e) {
+    // The picker reports dismissal as AbortError (jsdom's DOMException does not
+    // necessarily extend Error, so match on the name).
+    if (
+      typeof e === "object" &&
+      e !== null &&
+      "name" in e &&
+      e.name === "AbortError"
+    )
+      return null;
+    throw e;
+  }
+  return await parent.getDirectoryHandle(name, { create: true });
 }
 
 /** A media preview's source URL plus the release of whatever backs it. */

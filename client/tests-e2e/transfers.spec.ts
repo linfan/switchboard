@@ -1,4 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -45,6 +52,10 @@ test.beforeEach(async ({ page }) => {
   // Two small siblings, so a selection has something to extend across.
   writeFileSync(join(dir, "one.txt"), "1");
   writeFileSync(join(dir, "two.txt"), "2");
+  // A folder with a nested tree, for the folder downloads.
+  mkdirSync(join(dir, "nest/sub"), { recursive: true });
+  writeFileSync(join(dir, "nest/top.txt"), "top");
+  writeFileSync(join(dir, "nest/sub/deep.txt"), "deep");
   await seed(page, dir);
 });
 
@@ -135,4 +146,29 @@ test("the selection stops at the configured cap", async ({ page }) => {
 
   await expect(page.locator(".weditor__row--file.is-selected")).toHaveCount(1);
   await expect(page.getByText("At most 1 file per download")).toBeVisible();
+});
+
+test("a folder downloads as one zip archive", async ({ page }) => {
+  const saved = page.waitForEvent("download");
+
+  await page.locator(".weditor__row--dir", { hasText: "nest" }).click({
+    button: "right",
+  });
+  await page.locator(".menu__item--sub", { hasText: "Download" }).hover();
+  await page
+    .locator(".menu--sub .menu__item", { hasText: "As archive" })
+    .click();
+
+  const download = await saved;
+  expect(download.suggestedFilename()).toBe("nest.zip");
+  const path = await download.path();
+  // The host produces a real zip, not an error body handed to the anchor.
+  expect(readFileSync(path!).subarray(0, 2).toString()).toBe("PK");
+  // Once the body is consumed the host's staged archive is gone.
+  await expect
+    .poll(() =>
+      readdirSync(tmpdir()).some((n) => n.startsWith("switchboard-download-")),
+    )
+    .toBe(false);
+  await expect(page.locator(".hint--error")).toHaveCount(0);
 });

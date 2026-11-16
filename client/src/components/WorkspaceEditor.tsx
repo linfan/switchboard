@@ -15,7 +15,9 @@ import { formatBytes } from "../net/media";
 import {
   basename,
   cancelTransfer,
+  downloadArchive,
   downloadFiles,
+  downloadFolderFiles,
   joinLocalPath,
   uploadFiles,
   type TransferHooks,
@@ -131,6 +133,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
   const progressTransfer = useStore((s) => s.progressTransfer);
   const endTransfer = useStore((s) => s.endTransfer);
   const uploadMaxFiles = useStore((s) => s.settings.uploadMaxFiles);
+  const downloadMaxFiles = useStore((s) => s.settings.downloadMaxFiles);
 
   const [git, setGit] = useState<GitInfo | null>(null);
   const [gitError, setGitError] = useState<string | null>(null);
@@ -344,6 +347,38 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
     }
   };
 
+  const handleDownloadFolder = async (
+    entry: FsEntry,
+    mode: FolderDownloadMode,
+  ) => {
+    setFsError(null);
+    const hooks = transferHooks("download");
+    try {
+      const outcome =
+        mode === "archive"
+          ? await downloadArchive(service, entry.path, hooks)
+          : await downloadFolderFiles(
+              service,
+              entry.path,
+              downloadMaxFiles,
+              hooks,
+            );
+      if (outcome.failed.length > 0)
+        setFsError(
+          batchMessage(
+            "Downloaded",
+            outcome.done.length,
+            outcome.failed,
+            outcome.cancelled,
+          ),
+        );
+    } catch (e) {
+      setFsError(errMsg(e));
+    } finally {
+      hooks.ended();
+    }
+  };
+
   const handleUpload = async (entry: FsEntry) => {
     setFsError(null);
     const hooks = transferHooks("upload");
@@ -441,6 +476,7 @@ export function WorkspaceEditor({ workspace }: { workspace: Workspace }) {
                 onRename={handleRename}
                 onDelete={handleDelete}
                 onDownload={handleDownload}
+                onDownloadFolder={handleDownloadFolder}
                 onUpload={handleUpload}
                 onCreate={handleCreate}
                 onRefresh={() => {
@@ -747,6 +783,9 @@ function capMessage(max: number): string {
   return `At most ${max} ${max === 1 ? "file" : "files"} per download`;
 }
 
+/** Which form a folder's context-menu Download offers. */
+type FolderDownloadMode = "files" | "archive";
+
 function FileTree({
   service,
   root,
@@ -760,6 +799,7 @@ function FileTree({
   onRename,
   onDelete,
   onDownload,
+  onDownloadFolder,
   onUpload,
   onCreate,
   onRefresh,
@@ -778,6 +818,8 @@ function FileTree({
   onRename: (entry: FsEntry, newName: string) => void;
   /** Download every selected file at once; a plain row is a one-file batch. */
   onDownload: (paths: string[]) => void;
+  /** Download a folder as loose files (structure preserved) or as one zip. */
+  onDownloadFolder: (entry: FsEntry, mode: FolderDownloadMode) => void;
   /** Delete the given paths; a multi-selection deletes as a batch. */
   onDelete: (paths: string[]) => void;
   onUpload: (entry: FsEntry) => void;
@@ -998,6 +1040,19 @@ function FileTree({
       label: "Upload files\u2026",
       onClick: () => onUpload(entry),
     };
+    const download: MenuItem = {
+      label: "Download",
+      submenu: [
+        {
+          label: "As files",
+          onClick: () => onDownloadFolder(entry, "files"),
+        },
+        {
+          label: "As archive",
+          onClick: () => onDownloadFolder(entry, "archive"),
+        },
+      ],
+    };
     const copyPath: MenuItem = {
       label: entry.is_dir ? "Copy folder path" : "Copy file path",
       submenu: [
@@ -1015,7 +1070,7 @@ function FileTree({
         },
       ],
     };
-    if (isRoot) return [newFile, newFolder, upload, copyPath];
+    if (isRoot) return [newFile, newFolder, upload, download, copyPath];
     const rename: MenuItem = {
       label: "Rename",
       onClick: () => setRenamingPath(entry.path),
@@ -1029,7 +1084,7 @@ function FileTree({
       onClick: () => onDelete([entry.path]),
     };
     return entry.is_dir
-      ? [newFile, newFolder, rename, upload, copyPath, del]
+      ? [newFile, newFolder, rename, upload, download, copyPath, del]
       : [
           rename,
           { label: "Download", onClick: () => onDownload([entry.path]) },

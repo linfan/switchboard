@@ -301,6 +301,106 @@ pub fn read_bytes(path: &str) -> AppResult<(String, Vec<u8>)> {
     Ok((name, bytes))
 }
 
+/// Build a zip of directory `path` in a temp file, returning the archive's name
+/// and the file. The caller streams and then drops the file, which removes it.
+///
+/// The archive contains the folder itself as its top level, so extracting it
+/// recreates the tree the user downloaded. Walks iteratively (a deep tree can't
+/// exhaust the stack) and is written to disk rather than memory so a large tree
+/// doesn't sit in the server's heap.
+pub fn zip_dir(path: &str) -> AppResult<(String, tempfile::TempPath)> {
+    if path.trim().is_empty() {
+        return Err(AppError::BadRequest("missing folder path".into()));
+    }
+    let canonical = canonicalize(Path::new(path))
+        .map_err(|e| AppError::BadRequest(format!("cannot open '{path}': {e}")))?;
+    if !canonical.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "not a directory: {}",
+            canonical.display()
+        )));
+    }
+    let top = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive".into());
+
+    let mut temp = tempfile::Builder::new()
+        .prefix("switchboard-download-")
+        .suffix(".zip")
+        .tempfile()
+        .map_err(|e| AppError::Other(anyhow::anyhow!("cannot create temp archive: {e}")))?;
+    // If TMPDIR lives inside the folder being archived, the archive must not
+    // include itself. Canonicalize so a symlinked temp dir still compares equal
+    // to the spelling `read_dir` hands back.
+    let temp_path = canonicalize(temp.path()).unwrap_or_else(|_| temp.path().to_path_buf());
+
+    {
+        let mut zip = zip::ZipWriter::new(temp.as_file_mut());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .large_file(true);
+        zip.add_directory(top.clone(), options)
+            .map_err(|e| AppError::Other(anyhow::anyhow!("cannot write archive: {e}")))?;
+
+        let mut stack = vec![(canonical.clone(), top.clone())];
+        while let Some((dir, prefix)) = stack.pop() {
+            let read = std::fs::read_dir(&dir).map_err(|e| {
+                AppError::BadRequest(format!("cannot read '{}': {e}", dir.display()))
+            })?;
+            for entry in read {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let child = entry.path();
+                if child == temp_path {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let zip_name = format!("{prefix}/{name}");
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() {
+                    zip.add_directory(zip_name.clone(), options).map_err(|e| {
+                        AppError::Other(anyhow::anyhow!("cannot write archive: {e}"))
+                    })?;
+                    stack.push((child, zip_name));
+                } else if file_type.is_file() {
+                    add_zip_file(&mut zip, &child, &zip_name, options)?;
+                } else if file_type.is_symlink() {
+                    // Follow a link to a file; a link to a directory could loop.
+                    if std::fs::metadata(&child).is_ok_and(|m| m.is_file()) {
+                        add_zip_file(&mut zip, &child, &zip_name, options)?;
+                    }
+                }
+            }
+        }
+        zip.finish()
+            .map_err(|e| AppError::Other(anyhow::anyhow!("cannot write archive: {e}")))?;
+    }
+
+    Ok((format!("{top}.zip"), temp.into_temp_path()))
+}
+
+/// Append one file to `zip` under `zip_name`. Entry names are built with `/`
+/// separators by the caller, so the archive is portable across hosts.
+fn add_zip_file<W: std::io::Write + std::io::Seek>(
+    zip: &mut zip::ZipWriter<W>,
+    path: &Path,
+    zip_name: &str,
+    options: zip::write::SimpleFileOptions,
+) -> AppResult<()> {
+    zip.start_file(zip_name, options)
+        .map_err(|e| AppError::Other(anyhow::anyhow!("cannot write archive: {e}")))?;
+    let mut src = std::fs::File::open(path)
+        .map_err(|e| AppError::BadRequest(format!("cannot read '{}': {e}", path.display())))?;
+    std::io::copy(&mut src, zip)
+        .map_err(|e| AppError::BadRequest(format!("cannot read '{}': {e}", path.display())))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,5 +607,77 @@ mod tests {
 
         // Directories are rejected.
         assert!(read_bytes(dir.path().to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn zip_dir_round_trips_nested_tree() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        fs::create_dir_all(root.join("sub/deeper")).unwrap();
+        fs::create_dir(root.join("empty")).unwrap();
+        fs::write(root.join("readme.txt"), b"hello").unwrap();
+        fs::write(root.join("sub/deeper/data.bin"), [0u8, 1, 2]).unwrap();
+
+        let (name, temp) = zip_dir(root.to_str().unwrap()).unwrap();
+        assert_eq!(name, "project.zip");
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&temp).unwrap()).unwrap();
+        let mut names = Vec::new();
+        for i in 0..archive.len() {
+            names.push(archive.by_index(i).unwrap().name().to_string());
+        }
+        // The folder is the archive's top level, empty folders survive, and
+        // nested entries use forward slashes.
+        assert!(names.contains(&"project/".to_string()));
+        assert!(names.contains(&"project/readme.txt".to_string()));
+        assert!(names.contains(&"project/sub/".to_string()));
+        assert!(names.contains(&"project/sub/deeper/data.bin".to_string()));
+        assert!(names.contains(&"project/empty/".to_string()));
+
+        let mut readme = String::new();
+        archive
+            .by_name("project/readme.txt")
+            .unwrap()
+            .read_to_string(&mut readme)
+            .unwrap();
+        assert_eq!(readme, "hello");
+        let mut data = Vec::new();
+        archive
+            .by_name("project/sub/deeper/data.bin")
+            .unwrap()
+            .read_to_end(&mut data)
+            .unwrap();
+        assert_eq!(data, vec![0u8, 1, 2]);
+
+        // Files and empty paths are rejected before anything is written.
+        assert!(zip_dir(root.join("readme.txt").to_str().unwrap()).is_err());
+        assert!(zip_dir("").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zip_dir_skips_symlinked_directories() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(root.join("real")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(root.join("real/f.txt"), b"x").unwrap();
+        fs::write(outside.join("secret.txt"), b"y").unwrap();
+        symlink(&outside, root.join("link")).unwrap();
+
+        let (_, temp) = zip_dir(root.to_str().unwrap()).unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&temp).unwrap()).unwrap();
+        let mut names = Vec::new();
+        for i in 0..archive.len() {
+            names.push(archive.by_index(i).unwrap().name().to_string());
+        }
+        // Following the link would both escape the folder and risk a cycle.
+        assert!(names.iter().all(|n| !n.contains("link")));
+        assert!(names.contains(&"root/real/f.txt".to_string()));
     }
 }
