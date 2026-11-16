@@ -154,8 +154,9 @@ test-e2e: ## End-to-end: real server binary + WS clients + fake PTY agent (gap-f
 	$(CARGO) build -p switchboard-server
 	cd e2e && $(NPM) install --silent && $(NPM) test
 test-upgrade: ## End-to-end: real self-upgrades (upload + re-exec) with a live WS client
-	$(CARGO) build -p switchboard-server
-	cd e2e && $(NPM) install --silent && $(NPM) run test:upgrade
+	@# Use release: debug binaries exceed the upload body cap, and production upgrades this build.
+	$(CARGO) build -p switchboard-server --release
+	cd e2e && $(NPM) install --silent && SWITCHBOARD_BIN="$(CURDIR)/target/release/switchboard-server" $(NPM) run test:upgrade
 test-web: ## Browser E2E (Playwright): live server + Vite + xterm terminal render/type/reconnect
 	cd client && $(NPM) install --silent && $(NPM) exec -- playwright install chromium && $(NPM) run test:e2e
 test-live: ## Run live agent-CLI tests (needs claude/qodercli auth)

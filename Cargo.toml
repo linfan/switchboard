@@ -22,3 +22,8 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2"
 rand = "0.8"
+
+[profile.release]
+# Deployed binaries do not need their symbol table; keep a separate unstripped
+# build in CI when symbolized crash traces are required.
+strip = "symbols"
