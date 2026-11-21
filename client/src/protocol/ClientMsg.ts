@@ -14,7 +14,7 @@ acks: boolean,
 /**
  * Restore scrollback in a separate history stream after a fresh snapshot.
  */
-history: boolean, } | { "type": "create_task", tool: string, title: string | null,
+history: boolean, } | { "type": "create_task", request_id: string | null, tool: string, title: string | null,
 /**
  * Working directory for the agent process (server-validated).
  */

@@ -375,6 +375,7 @@ impl TaskManager {
         }
         let _ = self.events.send(Outbound::Control(ServerMsg::TaskCreated {
             task: info.clone(),
+            request_id: None,
         }));
         tracing::info!(task = %id, tool = %cmd.tool_id, ?pid, ?host_pid, "task created");
 
@@ -509,6 +510,14 @@ impl TaskManager {
             .lock()
             .unwrap()
             .insert(task_id.to_string(), TerminalEmulator::new(cols, rows));
+    }
+
+    #[cfg(test)]
+    pub fn notify_created(&self, task: TaskInfo) {
+        let _ = self.events.send(Outbound::Control(ServerMsg::TaskCreated {
+            task,
+            request_id: None,
+        }));
     }
 
     /// Test-only: persist + feed + broadcast a chunk without a real PTY.

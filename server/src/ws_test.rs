@@ -465,6 +465,95 @@ async fn large_backlog_with_live_buffer_uses_byte_replay() {
 }
 
 #[tokio::test]
+async fn create_reply_overtakes_long_replay() {
+    let (addr, state) = start_server().await;
+    seed(&state, T1).await;
+    state.tasks.inject_chunk(T1, b"initial").await.unwrap();
+    for _ in 0..300 {
+        state.tasks.inject_chunk(T1, b".").await.unwrap();
+    }
+
+    let mut ws = connect(addr).await;
+    hello_paced(&mut ws, HashMap::from([(T1.to_string(), 1u64)])).await;
+    loop {
+        if let Rx::Bin(Frame::Output { seq: 2, .. }) = next_rx(&mut ws).await {
+            break;
+        }
+    }
+
+    send(
+        &mut ws,
+        &ClientMsg::CreateTask {
+            request_id: Some("create-during-replay".into()),
+            tool: "switchboard-test-command-that-does-not-exist".into(),
+            title: None,
+            cwd: None,
+            cols: 80,
+            rows: 24,
+        },
+    )
+    .await;
+    loop {
+        match next_rx(&mut ws).await {
+            Rx::Ctrl(ServerMsg::Error {
+                code, request_id, ..
+            }) if code.as_deref() == Some("create_failed") => {
+                assert_eq!(request_id.as_deref(), Some("create-during-replay"));
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn lagged_replay_recovers_task_created_after_broadcast_overflow() {
+    let (addr, state) = start_server().await;
+    seed(&state, T1).await;
+    state.tasks.inject_chunk(T1, b"initial").await.unwrap();
+    for _ in 0..300 {
+        state.tasks.inject_chunk(T1, b".").await.unwrap();
+    }
+
+    let mut ws = connect(addr).await;
+    hello_paced(&mut ws, HashMap::from([(T1.to_string(), 1u64)])).await;
+    loop {
+        if let Rx::Bin(Frame::Output { seq: 2, .. }) = next_rx(&mut ws).await {
+            break;
+        }
+    }
+
+    seed(&state, T2).await;
+    state.tasks.notify_created(TaskInfo {
+        id: T2.into(),
+        tool: "claude".into(),
+        title: "created during replay".into(),
+        status: TaskStatus::Running,
+        created_at: now_millis(),
+        last_seq: 0,
+    });
+    for _ in 0..2100 {
+        state.tasks.inject_chunk(T1, b"x").await.unwrap();
+    }
+
+    send(
+        &mut ws,
+        &ClientMsg::Ack {
+            task_id: T1.into(),
+            seq: 2,
+        },
+    )
+    .await;
+    let _ = read_paced_replay(&mut ws, T1).await;
+    loop {
+        if let Rx::Ctrl(ServerMsg::TasksSnapshot { tasks }) = next_rx(&mut ws).await {
+            assert!(tasks.iter().any(|task| task.id == T2));
+            break;
+        }
+    }
+}
+
+#[tokio::test]
 async fn large_backlog_without_pacing_keeps_snapshot() {
     let (addr, state) = start_server().await;
     seed(&state, T1).await;

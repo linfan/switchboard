@@ -28,6 +28,13 @@ import {
   type WorkspaceEditorState,
 } from "./types";
 
+export interface CreateRequest {
+  serviceId: string;
+  workspaceId: string;
+  taskId?: string;
+  error?: string;
+}
+
 export interface AppState {
   /** Registered services (persisted). */
   services: Service[];
@@ -49,12 +56,8 @@ export interface AppState {
   taskOrder: Record<string, string[]>;
   /** Local task-title overrides, keyed by `serviceId::taskId` (persisted). */
   titles: Record<string, string>;
-  /**
-   * Per-service FIFO queue of workspace ids awaiting a `task_created` to attach
-   * to. In-memory only: it briefly holds the workspace a create was launched
-   * from so the resulting task can be attributed to it.
-   */
-  pendingWorkspace: Record<string, string[]>;
+  /** In-flight and recently completed creates, keyed by their request id. */
+  createRequests: Record<string, CreateRequest>;
   /** Whether the left control panel is collapsed (persisted). */
   sidebarCollapsed: boolean;
   /** Width of the left control panel in px when expanded (persisted). */
@@ -104,8 +107,6 @@ export interface AppState {
   selectedServiceId?: string;
   /** Per-workspace file-editor UI state, keyed by workspace id (persisted). */
   editorState: Record<string, WorkspaceEditorState>;
-  /** Last task-creation error surfaced by the server (in-memory, transient). */
-  createError?: string;
   /**
    * File transfers in flight, in start order (in-memory, transient). Kept in the
    * store rather than in the Files panel so switching workspace or focusing a
@@ -125,8 +126,12 @@ export interface AppState {
   setRuntime: (id: string, patch: Partial<ServiceRuntime>) => void;
   /** Record a command used to launch a task on a service (dedup, cap 5). */
   addRecentTool: (serviceId: string, cmd: string) => void;
-  /** Clear the transient task-creation error. */
-  clearCreateError: () => void;
+  /** Begin a correlated task create and return its request id. */
+  beginCreate: (serviceId: string, workspaceId: string) => string;
+  /** Record a local send failure for a create. */
+  failCreate: (requestId: string, message: string) => void;
+  /** Forget a create after its dialog closes or is cancelled. */
+  clearCreateRequest: (requestId: string) => void;
 
   // --- file transfers -------------------------------------------------------
   /** Add a transfer row (a download or upload has just begun). */
@@ -143,8 +148,6 @@ export interface AppState {
   removeWorkspace: (id: string) => void;
   /** Reorder workspaces inside one service: move `fromId` into `toId`'s slot. */
   moveWorkspace: (fromId: string, toId: string) => void;
-  /** Queue a workspace to receive the next `task_created` on a service. */
-  enqueuePendingWorkspace: (serviceId: string, workspaceId: string) => void;
   /** Set (or clear, when blank) a local title override for a task. */
   setTaskTitle: (serviceId: string, taskId: string, title: string) => void;
   /** Reorder tasks inside one service: move `fromTaskId` into `toTaskId`'s slot. */
@@ -264,7 +267,7 @@ export const useStore = create<AppState>()(
       taskWorkspace: {},
       taskOrder: {},
       titles: {},
-      pendingWorkspace: {},
+      createRequests: {},
       sidebarCollapsed: false,
       sidebarWidth: 260,
       terminalFontSize: DEFAULT_FONT_SIZE,
@@ -280,7 +283,6 @@ export const useStore = create<AppState>()(
       selectedWorkspaceId: undefined,
       selectedServiceId: undefined,
       editorState: {},
-      createError: undefined,
       transfers: [],
 
       addService: (svc) => {
@@ -328,8 +330,11 @@ export const useStore = create<AppState>()(
           const cursors = dropPrefixed(s.cursors);
           const taskWorkspace = dropPrefixed(s.taskWorkspace ?? {});
           const titles = dropPrefixed(s.titles ?? {});
-          const pendingWorkspace = { ...(s.pendingWorkspace ?? {}) };
-          delete pendingWorkspace[id];
+          const createRequests = Object.fromEntries(
+            Object.entries(s.createRequests).filter(
+              ([, request]) => request.serviceId !== id,
+            ),
+          );
           const taskOrder = { ...(s.taskOrder ?? {}) };
           delete taskOrder[id];
           const selectedKey = s.selectedKey?.startsWith(prefix)
@@ -357,7 +362,7 @@ export const useStore = create<AppState>()(
             taskWorkspace,
             taskOrder,
             titles,
-            pendingWorkspace,
+            createRequests,
             selectedKey,
             editorState,
             selectedWorkspaceId,
@@ -387,7 +392,36 @@ export const useStore = create<AppState>()(
           return { recentTools: { ...s.recentTools, [serviceId]: next } };
         }),
 
-      clearCreateError: () => set({ createError: undefined }),
+      beginCreate: (serviceId, workspaceId) => {
+        const requestId = newId();
+        set((s) => ({
+          createRequests: {
+            ...s.createRequests,
+            [requestId]: { serviceId, workspaceId },
+          },
+        }));
+        return requestId;
+      },
+
+      failCreate: (requestId, message) =>
+        set((s) => {
+          const request = s.createRequests[requestId];
+          if (!request) return {};
+          return {
+            createRequests: {
+              ...s.createRequests,
+              [requestId]: { ...request, error: message },
+            },
+          };
+        }),
+
+      clearCreateRequest: (requestId) =>
+        set((s) => {
+          if (!(requestId in s.createRequests)) return {};
+          const createRequests = { ...s.createRequests };
+          delete createRequests[requestId];
+          return { createRequests };
+        }),
 
       startTransfer: (t) => set((s) => ({ transfers: [...s.transfers, t] })),
 
@@ -429,6 +463,11 @@ export const useStore = create<AppState>()(
           );
           const editorState = { ...(s.editorState ?? {}) };
           delete editorState[id];
+          const createRequests = Object.fromEntries(
+            Object.entries(s.createRequests).filter(
+              ([, request]) => request.workspaceId !== id,
+            ),
+          );
           const selectedWorkspaceId =
             s.selectedWorkspaceId === id ? undefined : s.selectedWorkspaceId;
           return {
@@ -436,6 +475,7 @@ export const useStore = create<AppState>()(
             taskWorkspace,
             titles,
             editorState,
+            createRequests,
             selectedWorkspaceId,
           };
         }),
@@ -446,17 +486,6 @@ export const useStore = create<AppState>()(
       moveWorkspace: (fromId, toId) =>
         set((s) => ({
           workspaces: moveTo(s.workspaces, fromId, toId, (w) => w.id),
-        })),
-
-      enqueuePendingWorkspace: (serviceId, workspaceId) =>
-        set((s) => ({
-          pendingWorkspace: {
-            ...s.pendingWorkspace,
-            [serviceId]: [
-              ...(s.pendingWorkspace[serviceId] ?? []),
-              workspaceId,
-            ],
-          },
         })),
 
       setTaskTitle: (serviceId, taskId, title) =>

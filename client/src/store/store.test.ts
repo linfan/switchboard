@@ -17,7 +17,7 @@ beforeEach(() => {
     taskWorkspace: {},
     taskOrder: {},
     titles: {},
-    pendingWorkspace: {},
+    createRequests: {},
     sidebarCollapsed: false,
     runtime: {},
     conversations: {},
@@ -27,14 +27,14 @@ beforeEach(() => {
     selectedWorkspaceId: undefined,
     selectedServiceId: undefined,
     editorState: {},
-    createError: undefined,
     transfers: [],
   });
 });
 
-function seedTask(svc: string, id: string) {
+function seedTask(svc: string, id: string, requestId: string | null = null) {
   useStore.getState().applyServerMsg(svc, {
     type: "task_created",
+    request_id: requestId,
     task: {
       id,
       tool: "claude",
@@ -71,18 +71,22 @@ describe("recent tools", () => {
 });
 
 describe("create errors", () => {
-  it("surfaces a create_failed error message and clears it", () => {
-    useStore.getState().applyServerMsg("s1", {
+  it("surfaces only the matching create_failed error and clears its request", () => {
+    const st = useStore.getState();
+    const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
+    const requestId = st.beginCreate("s1", ws);
+    st.applyServerMsg("s1", {
       type: "error",
       task_id: null,
       code: "create_failed",
       message: "command 'nope' not found on this host",
+      request_id: requestId,
     });
-    expect(useStore.getState().createError).toBe(
+    expect(useStore.getState().createRequests[requestId].error).toBe(
       "command 'nope' not found on this host",
     );
-    useStore.getState().clearCreateError();
-    expect(useStore.getState().createError).toBeUndefined();
+    st.clearCreateRequest(requestId);
+    expect(useStore.getState().createRequests[requestId]).toBeUndefined();
   });
 
   it("ignores errors with other codes", () => {
@@ -91,8 +95,9 @@ describe("create errors", () => {
       task_id: "t1",
       code: "terminate_failed",
       message: "nope",
+      request_id: null,
     });
-    expect(useStore.getState().createError).toBeUndefined();
+    expect(useStore.getState().createRequests).toEqual({});
   });
 });
 
@@ -123,6 +128,7 @@ describe("applyServerMsg", () => {
     const st = useStore.getState();
     st.applyServerMsg(svc, {
       type: "task_created",
+      request_id: null,
       task: {
         id: "t1",
         tool: "claude",
@@ -146,6 +152,7 @@ describe("applyServerMsg", () => {
     const st = useStore.getState();
     st.applyServerMsg(svc, {
       type: "task_created",
+      request_id: null,
       task: {
         id: "t1",
         tool: "claude",
@@ -190,6 +197,7 @@ describe("setCursor", () => {
     const st = useStore.getState();
     st.applyServerMsg(svc, {
       type: "task_created",
+      request_id: null,
       task: {
         id: "t1",
         tool: "claude",
@@ -219,6 +227,7 @@ describe("applyMsg", () => {
     const s = baseState();
     const patch = applyMsg(s, "s1", {
       type: "task_created",
+      request_id: null,
       task: {
         id: "t1",
         tool: "claude",
@@ -348,6 +357,7 @@ describe("removeService", () => {
     st.addService({ id: "s2", name: "S2", url: "http://b", token: "t" });
     st.applyServerMsg("s2", {
       type: "task_created",
+      request_id: null,
       task: {
         id: "t2",
         tool: "claude",
@@ -367,7 +377,7 @@ describe("removeService", () => {
     const st = useStore.getState();
     st.addService({ id: "s1", name: "S1", url: "http://a", token: "t" });
     const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
-    st.enqueuePendingWorkspace("s1", ws);
+    st.beginCreate("s1", ws);
     const forward = st.addPortForward({
       id: "f1",
       serviceId: "s1",
@@ -392,54 +402,98 @@ describe("removeService", () => {
     expect(s.selectedServiceId).toBeUndefined();
     expect(s.taskWorkspace[convKey("s1", "t1")]).toBeUndefined();
     expect(s.titles[convKey("s1", "t1")]).toBeUndefined();
-    expect(s.pendingWorkspace["s1"]).toBeUndefined();
+    expect(s.createRequests).toEqual({});
   });
 });
 
 describe("workspaces", () => {
-  it("attributes a created task to the queued workspace and clears the queue", () => {
+  it("attributes a task to its request workspace and completes only that request", () => {
     const st = useStore.getState();
     const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
-    st.enqueuePendingWorkspace("s1", ws);
-    seedTask("s1", "t1");
+    const requestId = st.beginCreate("s1", ws);
+    seedTask("s1", "t1", requestId);
 
     const s = useStore.getState();
     expect(s.taskWorkspace[convKey("s1", "t1")]).toBe(ws);
-    expect(s.pendingWorkspace["s1"]).toEqual([]);
+    expect(s.createRequests[requestId].taskId).toBe("t1");
+    st.clearCreateRequest(requestId);
+    expect(useStore.getState().createRequests).toEqual({});
   });
 
-  it("leaves tasks unmapped when no workspace is queued (ungrouped)", () => {
-    seedTask("s1", "t1");
-    expect(
-      useStore.getState().taskWorkspace[convKey("s1", "t1")],
-    ).toBeUndefined();
+  it("maps out-of-order creates to the right workspaces", () => {
+    const st = useStore.getState();
+    const a = st.addWorkspace({ serviceId: "s1", name: "A", cwd: "/a" });
+    const b = st.addWorkspace({ serviceId: "s1", name: "B", cwd: "/b" });
+    const reqA = st.beginCreate("s1", a);
+    const reqB = st.beginCreate("s1", b);
+
+    seedTask("s1", "task-b", reqB);
+    seedTask("s1", "task-a", reqA);
+
+    const s = useStore.getState();
+    expect(s.taskWorkspace[convKey("s1", "task-a")]).toBe(a);
+    expect(s.taskWorkspace[convKey("s1", "task-b")]).toBe(b);
   });
 
-  it("a failed create clears the pending queue so it can't steal a later task", () => {
+  it("does not let broadcasts or snapshots consume a pending create", () => {
     const st = useStore.getState();
     const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
-    st.enqueuePendingWorkspace("s1", ws);
+    const requestId = st.beginCreate("s1", ws);
+    seedTask("s1", "other-client");
+    st.applyServerMsg("s1", {
+      type: "tasks_snapshot",
+      tasks: [
+        {
+          id: "recovered",
+          tool: "claude",
+          title: "Recovered",
+          status: { state: "running" },
+          created_at: 0,
+          last_seq: 0,
+        },
+      ],
+    });
+
+    let s = useStore.getState();
+    expect(s.conversations[convKey("s1", "recovered")]).toBeTruthy();
+    expect(s.createRequests[requestId].taskId).toBeUndefined();
+    expect(s.taskWorkspace[convKey("s1", "other-client")]).toBeUndefined();
+    expect(s.taskWorkspace[convKey("s1", "recovered")]).toBeUndefined();
+
+    seedTask("s1", "own", requestId);
+    s = useStore.getState();
+    expect(s.taskWorkspace[convKey("s1", "own")]).toBe(ws);
+  });
+
+  it("scopes failures to one request without affecting another workspace", () => {
+    const st = useStore.getState();
+    const a = st.addWorkspace({ serviceId: "s1", name: "A", cwd: "/a" });
+    const b = st.addWorkspace({ serviceId: "s1", name: "B", cwd: "/b" });
+    const reqA = st.beginCreate("s1", a);
+    const reqB = st.beginCreate("s1", b);
 
     st.applyServerMsg("s1", {
       type: "error",
       task_id: null,
       code: "create_failed",
       message: "nope",
+      request_id: reqA,
     });
-    expect(useStore.getState().pendingWorkspace["s1"]).toEqual([]);
+    expect(useStore.getState().createRequests[reqA].error).toBe("nope");
+    expect(useStore.getState().createRequests[reqB].error).toBeUndefined();
 
-    // A later task (e.g. from another client) is not attributed to the workspace.
-    seedTask("s1", "t9");
-    expect(
-      useStore.getState().taskWorkspace[convKey("s1", "t9")],
-    ).toBeUndefined();
+    seedTask("s1", "task-b", reqB);
+    seedTask("s1", "other-client");
+    const s = useStore.getState();
+    expect(s.taskWorkspace[convKey("s1", "task-b")]).toBe(b);
+    expect(s.taskWorkspace[convKey("s1", "other-client")]).toBeUndefined();
   });
 
   it("removeWorkspace forgets its task mappings and titles but not the server task", () => {
     const st = useStore.getState();
     const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
-    st.enqueuePendingWorkspace("s1", ws);
-    seedTask("s1", "t1");
+    const requestId = st.beginCreate("s1", ws);
+    seedTask("s1", "t1", requestId);
     st.setTaskTitle("s1", "t1", "renamed");
 
     useStore.getState().removeWorkspace(ws);
@@ -468,8 +522,8 @@ describe("workspaces", () => {
   it("task_deleted clears the workspace mapping and title override", () => {
     const st = useStore.getState();
     const ws = st.addWorkspace({ serviceId: "s1", name: "W", cwd: "/w" });
-    st.enqueuePendingWorkspace("s1", ws);
-    seedTask("s1", "t1");
+    const requestId = st.beginCreate("s1", ws);
+    seedTask("s1", "t1", requestId);
     st.setTaskTitle("s1", "t1", "renamed");
 
     st.applyServerMsg("s1", { type: "task_deleted", task_id: "t1" });

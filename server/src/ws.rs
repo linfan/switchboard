@@ -49,8 +49,8 @@ pub(crate) const REPLAY_WINDOW: u64 = 256;
 /// Buffer for the unified outbound writer. Bounded so a slow client applies
 /// backpressure to the session instead of growing memory without limit.
 const OUT_BUF: usize = 512;
-/// Priority lane for order-independent control replies (pongs), so terminal
-/// output or a replay cannot bury them behind the whole data queue.
+/// Priority lane for order-independent control replies (pongs and direct replies),
+/// so terminal output or a replay cannot bury them behind the whole data queue.
 const CTL_BUF: usize = 8;
 /// Buffer for inbound frames handed from the transport bridge to the session.
 const IN_BUF: usize = 64;
@@ -152,8 +152,7 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
         let mut bytes: u64 = 0;
         let mut write_ms: u64 = 0;
         loop {
-            // Control first: a pong overtaking queued terminal data is safe
-            // (it echoes a timestamp) and keeps the heartbeat honest.
+            // Control first: direct replies and pongs may overtake terminal data.
             let out = tokio::select! {
                 biased;
                 Some(out) = ctl_rx.recv() => out,
@@ -252,6 +251,7 @@ pub async fn run_session(
         let out = out_tx.clone();
         let tracker = tracker.clone();
         let history = history_workers.clone();
+        let control = control.clone();
         tokio::spawn(async move {
             let mut last_ping: Option<Instant> = None;
             while let Some(win) = rx.recv().await {
@@ -387,10 +387,25 @@ pub async fn run_session(
         service: state.service_info(),
         tasks: state.tasks.list().await.unwrap_or_default(),
     };
-    if !send_control(&out_tx, &welcome).await {
+    if !send_direct(&out_tx, control.as_ref(), &welcome).await {
         tracing::info!(%client_id, reason = "welcome send failed", "client disconnected");
         return;
     }
+    let direct_task = {
+        let out = out_tx.clone();
+        let priority = control.clone();
+        let history = history_workers.clone();
+        tokio::spawn(async move {
+            while let Some(m) = direct_rx.recv().await {
+                if let ServerMsg::TaskDeleted { task_id } = &m {
+                    history.cancel(task_id);
+                }
+                if !send_direct(&out, priority.as_ref(), &m).await {
+                    break;
+                }
+            }
+        })
+    };
     let mut last_sent: HashMap<String, u64> = HashMap::new();
     let replay_ctx = ReplayContext {
         out: &out_tx,
@@ -400,7 +415,8 @@ pub async fn run_session(
         history_enabled,
         history_workers: &history_workers,
     };
-    if !replay(replay_ctx, "connect", &cursors, &mut last_sent).await {
+    if !replay(replay_ctx, "connect", &cursors, &mut last_sent, false).await {
+        direct_task.abort();
         history_workers.close();
         tracing::info!(%client_id, reason = "replay failed", "client disconnected");
         return;
@@ -413,15 +429,6 @@ pub async fn run_session(
             _ = &mut shutdown_rx => {
                 reason = "inbound closed";
                 break;
-            }
-            Some(m) = direct_rx.recv() => {
-                if let ServerMsg::TaskDeleted { task_id } = &m {
-                    history_workers.cancel(task_id);
-                }
-                if !send_control(&out_tx, &m).await {
-                    reason = "outbound closed";
-                    break;
-                }
             }
             r = broadcast_rx.recv() => match r {
                 Ok(Outbound::Control(m)) => {
@@ -449,7 +456,7 @@ pub async fn run_session(
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(%client_id, skipped = n, "broadcast lagged; resyncing from store");
                     let from = last_sent.clone();
-                    if !replay(replay_ctx, "lagged", &from, &mut last_sent)
+                    if !replay(replay_ctx, "lagged", &from, &mut last_sent, true)
                     .await
                     {
                         reason = "replay failed";
@@ -469,6 +476,7 @@ pub async fn run_session(
             }
         }
     }
+    direct_task.abort();
     history_workers.close();
     tracing::info!(
         %client_id,
@@ -846,6 +854,7 @@ impl HistoryWorkers {
             task_id: Some(task_id.to_string()),
             code: Some("history_failed".into()),
             message,
+            request_id: None,
         };
         if let Ok(json) = serde_json::to_string(&error) {
             let _ = self.tx.send(WsOut::Text(json)).await;
@@ -873,6 +882,7 @@ async fn replay(
     reason: &'static str,
     cursors: &HashMap<String, u64>,
     last_sent: &mut HashMap<String, u64>,
+    include_task_snapshot: bool,
 ) -> bool {
     let ReplayContext {
         out,
@@ -889,6 +899,14 @@ async fn replay(
             return true; // keep the connection; live stream may still work
         }
     };
+    if include_task_snapshot {
+        let snapshot = ServerMsg::TasksSnapshot {
+            tasks: tasks.clone(),
+        };
+        if !send_control(out, &snapshot).await {
+            return false;
+        }
+    }
     // How much backlog this reconnect asked for. A large number here is what
     // fills the repeater's per-stream queue and resets the stream; logging it at
     // the start means a flapping client is explainable even when the replay is
@@ -1021,13 +1039,14 @@ async fn handle_client_msg(
             }
         }
         ClientMsg::CreateTask {
+            request_id,
             tool,
             title,
             cwd,
             cols,
             rows,
         } => {
-            if let Err(e) = state
+            match state
                 .tasks
                 .create(CreateParams {
                     tool,
@@ -1038,11 +1057,17 @@ async fn handle_client_msg(
                 })
                 .await
             {
-                let _ = direct_tx.send(ServerMsg::Error {
-                    task_id: None,
-                    code: Some("create_failed".into()),
-                    message: e.to_string(),
-                });
+                Ok(task) => {
+                    let _ = direct_tx.send(ServerMsg::TaskCreated { task, request_id });
+                }
+                Err(e) => {
+                    let _ = direct_tx.send(ServerMsg::Error {
+                        task_id: None,
+                        code: Some("create_failed".into()),
+                        message: e.to_string(),
+                        request_id,
+                    });
+                }
             }
         }
         ClientMsg::TerminateTask { task_id } => {
@@ -1051,6 +1076,7 @@ async fn handle_client_msg(
                     task_id: Some(task_id),
                     code: Some("terminate_failed".into()),
                     message: e.to_string(),
+                    request_id: None,
                 });
             }
         }
@@ -1060,10 +1086,34 @@ async fn handle_client_msg(
                     task_id: Some(task_id),
                     code: Some("delete_failed".into()),
                     message: e.to_string(),
+                    request_id: None,
                 });
             }
         }
     }
+}
+
+async fn send_direct<T: serde::Serialize>(
+    out: &mpsc::Sender<WsOut>,
+    priority: Option<&mpsc::Sender<WsOut>>,
+    msg: &T,
+) -> bool {
+    let frame = match serde_json::to_string(msg) {
+        Ok(json) => WsOut::Text(json),
+        Err(e) => {
+            tracing::error!(error=%e, "serialize server message failed");
+            return true;
+        }
+    };
+    let frame = match priority {
+        Some(tx) => match tx.try_send(frame) {
+            Ok(()) => return true,
+            Err(mpsc::error::TrySendError::Full(frame))
+            | Err(mpsc::error::TrySendError::Closed(frame)) => frame,
+        },
+        None => frame,
+    };
+    out.send(frame).await.is_ok()
 }
 
 /// Queue a control message on the unified outbound channel. A send error means

@@ -245,6 +245,8 @@ pub enum ClientMsg {
     /// Create a new task (conversation) running the given tool on a PTY sized
     /// `cols` × `rows` (the client's initial terminal size).
     CreateTask {
+        #[serde(default)]
+        request_id: Option<String>,
         tool: String,
         title: Option<String>,
         /// Working directory for the agent process (server-validated).
@@ -302,7 +304,14 @@ pub enum ServerMsg {
         tasks: Vec<TaskInfo>,
     },
     /// A new task was created (by this or another client).
-    TaskCreated { task: TaskInfo },
+    TaskCreated {
+        task: TaskInfo,
+        #[serde(default)]
+        request_id: Option<String>,
+    },
+    /// Authoritative task inventory used to recover control events skipped by a
+    /// lagged terminal-data broadcast.
+    TasksSnapshot { tasks: Vec<TaskInfo> },
     /// A task changed lifecycle state.
     TaskState { task_id: String, status: TaskStatus },
     /// A task was deleted (by this or another client); clients drop it and its
@@ -339,6 +348,8 @@ pub enum ServerMsg {
         task_id: Option<String>,
         code: Option<String>,
         message: String,
+        #[serde(default)]
+        request_id: Option<String>,
     },
 }
 

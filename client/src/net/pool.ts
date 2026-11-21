@@ -274,6 +274,7 @@ export class ConnectionPool {
 
   createTask(
     serviceId: string,
+    requestId: string,
     tool: string,
     title: string | null,
     cwd: string | null,
@@ -282,6 +283,7 @@ export class ConnectionPool {
   ): boolean {
     return this.send(serviceId, {
       type: "create_task",
+      request_id: requestId,
       tool,
       title,
       cwd,

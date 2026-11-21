@@ -21,12 +21,16 @@ export function NewTaskDialog({
   onClose: () => void;
 }) {
   const runtime = useStore((s) => s.runtime);
-  const conversations = useStore((s) => s.conversations);
   const recentTools = useStore((s) => s.recentTools);
-  const createError = useStore((s) => s.createError);
   const addRecentTool = useStore((s) => s.addRecentTool);
-  const clearCreateError = useStore((s) => s.clearCreateError);
-  const enqueuePendingWorkspace = useStore((s) => s.enqueuePendingWorkspace);
+  const beginCreate = useStore((s) => s.beginCreate);
+  const failCreate = useStore((s) => s.failCreate);
+  const clearCreateRequest = useStore((s) => s.clearCreateRequest);
+  const requestIdRef = useRef<string | null>(null);
+  const createRequest = useStore((s) =>
+    requestIdRef.current ? s.createRequests[requestIdRef.current] : undefined,
+  );
+  const createError = createRequest?.error;
 
   const [tool, setTool] = useState("");
   const [title, setTitle] = useState("");
@@ -53,49 +57,48 @@ export function NewTaskDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serviceId, recents.length, knownTools.length]);
 
-  // Clear any stale create error when the dialog unmounts.
-  useEffect(() => clearCreateError, [clearCreateError]);
-
-  const prefix = `${serviceId}::`;
-  const convCount = useMemo(
-    () => Object.keys(conversations).filter((k) => k.startsWith(prefix)).length,
-    [conversations, prefix],
+  useEffect(
+    () => () => {
+      if (requestIdRef.current) clearCreateRequest(requestIdRef.current);
+    },
+    [clearCreateRequest],
   );
-  const baselineRef = useRef(0);
 
-  // A create failed: surface the server's message inline, re-enable the form.
   useEffect(() => {
     if (submitting && createError) setSubmitting(false);
   }, [submitting, createError]);
 
-  // A create succeeded (a new conversation appeared for this service): remember
-  // the command and close.
   useEffect(() => {
-    if (submitting && convCount > baselineRef.current) {
+    if (submitting && createRequest?.taskId) {
       addRecentTool(serviceId, tool.trim());
       onClose();
     }
-  }, [submitting, convCount, serviceId, tool, addRecentTool, onClose]);
+  }, [
+    submitting,
+    createRequest?.taskId,
+    serviceId,
+    tool,
+    addRecentTool,
+    onClose,
+  ]);
 
   const valid = tool.trim() !== "" && online;
 
   const submit = () => {
     if (!valid || submitting) return;
-    clearCreateError();
-    baselineRef.current = convCount;
     setSubmitting(true);
-    // Attribute the resulting task to this workspace, then launch it in the
-    // workspace's folder.
-    enqueuePendingWorkspace(serviceId, workspaceId);
+    if (requestIdRef.current) clearCreateRequest(requestIdRef.current);
+    const requestId = beginCreate(serviceId, workspaceId);
+    requestIdRef.current = requestId;
     const sent = pool.createTask(
       serviceId,
+      requestId,
       tool.trim(),
       title.trim() || null,
       cwd.trim() || null,
     );
     if (!sent) {
-      setSubmitting(false);
-      useStore.setState({ createError: "not connected to this service" });
+      failCreate(requestId, "not connected to this service");
     }
   };
 

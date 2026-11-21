@@ -63,20 +63,30 @@ export function applyMsg(
         conversations,
       };
     }
+    case "tasks_snapshot": {
+      let conversations = s.conversations;
+      for (const task of msg.tasks) {
+        conversations = ensureConv({ ...s, conversations }, serviceId, task);
+      }
+      return { conversations };
+    }
     case "task_created": {
       const conversations = ensureConv(s, serviceId, msg.task);
-      // Attribute this task to the workspace its create was launched from, if
-      // one is queued for this service. Tasks with no queued workspace (e.g.
-      // created by another client) stay unmapped and render under "Ungrouped".
-      const queue = s.pendingWorkspace[serviceId] ?? [];
-      if (queue.length === 0) return { conversations };
-      const [workspaceId, ...rest] = queue;
+      if (!msg.request_id) return { conversations };
+      const request = s.createRequests[msg.request_id];
+      if (!request || request.serviceId !== serviceId) return { conversations };
       const key = convKey(serviceId, msg.task.id);
       return {
         conversations,
-        taskWorkspace: { ...s.taskWorkspace, [key]: workspaceId },
-        pendingWorkspace: { ...s.pendingWorkspace, [serviceId]: rest },
-        // This client just created the task — focus its terminal.
+        taskWorkspace: { ...s.taskWorkspace, [key]: request.workspaceId },
+        createRequests: {
+          ...s.createRequests,
+          [msg.request_id]: {
+            ...request,
+            taskId: msg.task.id,
+            error: undefined,
+          },
+        },
         selectedKey: key,
         selectedWorkspaceId: undefined,
       };
@@ -120,13 +130,16 @@ export function applyMsg(
       };
     }
     case "error": {
-      if (msg.code === "create_failed") {
-        // The queued workspace for this create will never get a task_created;
-        // drop it so it doesn't steal a later successful create on this service.
-        return {
-          createError: msg.message,
-          pendingWorkspace: { ...s.pendingWorkspace, [serviceId]: [] },
-        };
+      if (msg.code === "create_failed" && msg.request_id) {
+        const request = s.createRequests[msg.request_id];
+        if (request && request.serviceId === serviceId) {
+          return {
+            createRequests: {
+              ...s.createRequests,
+              [msg.request_id]: { ...request, error: msg.message },
+            },
+          };
+        }
       }
       return {};
     }
