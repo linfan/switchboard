@@ -29,7 +29,6 @@ mod ws;
 #[cfg(test)]
 mod ws_test;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
@@ -173,6 +172,10 @@ async fn run_worker_repeater_client(config: Config) -> anyhow::Result<()> {
 async fn run_worker_direct(config: Config) -> anyhow::Result<()> {
     tracing::info!(addr = %config.addr, "worker-direct");
 
+    // Claim the address before recovery can mutate shared task state.
+    let listener = std::net::TcpListener::bind(&config.addr)?;
+    listener.set_nonblocking(true)?;
+
     // Ensure the cert exists up front (when TLS is on) so we can derive the
     // channel-binding fingerprint before building state.
     let cert_fp = match &config.tls {
@@ -212,17 +215,47 @@ async fn run_worker_direct(config: Config) -> anyhow::Result<()> {
             let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(
                 std::sync::Arc::new(tls::server_config(tls_cfg)?),
             );
-            let addr: SocketAddr = config.addr.parse()?;
             tracing::info!(addr = %config.addr, cert = %tls_cfg.cert_path, "listening (https)");
-            axum_server::bind_rustls(addr, rustls_config)
+            axum_server::from_tcp_rustls(listener, rustls_config)
                 .serve(app.into_make_service())
                 .await?;
         }
         None => {
-            let listener = TcpListener::bind(&config.addr).await?;
+            let listener = TcpListener::from_std(listener)?;
             tracing::info!(addr = %config.addr, "listening (http)");
             axum::serve(listener, app).await?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Role;
+
+    #[tokio::test]
+    async fn direct_rejects_an_occupied_address_before_opening_the_store() {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("switchboard.db");
+        let config = Config {
+            role: Role::WorkerDirect,
+            addr: occupied.local_addr().unwrap().to_string(),
+            token: Some("test-token".to_string()),
+            db_path: db_path.to_string_lossy().into_owned(),
+            service_name: "test".to_string(),
+            agent_permission_mode: "default".to_string(),
+            tls: None,
+            repeater_addr: None,
+            repeater_token: None,
+            repeater_ca: None,
+            tag: None,
+            log_file: None,
+        };
+
+        run_worker_direct(config).await.unwrap_err();
+
+        assert!(!db_path.exists());
+    }
 }

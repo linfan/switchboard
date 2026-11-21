@@ -256,9 +256,11 @@ impl TaskManager {
             }
         };
         for row in hosted {
-            // Only tasks that were live when we went away can have a host worth
-            // dialing; a terminal status means the host has already exited.
-            if !matches!(row.status, TaskStatus::Starting | TaskStatus::Running) {
+            // A detached host may only have been busy during an earlier failed start.
+            if !matches!(
+                row.status,
+                TaskStatus::Starting | TaskStatus::Running | TaskStatus::Detached
+            ) {
                 continue;
             }
             let (link, out_rx) = match HostLink::attach(
@@ -663,6 +665,54 @@ mod tests {
             store.get_task("nopid").await.unwrap().unwrap().status,
             TaskStatus::Exited { code: None }
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reattach_restores_a_detached_task_with_a_live_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir
+            .path()
+            .join("switchboard.db")
+            .to_string_lossy()
+            .into_owned();
+        let store = Store::connect(&db).await.unwrap();
+        let mgr = TaskManager::new(store.clone(), &db);
+        let mut task = running_task("detached");
+        task.status = TaskStatus::Detached;
+        store.create_task(&task).await.unwrap();
+
+        let spec = crate::host::HostSpec {
+            task_id: task.id.clone(),
+            endpoint: crate::ipc::endpoint_for(&db, &task.id),
+            log_path: crate::ipc::log_path_for(&db, &task.id)
+                .to_string_lossy()
+                .into_owned(),
+            bin: "sh".into(),
+            argv: vec!["-c".into(), "sleep 30".into()],
+            cwd: None,
+            cols: 80,
+            rows: 24,
+        };
+        store
+            .set_host(&task.id, &spec.endpoint, None, 0)
+            .await
+            .unwrap();
+        let host = tokio::spawn(crate::host::run(spec));
+
+        mgr.reattach_hosts().await;
+
+        assert_eq!(
+            store.get_task(&task.id).await.unwrap().unwrap().status,
+            TaskStatus::Running
+        );
+        mgr.running
+            .lock()
+            .unwrap()
+            .get(&task.id)
+            .unwrap()
+            .terminate();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), host).await;
     }
 
     #[tokio::test]
