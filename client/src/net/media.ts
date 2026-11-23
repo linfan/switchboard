@@ -1,7 +1,9 @@
-//! Which files the editor previews as media instead of opening as text, and how
-//! big each kind may be. The host's `read_file` would only report an image or a
-//! video as `truncated` (NUL bytes / oversize), so the editor decides from the
-//! extension *before* fetching anything.
+//! Which files the editor can preview as media, and how big each kind may be.
+//! SVG is classified here too, but the editor keeps it as editable text with a
+//! Preview/Source toggle rather than streaming it like the binary kinds. The
+//! host's `read_file` would only report an image or a video as `truncated` (NUL
+//! bytes / oversize), so the editor decides from the extension *before* fetching
+//! anything.
 //!
 //! Only formats a webview can actually render are listed: raster images, audio,
 //! video, and SVG (painted through `<img>`, where its scripts stay inert).

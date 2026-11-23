@@ -15,8 +15,8 @@
 //! The registry also owns each tab's long-line wrap choice, so flipping it
 //! reconfigures the live view in place instead of rebuilding it (which would cost
 //! the tab its edits, scroll, and undo) and so the choice survives a workspace
-//! switch the same way the view does. Each markdown tab's rendered-vs-source
-//! choice lives here too, for the same reason.
+//! switch the same way the view does. Each markdown or SVG tab's
+//! preview-vs-source choice lives here too, for the same reason.
 
 import { Compartment, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
@@ -266,13 +266,13 @@ export function wrapExtension(wrap: boolean): Extension {
 const wraps = new Map<string, boolean>();
 
 /**
- * Whether each markdown tab shows the rendered view or the raw source. Just a
+ * Whether each markdown or SVG tab shows the preview or the raw source. Just a
  * recorded choice — the view itself is untouched — so `EditorArea` can keep the
- * CodeMirror buffer alive (hidden) behind the rendered pane, and reopening a
- * closed tab starts rendered again. `undefined` means "no choice yet", which
- * reads as the rendered default.
+ * CodeMirror buffer alive (hidden) behind the preview pane, and reopening a
+ * closed tab starts in preview again. `undefined` means "no choice yet", which
+ * reads as the preview default.
  */
-const mdPreviews = new Map<string, boolean>();
+const docPreviews = new Map<string, boolean>();
 
 /**
  * Each image tab's preview zoom factor, keyed like {@link entries}. A recorded
@@ -312,6 +312,19 @@ export function setZoom(
   const wrap = entries.get(k)?.dom;
   const img = wrap?.querySelector("img");
   if (!wrap || !img) return;
+  applyZoom(img, wrap, zoom);
+}
+
+/**
+ * Apply a zoom factor to an image preview that lives outside the registry entry
+ * (SVG renders its preview from the editor buffer, so there is no media DOM to
+ * query). `wrap` is the padded scroll container the fit is measured against.
+ */
+export function applyZoom(
+  img: HTMLImageElement,
+  wrap: HTMLElement,
+  zoom: number,
+): void {
   if (zoom === 1) {
     img.style.width = "";
     img.style.height = "";
@@ -332,23 +345,23 @@ export function setZoom(
 }
 
 /**
- * The tab's rendered-vs-source choice for markdown, or `undefined` if the tab
- * never toggled it (callers apply the rendered default themselves).
+ * The tab's preview-vs-source choice for markdown/SVG, or `undefined` if the tab
+ * never toggled it (callers apply the preview default themselves).
  */
-export function getMdPreview(
+export function getDocPreview(
   workspaceId: string,
   tabKey: string,
 ): boolean | undefined {
-  return mdPreviews.get(mapKey(workspaceId, tabKey));
+  return docPreviews.get(mapKey(workspaceId, tabKey));
 }
 
-/** Record a markdown tab's rendered-vs-source choice. */
-export function setMdPreview(
+/** Record a markdown/SVG tab's preview-vs-source choice. */
+export function setDocPreview(
   workspaceId: string,
   tabKey: string,
-  rendered: boolean,
+  preview: boolean,
 ): void {
-  mdPreviews.set(mapKey(workspaceId, tabKey), rendered);
+  docPreviews.set(mapKey(workspaceId, tabKey), preview);
 }
 
 /** The tab's wrap choice, or `undefined` if it hasn't been seeded yet. */
@@ -391,7 +404,7 @@ export function remeasureAll(): void {
 
 function destroy(key: string): void {
   wraps.delete(key);
-  mdPreviews.delete(key);
+  docPreviews.delete(key);
   zooms.delete(key);
   const e = entries.get(key);
   if (!e) return;

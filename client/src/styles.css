@@ -1405,6 +1405,17 @@ body {
 .weditor__cm .cm-mergeViewEditor {
   min-width: 0;
 }
+/* SVG preview: the buffer becomes a blob-backed <img>, fitted and scrollable
+   like a media file. Kept separate from .weditor__mediawrap so the pane can flex
+   beside the tab bar while the CodeMirror host is hidden. */
+.weditor__svg {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  padding: 8px;
+  box-sizing: border-box;
+}
 /* Media preview: centre the element in the pane and scroll if it overflows. */
 .weditor__mediawrap {
   height: 100%;

@@ -201,8 +201,8 @@ export function EditorArea({
   const [changed, setChanged] = useState<Record<string, boolean>>({});
   // Per-tab wrap choices, mirrored from the registry for the same reason.
   const [wraps, setWraps] = useState<Record<string, boolean>>({});
-  // Per-tab markdown rendered-vs-source choices, mirrored the same way.
-  const [mdPrev, setMdPrev] = useState<Record<string, boolean>>({});
+  // Per-tab markdown/SVG preview-vs-source choices, mirrored the same way.
+  const [docPrev, setDocPrev] = useState<Record<string, boolean>>({});
   // Per-tab image preview zoom factors, mirrored from the registry the same way.
   const [zooms, setZooms] = useState<Record<string, number>>({});
   // The active tab's rendered HTML, or null while no preview is on screen.
@@ -210,8 +210,20 @@ export function EditorArea({
   const [mdHtml, setMdHtml] = useState<{ for: string; html: string } | null>(
     null,
   );
+  // The active SVG tab's preview URL, built from its live buffer. `for` keys it
+  // to the tab so a switch never shows the previous tab's drawing.
+  const [svgPreview, setSvgPreview] = useState<{
+    for: string;
+    url: string;
+  } | null>(null);
+  // Bumped when a disk reload rewrites the active SVG buffer while its preview
+  // is already on screen; the preview effect reads the doc again.
+  const [svgDocRev, setSvgDocRev] = useState(0);
   // The rendered pane's host, for post-processing (image srcs, link targets).
   const mdHostRef = useRef<HTMLDivElement>(null);
+  // The SVG preview's scroll container and image, for applying the zoom factor.
+  const svgWrapRef = useRef<HTMLDivElement>(null);
+  const svgImgRef = useRef<HTMLImageElement>(null);
   // Image previews behind the current rendered pane, by target path. A tab
   // switch re-mounts the HTML with its original relative srcs, so resolved
   // URLs are re-applied from here instead of refetching every image.
@@ -243,13 +255,16 @@ export function EditorArea({
   const commit = active?.commit;
   const key = active ? tabKey(active) : undefined;
   // Image/audio/video tree files preview instead of loading into CodeMirror.
+  // SVG is the exception: it stays editable text with a preview toggle.
   const media = mode === "edit" && path ? mediaForPath(path) : null;
-  // Markdown tree files render as a document, with the raw source one toggle away.
+  const isSvg = media?.ext === "svg";
+  // Markdown and SVG files open a rendered preview, with the raw source one
+  // toggle away. The choice belongs to the tab.
   const isMd = mode === "edit" && !!path && isMarkdownPath(path);
-  const mdRendered = (k: string) =>
-    mdPrev[k] ?? editors.getMdPreview(workspaceId, k) ?? true;
-  // The active markdown tab is currently showing its rendered pane.
-  const showPreview = !!key && isMd && mdRendered(key);
+  const docRendered = (k: string) =>
+    docPrev[k] ?? editors.getDocPreview(workspaceId, k) ?? true;
+  const showMdPreview = !!key && isMd && docRendered(key);
+  const showSvgPreview = !!key && isSvg && docRendered(key);
   // Diff tab paths are repo-relative; edit tabs carry absolute paths already.
   const absPath = (p: string) =>
     p.startsWith("/") ? p : `${cwd.replace(/\/+$/, "")}/${p}`;
@@ -309,8 +324,11 @@ export function EditorArea({
         editors.clearDiskChange(workspaceId, k, false);
         markDirty(k, false);
         markChanged(k, false);
-        // The rendered pane (if up) must not keep showing the pre-reload body.
-        if (mdRendered(k)) renderMarkdownDoc(k, view);
+        // The preview pane (if up) must not keep showing the pre-reload body.
+        if (isMarkdownPath(filePath) && docRendered(k)) {
+          renderMarkdownDoc(k, view);
+        }
+        setSvgDocRev((n) => n + 1);
       })
       .catch((e: unknown) =>
         setError(e instanceof Error ? e.message : String(e)),
@@ -525,7 +543,7 @@ export function EditorArea({
           setStatus("error");
         });
       }
-    } else if (media) {
+    } else if (media && !isSvg) {
       if (existing) {
         // Already fetched — re-parent the live element, so playback continues
         // from where it was and the cached bytes aren't downloaded twice.
@@ -621,13 +639,45 @@ export function EditorArea({
   // so a tab switch fills the new tab's HTML in before the browser paints,
   // never flashing the previous tab's body.
   useLayoutEffect(() => {
-    if (!key || !showPreview || status !== "ready") {
+    if (!key || !showMdPreview || status !== "ready") {
       setMdHtml(null);
       return;
     }
     const view = editors.getView(workspaceId, key);
     if (view) renderMarkdownDoc(key, view);
-  }, [workspaceId, key, showPreview, status]);
+  }, [workspaceId, key, showMdPreview, status]);
+
+  // SVG preview: turn the active tab's live buffer into a typed Blob URL. The
+  // CodeMirror view stays hidden underneath, so toggling back to Source keeps
+  // edits, scroll, and undo. Regenerates on tab/view switch, on returning from
+  // Source, and after a disk reload — but not on every keystroke, since the
+  // buffer can only be edited while this pane is hidden.
+  useLayoutEffect(() => {
+    if (!key || !showSvgPreview || status !== "ready") {
+      setSvgPreview(null);
+      return;
+    }
+    const view = editors.getView(workspaceId, key);
+    if (!view) return;
+    const url = URL.createObjectURL(
+      new Blob([view.state.doc.toString()], { type: "image/svg+xml" }),
+    );
+    setSvgPreview({ for: key, url });
+    return () => URL.revokeObjectURL(url);
+  }, [workspaceId, key, showSvgPreview, status, svgDocRev]);
+
+  // Re-fit a zoomed SVG after the preview pane appears, the zoom changes, or a
+  // re-encoded image finishes decoding (pixel dimensions only exist then).
+  useLayoutEffect(() => {
+    const img = svgImgRef.current;
+    const wrap = svgWrapRef.current;
+    if (!img || !wrap || !key) return;
+    editors.applyZoom(
+      img,
+      wrap,
+      zooms[key] ?? editors.getZoom(workspaceId, key) ?? 1,
+    );
+  }, [workspaceId, key, zooms, svgPreview, showSvgPreview]);
 
   // Post-process the rendered pane: give headings ids so `[x](#x)` TOC links
   // resolve, open links outside the app, and point relative image srcs at
@@ -724,9 +774,18 @@ export function EditorArea({
   // on window focus (when outside edits most likely happened). The interval is
   // cleared on tab switch/close/unmount, so no polling ever outlives an open
   // file; a stat resolving after close finds no registry entry and is dropped.
-  // Media previews are snapshots of the bytes at open time, so they aren't polled.
+  // Raster/audio/video previews are snapshots of the bytes at open time, so
+  // they aren't polled. SVG (like markdown) keeps an editable source buffer, so
+  // out-of-app changes still surface for it.
   useEffect(() => {
-    if (!key || !path || mode !== "edit" || media || status !== "ready") return;
+    if (
+      !key ||
+      !path ||
+      mode !== "edit" ||
+      (media && !isSvg) ||
+      status !== "ready"
+    )
+      return;
 
     let cancelled = false;
     let inFlight = false;
@@ -793,7 +852,7 @@ export function EditorArea({
       keys.forEach((k) => delete next[k]);
       return next;
     });
-    setMdPrev((m) => {
+    setDocPrev((m) => {
       const next = { ...m };
       keys.forEach((k) => delete next[k]);
       return next;
@@ -852,12 +911,12 @@ export function EditorArea({
     setWraps((m) => ({ ...m, [k]: next }));
   };
 
-  /** Flip this markdown tab between its rendered pane and the raw source. */
-  const toggleMdPreview = (k: string, rendered: boolean) => {
+  /** Flip this markdown or SVG tab between its preview and the raw source. */
+  const toggleDocPreview = (k: string, preview: boolean) => {
     // A recorded choice only — the buffer view stays alive behind the pane,
     // so switching back restores edits, scroll, and undo untouched.
-    editors.setMdPreview(workspaceId, k, rendered);
-    setMdPrev((m) => ({ ...m, [k]: rendered }));
+    editors.setDocPreview(workspaceId, k, preview);
+    setDocPrev((m) => ({ ...m, [k]: preview }));
   };
 
   // Preview zoom stops for image tabs: the fitted view plus a couple of
@@ -1025,37 +1084,57 @@ export function EditorArea({
         {actionsSlot &&
           createPortal(
             <>
-              {key && isMd && (
+              {key && (isMd || isSvg) && (
                 <div
                   className="weditor__seg"
                   role="radiogroup"
-                  aria-label="Markdown view"
+                  aria-label={isSvg ? "SVG view" : "Markdown view"}
                 >
                   <button
                     role="radio"
-                    aria-checked={showPreview}
-                    className={`weditor__seg-opt ${showPreview ? "is-active" : ""}`}
-                    title="Show the rendered document"
+                    aria-checked={isSvg ? showSvgPreview : showMdPreview}
+                    className={`weditor__seg-opt ${
+                      (isSvg ? showSvgPreview : showMdPreview)
+                        ? "is-active"
+                        : ""
+                    }`}
+                    title={
+                      isSvg
+                        ? "Show the rendered SVG"
+                        : "Show the rendered document"
+                    }
                     onClick={() => {
-                      if (!showPreview) toggleMdPreview(key, true);
+                      if (!(isSvg ? showSvgPreview : showMdPreview)) {
+                        toggleDocPreview(key, true);
+                      }
                     }}
                   >
                     Preview
                   </button>
                   <button
                     role="radio"
-                    aria-checked={!showPreview}
-                    className={`weditor__seg-opt ${!showPreview ? "is-active" : ""}`}
-                    title="Show the raw markdown source"
+                    aria-checked={isSvg ? !showSvgPreview : !showMdPreview}
+                    className={`weditor__seg-opt ${
+                      (isSvg ? !showSvgPreview : !showMdPreview)
+                        ? "is-active"
+                        : ""
+                    }`}
+                    title={
+                      isSvg
+                        ? "Show the raw SVG source"
+                        : "Show the raw markdown source"
+                    }
                     onClick={() => {
-                      if (showPreview) toggleMdPreview(key, false);
+                      if (isSvg ? showSvgPreview : showMdPreview) {
+                        toggleDocPreview(key, false);
+                      }
                     }}
                   >
                     Source
                   </button>
                 </div>
               )}
-              {isImage && key && (
+              {isImage && key && (!isSvg || showSvgPreview) && (
                 <div
                   className="weditor__seg"
                   role="group"
@@ -1088,36 +1167,38 @@ export function EditorArea({
                   </button>
                 </div>
               )}
-              {key && !media && !showPreview && (
-                <div
-                  className="weditor__wrap weditor__seg"
-                  role="radiogroup"
-                  aria-label="Line wrapping"
-                >
-                  <button
-                    role="radio"
-                    aria-checked={wrapped}
-                    className={`weditor__seg-opt ${wrapped ? "is-active" : ""}`}
-                    title="Wrap long lines to the editor width"
-                    onClick={() => {
-                      if (!wrapped) toggleWrap(key);
-                    }}
+              {key &&
+                (!media || (isSvg && !showSvgPreview)) &&
+                !showMdPreview && (
+                  <div
+                    className="weditor__wrap weditor__seg"
+                    role="radiogroup"
+                    aria-label="Line wrapping"
                   >
-                    Auto-wrap
-                  </button>
-                  <button
-                    role="radio"
-                    aria-checked={!wrapped}
-                    className={`weditor__seg-opt ${!wrapped ? "is-active" : ""}`}
-                    title="Keep long lines on one row and scroll sideways"
-                    onClick={() => {
-                      if (wrapped) toggleWrap(key);
-                    }}
-                  >
-                    No-wrap
-                  </button>
-                </div>
-              )}
+                    <button
+                      role="radio"
+                      aria-checked={wrapped}
+                      className={`weditor__seg-opt ${wrapped ? "is-active" : ""}`}
+                      title="Wrap long lines to the editor width"
+                      onClick={() => {
+                        if (!wrapped) toggleWrap(key);
+                      }}
+                    >
+                      Auto-wrap
+                    </button>
+                    <button
+                      role="radio"
+                      aria-checked={!wrapped}
+                      className={`weditor__seg-opt ${!wrapped ? "is-active" : ""}`}
+                      title="Keep long lines on one row and scroll sideways"
+                      onClick={() => {
+                        if (wrapped) toggleWrap(key);
+                      }}
+                    >
+                      No-wrap
+                    </button>
+                  </div>
+                )}
               {mode === "diff" && (
                 <div
                   className="weditor__seg"
@@ -1160,7 +1241,7 @@ export function EditorArea({
                   Open in editor
                 </button>
               )}
-              {mode === "edit" && key && !media && (
+              {mode === "edit" && key && (!media || isSvg) && (
                 <button
                   className="btn weditor__save"
                   disabled={!isDirty(key)}
@@ -1207,21 +1288,38 @@ export function EditorArea({
         <p className="hint">{oversizeNote}</p>
       )}
       {/* Editor mounts here; hidden (not unmounted) on binary/error states —
-          and while a markdown tab shows its rendered pane instead. */}
+          and while a markdown or SVG tab shows its preview pane instead. */}
       <div
         className="weditor__cm"
         ref={hostRef}
         style={{
-          display: status === "ready" && !showPreview ? "block" : "none",
+          display:
+            status === "ready" && !showMdPreview && !showSvgPreview
+              ? "block"
+              : "none",
         }}
       />
-      {showPreview && mdHtml?.for === key && (
+      {showMdPreview && mdHtml?.for === key && (
         <div
           ref={mdHostRef}
           className="weditor__md"
           onClick={onMdPaneClick}
           dangerouslySetInnerHTML={{ __html: mdHtml.html }}
         />
+      )}
+      {showSvgPreview && svgPreview?.for === key && (
+        <div ref={svgWrapRef} className="weditor__svg">
+          <img
+            ref={svgImgRef}
+            className="weditor__media"
+            src={svgPreview.url}
+            alt={path ? basename(path) : "SVG preview"}
+            onLoad={(e) => {
+              const wrap = svgWrapRef.current;
+              if (wrap) editors.applyZoom(e.currentTarget, wrap, zoom);
+            }}
+          />
+        </div>
       )}
       {status === "loading" && <p className="hint">Loading…</p>}
 
