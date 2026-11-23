@@ -437,6 +437,40 @@ describe("tagged browser transfers", () => {
   });
 });
 
+describe("openPreview", () => {
+  it("retypes an SVG blob so browsers render it", async () => {
+    mockFetch(
+      () =>
+        new Response('<svg xmlns="http://www.w3.org/2000/svg"/>', {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        }),
+    );
+
+    const preview = await openPreview(svc, "/host/logo.svg", "svg", 7);
+
+    const blob = vi.mocked(URL.createObjectURL).mock.calls[0][0] as Blob;
+    expect(blob.type).toBe("image/svg+xml");
+    preview.release();
+  });
+
+  it("leaves a raster preview's blob type as served", async () => {
+    mockFetch(
+      () =>
+        new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        }),
+    );
+
+    const preview = await openPreview(svc, "/host/pic.png", "png", 7);
+
+    const blob = vi.mocked(URL.createObjectURL).mock.calls[0][0] as Blob;
+    expect(blob.type).toBe("application/octet-stream");
+    preview.release();
+  });
+});
+
 describe("joinLocalPath", () => {
   it("joins with the separator the folder was spelled with", () => {
     expect(joinLocalPath("/Users/me/Downloads", "a.bin")).toBe(

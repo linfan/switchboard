@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_MAX_PREVIEW_BYTES, formatBytes, mediaForPath } from "./media";
+import {
+  DEFAULT_MAX_PREVIEW_BYTES,
+  formatBytes,
+  mediaForPath,
+  previewBlobType,
+} from "./media";
 
 describe("mediaForPath", () => {
   it("classifies images, audio, and video", () => {
@@ -16,6 +21,10 @@ describe("mediaForPath", () => {
       kind: "video",
       ext: "mp4",
     });
+    expect(mediaForPath("/a/logo.svg")).toEqual({
+      kind: "image",
+      ext: "svg",
+    });
   });
 
   it("ignores case and leading directories", () => {
@@ -27,8 +36,6 @@ describe("mediaForPath", () => {
   });
 
   it("returns null for text, unknown, and undecodable formats", () => {
-    // SVG is editable text, so it stays a CodeMirror tab.
-    expect(mediaForPath("/a/logo.svg")).toBeNull();
     expect(mediaForPath("/a/main.rs")).toBeNull();
     // Containers a webview can't decode aren't claimed as previewable.
     expect(mediaForPath("/a/movie.mkv")).toBeNull();
@@ -46,6 +53,15 @@ describe("DEFAULT_MAX_PREVIEW_BYTES", () => {
     const caps = DEFAULT_MAX_PREVIEW_BYTES;
     expect(caps.image).toBeLessThan(caps.audio);
     expect(caps.audio).toBeLessThan(caps.video);
+  });
+});
+
+describe("previewBlobType", () => {
+  it("retypes SVG for the browser preview path", () => {
+    expect(previewBlobType("svg")).toBe("image/svg+xml");
+    // Raster images and A/V are sniffed from the octet-stream response.
+    expect(previewBlobType("png")).toBeUndefined();
+    expect(previewBlobType("mp4")).toBeUndefined();
   });
 });
 

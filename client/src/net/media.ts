@@ -3,9 +3,10 @@
 //! video as `truncated` (NUL bytes / oversize), so the editor decides from the
 //! extension *before* fetching anything.
 //!
-//! Only formats a webview can actually decode are listed: `.svg` is deliberately
-//! absent (it's editable text, and opening it in CodeMirror is more useful), as
-//! are containers like `.mkv`/`.avi` that would render a broken element.
+//! Only formats a webview can actually render are listed: raster images, audio,
+//! video, and SVG (painted through `<img>`, where its scripts stay inert).
+//! Containers like `.mkv`/`.avi` are absent because they would render a broken
+//! element.
 
 /** What element previews a file: `<img>`, `<audio>`, or `<video>`. */
 export type MediaKind = "image" | "audio" | "video";
@@ -19,6 +20,7 @@ const EXTENSIONS: Record<string, MediaKind> = {
   bmp: "image",
   ico: "image",
   avif: "image",
+  svg: "image",
 
   mp3: "audio",
   wav: "audio",
@@ -62,6 +64,16 @@ export function mediaForPath(
   const ext = name.slice(dot + 1).toLowerCase();
   const kind = EXTENSIONS[ext];
   return kind ? { kind, ext } : null;
+}
+
+/**
+ * MIME type to label a browser preview's Blob with. The host's download endpoint
+ * sends every file as `application/octet-stream`; browsers sniff raster images,
+ * audio, and video from the bytes, but they refuse to render SVG unless it is
+ * typed `image/svg+xml`. `undefined` leaves the response's own type alone.
+ */
+export function previewBlobType(ext: string): string | undefined {
+  return ext === "svg" ? "image/svg+xml" : undefined;
 }
 
 /** Byte count as a short human-readable size, for the over-the-cap notice. */

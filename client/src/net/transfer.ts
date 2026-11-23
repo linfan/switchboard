@@ -19,6 +19,7 @@
 //! unmounts mid-transfer doesn't strand it.
 
 import type { ServiceRef } from "../store/types";
+import { previewBlobType } from "./media";
 import { listDir } from "./rest";
 import { cbFromPin, fromHex, hex, restSignHeaders, sha256 } from "./swbauth";
 import { assetUrl, invoke, isTauri } from "./tauri";
@@ -653,7 +654,11 @@ export async function openPreview(
 
   const res = await fetch(url, { headers });
   if (!res.ok) throw new Error(await errorText(res));
-  const objectUrl = URL.createObjectURL(await res.blob());
+  const blob = await res.blob();
+  const type = previewBlobType(ext);
+  const objectUrl = URL.createObjectURL(
+    type ? new Blob([blob], { type }) : blob,
+  );
   return { url: objectUrl, release: () => URL.revokeObjectURL(objectUrl) };
 }
 
