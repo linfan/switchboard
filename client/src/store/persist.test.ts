@@ -127,6 +127,7 @@ describe("persist round-trip through localStorage", () => {
       id: "f1",
       serviceId: "s1",
       localPort: 15432,
+      remoteHost: "10.0.0.12",
       remotePort: 5432,
       enabled: true,
     });
@@ -140,6 +141,7 @@ describe("persist round-trip through localStorage", () => {
         id: "f1",
         serviceId: "s1",
         localPort: 15432,
+        remoteHost: "10.0.0.12",
         remotePort: 5432,
         enabled: true,
       },

@@ -15,6 +15,7 @@ import {
 import { persistStorage } from "./storage";
 import {
   convKey,
+  DEFAULT_REMOTE_HOST,
   sortConversations,
   tabKey,
   type Conversation,
@@ -817,6 +818,14 @@ export const useStore = create<AppState>()(
         return {
           ...current,
           ...saved,
+          // Saves from before configurable remote hosts carry no `remoteHost`;
+          // normalize them so every rule has an explicit dial target.
+          portForwards: (saved.portForwards ?? current.portForwards).map(
+            (forward) => ({
+              ...forward,
+              remoteHost: forward.remoteHost || DEFAULT_REMOTE_HOST,
+            }),
+          ),
           settings: withSettingDefaults(saved.settings),
         };
       },

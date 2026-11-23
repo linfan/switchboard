@@ -1,7 +1,11 @@
 import { useMemo, useState } from "react";
 
 import { useStore } from "../store/store";
-import type { PortForward, Service } from "../store/types";
+import {
+  DEFAULT_REMOTE_HOST,
+  type PortForward,
+  type Service,
+} from "../store/types";
 import { Modal } from "./Modal";
 
 function parsePort(value: string): number | undefined {
@@ -11,6 +15,32 @@ function parsePort(value: string): number | undefined {
   return Number.isInteger(port) && port >= 1 && port <= 65_535
     ? port
     : undefined;
+}
+
+function isIpv4(value: string): boolean {
+  const parts = value.split(".");
+  return (
+    parts.length === 4 &&
+    parts.every(
+      (part) => /^(0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255,
+    )
+  );
+}
+
+function isIpv6(value: string): boolean {
+  if (!value.includes(":")) return false;
+  try {
+    new URL(`http://[${value}]/`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Parse a literal IPv4/IPv6 address, trimming incidental whitespace. */
+function parseHost(value: string): string | undefined {
+  const trimmed = value.trim();
+  return isIpv4(trimmed) || isIpv6(trimmed) ? trimmed : undefined;
 }
 
 export function PortForwardDialog({
@@ -28,12 +58,16 @@ export function PortForwardDialog({
   const [localPort, setLocalPort] = useState(
     forward ? String(forward.localPort) : "",
   );
+  const [remoteHost, setRemoteHost] = useState(
+    forward?.remoteHost ?? DEFAULT_REMOTE_HOST,
+  );
   const [remotePort, setRemotePort] = useState(
     forward ? String(forward.remotePort) : "",
   );
   const [enabled, setEnabled] = useState(forward?.enabled ?? true);
 
   const parsedLocalPort = parsePort(localPort);
+  const parsedRemoteHost = parseHost(remoteHost);
   const parsedRemotePort = parsePort(remotePort);
   const duplicate = useMemo(
     () =>
@@ -46,13 +80,16 @@ export function PortForwardDialog({
   const error =
     localPort.trim() !== "" && parsedLocalPort === undefined
       ? "Local port must be a whole number from 1 to 65535."
-      : remotePort.trim() !== "" && parsedRemotePort === undefined
-        ? "Remote port must be a whole number from 1 to 65535."
-        : duplicate
-          ? `127.0.0.1:${parsedLocalPort} is already used by another forward.`
-          : undefined;
+      : remoteHost.trim() !== "" && parsedRemoteHost === undefined
+        ? "Remote host must be an IPv4 or IPv6 address."
+        : remotePort.trim() !== "" && parsedRemotePort === undefined
+          ? "Remote port must be a whole number from 1 to 65535."
+          : duplicate
+            ? `127.0.0.1:${parsedLocalPort} is already used by another forward.`
+            : undefined;
   const valid =
     parsedLocalPort !== undefined &&
+    parsedRemoteHost !== undefined &&
     parsedRemotePort !== undefined &&
     !duplicate;
 
@@ -60,6 +97,7 @@ export function PortForwardDialog({
     if (
       !valid ||
       parsedLocalPort === undefined ||
+      parsedRemoteHost === undefined ||
       parsedRemotePort === undefined
     ) {
       return;
@@ -67,6 +105,7 @@ export function PortForwardDialog({
     const patch = {
       serviceId: service.id,
       localPort: parsedLocalPort,
+      remoteHost: parsedRemoteHost,
       remotePort: parsedRemotePort,
       enabled,
     };
@@ -97,7 +136,7 @@ export function PortForwardDialog({
         </>
       }
     >
-      <div className="forward-dialog__route" aria-label="Loopback-only route">
+      <div className="forward-dialog__route" aria-label="Forward route">
         <span>This computer</span>
         <span aria-hidden="true">→</span>
         <span>{service.name}</span>
@@ -124,9 +163,21 @@ export function PortForwardDialog({
       </label>
 
       <label className="field">
+        <span>Remote host</span>
+        <input
+          value={remoteHost}
+          placeholder={DEFAULT_REMOTE_HOST}
+          spellCheck={false}
+          aria-invalid={
+            remoteHost.trim() !== "" && parsedRemoteHost === undefined
+          }
+          onChange={(event) => setRemoteHost(event.target.value)}
+        />
+      </label>
+
+      <label className="field">
         <span>Remote port</span>
         <div className="forward-dialog__port">
-          <span>127.0.0.1:</span>
           <input
             value={remotePort}
             inputMode="numeric"
@@ -153,7 +204,8 @@ export function PortForwardDialog({
 
       {error && <p className="hint hint--error">{error}</p>}
       <p className="hint hint--muted">
-        Both endpoints are restricted to loopback addresses.
+        The remote host is dialed from {service.name}. Keep 127.0.0.1 for a
+        service on that machine; any other address is reached from there.
       </p>
     </Modal>
   );

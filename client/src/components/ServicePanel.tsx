@@ -11,6 +11,15 @@ import type {
 import { ConfirmButton } from "./ConfirmButton";
 import { PortForwardDialog } from "./PortForwardDialog";
 
+/** `host:port`, bracketing IPv6 literals without confusing the colon. */
+function hostPort(host: string, port: number): string {
+  return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === "::1" || host.startsWith("127.");
+}
+
 function ForwardIcon() {
   return (
     <svg
@@ -81,10 +90,12 @@ function ForwardRow({
           <span className="forward-row__arrow" aria-hidden="true">
             →
           </span>
-          <code>127.0.0.1:{forward.remotePort}</code>
+          <code>{hostPort(forward.remoteHost, forward.remotePort)}</code>
         </div>
         <span className="forward-row__scope">
-          local listener → remote loopback
+          {isLoopbackHost(forward.remoteHost)
+            ? "local listener → remote loopback"
+            : "local listener → remote host"}
         </span>
       </div>
 
@@ -287,7 +298,7 @@ export function ServicePanel({ service }: { service: Service }) {
           <div>
             <span className="service-panel__eyebrow">PORT FORWARDING</span>
             <p>
-              Expose a port on this computer to a loopback-only port on{" "}
+              Expose a port on this computer to a port reachable from{" "}
               {service.name}.
             </p>
           </div>
@@ -320,8 +331,8 @@ export function ServicePanel({ service }: { service: Service }) {
             <div>
               <strong>No port forwards</strong>
               <p>
-                Map a local loopback port to a service port without exposing
-                either endpoint externally.
+                Map a local port to a port dialed from the service — loopback on
+                that machine by default, or any IP it can reach.
               </p>
             </div>
             <button

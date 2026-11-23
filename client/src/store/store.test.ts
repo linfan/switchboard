@@ -382,6 +382,7 @@ describe("removeService", () => {
       id: "f1",
       serviceId: "s1",
       localPort: 3001,
+      remoteHost: "127.0.0.1",
       remotePort: 3000,
       enabled: true,
     });
@@ -654,6 +655,7 @@ describe("port forwards", () => {
       id: "f1",
       serviceId: "s1",
       localPort: 5433,
+      remoteHost: "127.0.0.1",
       remotePort: 5432,
       enabled: true,
     });
@@ -665,6 +667,7 @@ describe("port forwards", () => {
         id: "f1",
         serviceId: "s1",
         localPort: 6433,
+        remoteHost: "127.0.0.1",
         remotePort: 5432,
         enabled: false,
       },

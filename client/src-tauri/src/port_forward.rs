@@ -53,10 +53,17 @@ pub struct PortForwardConfig {
     pub id: String,
     pub local_port: u16,
     pub remote_port: u16,
+    /// IP dialed from the hosting worker; loopback mirrors pre-existing rules.
+    #[serde(default = "default_remote_host")]
+    pub remote_host: String,
     pub service_url: String,
     pub token: String,
     pub tag: Option<Tag>,
     pub cert_fingerprint: Option<String>,
+}
+
+fn default_remote_host() -> String {
+    switchboard_shared::port_forward::DEFAULT_REMOTE_HOST.into()
 }
 
 #[derive(Serialize)]
@@ -175,6 +182,9 @@ fn validate_config(config: &PortForwardConfig) -> Result<(), String> {
     }
     if config.local_port == 0 || config.remote_port == 0 {
         return Err("local and remote ports must be nonzero".into());
+    }
+    if config.remote_host.parse::<std::net::IpAddr>().is_err() {
+        return Err("remote host must be an IPv4 or IPv6 address".into());
     }
     if config.token.is_empty() {
         return Err("service token cannot be empty".into());
@@ -307,6 +317,7 @@ async fn run_session_manager(
                 socket,
                 &mut accepted_rx,
                 &mut stop_rx,
+                &config.remote_host,
                 config.remote_port,
                 active_connections.clone(),
                 last_error.clone(),
@@ -366,6 +377,7 @@ async fn run_connected(
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     accepted_rx: &mut mpsc::Receiver<TcpStream>,
     stop_rx: &mut watch::Receiver<bool>,
+    remote_host: &str,
     remote_port: u16,
     active_connections: Arc<AtomicUsize>,
     last_error: LastError,
@@ -425,6 +437,7 @@ async fn run_connected(
                     let task = tokio::spawn(bridge_local(
                         stream,
                         stream_id,
+                        remote_host.to_string(),
                         remote_port,
                         in_rx,
                         out_tx.clone(),
@@ -510,6 +523,7 @@ impl Drop for LocalStream {
 async fn bridge_local(
     stream: TcpStream,
     stream_id: u64,
+    remote_host: String,
     remote_port: u16,
     mut remote_rx: mpsc::Receiver<PortForwardFrame>,
     out_tx: mpsc::Sender<Outbound>,
@@ -523,10 +537,16 @@ async fn bridge_local(
     let mut remote_finished = false;
     let mut reset = false;
 
+    // Omit the default so an older worker that only knows `[port]` still serves
+    // ordinary loopback rules.
+    let remote_host = (remote_host != switchboard_shared::port_forward::DEFAULT_REMOTE_HOST)
+        .then_some(remote_host);
+
     if out_tx
         .send(Outbound::Frame(PortForwardFrame::Open {
             stream_id,
             remote_port,
+            remote_host,
         }))
         .await
         .is_err()
@@ -721,7 +741,7 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::{mpsc, oneshot, watch};
 
-    use super::{forward_url, run_connected, with_jitter};
+    use super::{forward_url, run_connected, validate_config, with_jitter};
     use switchboard_shared::tunnel::Tag;
 
     #[test]
@@ -748,6 +768,31 @@ mod tests {
             let delay = with_jitter(base);
             assert!(delay >= base && delay <= base + base / 4);
         }
+    }
+
+    #[test]
+    fn rejects_non_ip_remote_hosts() {
+        let config = super::PortForwardConfig {
+            id: "f1".into(),
+            local_port: 15_432,
+            remote_port: 5432,
+            remote_host: "db.internal".into(),
+            service_url: "http://127.0.0.1:8787".into(),
+            token: "t".into(),
+            tag: None,
+            cert_fingerprint: None,
+        };
+        assert!(validate_config(&config).is_err());
+        assert!(validate_config(&super::PortForwardConfig {
+            remote_host: "127.0.0.1".into(),
+            ..config.clone()
+        })
+        .is_ok());
+        assert!(validate_config(&super::PortForwardConfig {
+            remote_host: "::1".into(),
+            ..config
+        })
+        .is_ok());
     }
 
     async fn wait_for(counter: &AtomicUsize, expected: usize) {
@@ -803,6 +848,7 @@ mod tests {
                 socket,
                 &mut accepted_rx,
                 &mut stop_rx,
+                "127.0.0.1",
                 1,
                 session_counter,
                 last_error,

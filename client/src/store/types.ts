@@ -51,15 +51,23 @@ export interface Workspace {
   worktree?: boolean;
 }
 
-/** A local loopback listener mapped to a loopback port on one hosting service. */
+/** Remote host a forward dials when the rule does not name one. */
+export const DEFAULT_REMOTE_HOST = "127.0.0.1";
+
+/** A local loopback listener mapped to a port dialed by one hosting service. */
 export interface PortForward {
   /** Stable client-generated id. */
   id: string;
-  /** Hosting service whose worker owns the remote loopback target. */
+  /** Hosting service whose worker dials the remote target. */
   serviceId: string;
   /** Port bound as 127.0.0.1:<localPort> on this machine. */
   localPort: number;
-  /** Port dialed as 127.0.0.1:<remotePort> on the hosting worker. */
+  /**
+   * IP dialed on the hosting worker. `127.0.0.1` targets that machine itself;
+   * any other address is reached from there (e.g. a database on its LAN).
+   */
+  remoteHost: string;
+  /** Port dialed at `remoteHost` on the hosting worker. */
   remotePort: number;
   /** Whether the native listener should be running. */
   enabled: boolean;

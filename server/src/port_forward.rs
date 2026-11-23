@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use axum::{
@@ -28,7 +29,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Per-session cap on concurrent TCP streams. Each stream owns a worker-side
 /// socket and a bridge task, so an unbounded map lets a local process (or a
 /// buggy client) exhaust the worker's fds. 256 covers browsers and connection
-/// pools over a loopback forward with plenty of headroom.
+/// pools over one forward with plenty of headroom.
 const MAX_STREAMS: usize = 256;
 
 pub async fn handler(State(state): State<SharedState>, ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -93,7 +94,7 @@ pub async fn run_session(mut rx: mpsc::Receiver<Vec<u8>>, out_tx: mpsc::Sender<V
                     }
                 };
                 match frame {
-                    PortForwardFrame::Open { stream_id, remote_port } => {
+                    PortForwardFrame::Open { stream_id, remote_port, remote_host } => {
                         if remote_port == 0 {
                             if !send(&out_tx, PortForwardFrame::OpenErr {
                                 stream_id,
@@ -103,6 +104,21 @@ pub async fn run_session(mut rx: mpsc::Receiver<Vec<u8>>, out_tx: mpsc::Sender<V
                             }
                             continue;
                         }
+                        let remote_ip = match remote_host.as_deref() {
+                            None => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                            Some(host) => match host.parse::<IpAddr>() {
+                                Ok(ip) => ip,
+                                Err(_) => {
+                                    if !send(&out_tx, PortForwardFrame::OpenErr {
+                                        stream_id,
+                                        message: format!("invalid remote host {host:?}"),
+                                    }).await {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                            },
+                        };
                         if streams.contains_key(&stream_id) {
                             if !send(&out_tx, PortForwardFrame::Rst { stream_id }).await {
                                 break;
@@ -132,6 +148,7 @@ pub async fn run_session(mut rx: mpsc::Receiver<Vec<u8>>, out_tx: mpsc::Sender<V
                         let task = tokio::spawn(bridge_remote(
                             stream_id,
                             generation,
+                            remote_ip,
                             remote_port,
                             stream_rx,
                             event_tx.clone(),
@@ -312,13 +329,14 @@ impl BridgeEvent {
 async fn bridge_remote(
     stream_id: u64,
     generation: u64,
+    remote_ip: IpAddr,
     remote_port: u16,
     mut client_rx: mpsc::Receiver<ClientEvent>,
     event_tx: mpsc::Sender<BridgeEvent>,
 ) {
     let stream = match timeout(
         CONNECT_TIMEOUT,
-        TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, remote_port)),
+        TcpStream::connect(SocketAddr::new(remote_ip, remote_port)),
     )
     .await
     {
@@ -457,7 +475,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxies_loopback_tcp_and_preserves_half_close() {
+    async fn proxies_tcp_to_the_requested_host_and_preserves_half_close() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let echo = tokio::spawn(async move {
@@ -478,6 +496,7 @@ mod tests {
                 PortForwardFrame::Open {
                     stream_id,
                     remote_port: port,
+                    remote_host: Some("127.0.0.1".into()),
                 }
                 .encode(),
             )
@@ -521,6 +540,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_non_ip_remote_hosts() {
+        let (in_tx, in_rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let session = tokio::spawn(run_session(in_rx, out_tx));
+
+        let stream_id = 9;
+        in_tx
+            .send(
+                PortForwardFrame::Open {
+                    stream_id,
+                    remote_port: 5432,
+                    remote_host: Some("db.internal".into()),
+                }
+                .encode(),
+            )
+            .await
+            .unwrap();
+        match next_frame(&mut out_rx).await {
+            PortForwardFrame::OpenErr {
+                stream_id: id,
+                message,
+            } => {
+                assert_eq!(id, stream_id);
+                assert!(
+                    message.contains("invalid remote host"),
+                    "unexpected: {message}"
+                );
+            }
+            other => panic!("expected OpenErr, got {other:?}"),
+        }
+
+        drop(in_tx);
+        session.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn a_stalled_stream_does_not_block_the_session() {
         // A target that accepts but never reads: its bridge eventually wedges in
         // `write_all` and its 64-slot inbound queue fills.
@@ -552,6 +607,7 @@ mod tests {
                 PortForwardFrame::Open {
                     stream_id: stalled_id,
                     remote_port: stalled_port,
+                    remote_host: None,
                 }
                 .encode(),
             )
@@ -588,6 +644,7 @@ mod tests {
                     PortForwardFrame::Open {
                         stream_id: healthy_id,
                         remote_port: echo_port,
+                        remote_host: None,
                     }
                     .encode(),
                 )
@@ -673,7 +730,15 @@ mod tests {
         let probe = Probe(finished.clone());
         let task = tokio::spawn(async move {
             let _probe = probe;
-            bridge_remote(0, 0, port, stream_rx, event_tx).await;
+            bridge_remote(
+                0,
+                0,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port,
+                stream_rx,
+                event_tx,
+            )
+            .await;
         });
         assert!(matches!(
             event_rx.recv().await.unwrap(),
@@ -736,6 +801,7 @@ mod tests {
                     PortForwardFrame::Open {
                         stream_id,
                         remote_port: port,
+                        remote_host: None,
                     }
                     .encode(),
                 )
@@ -753,6 +819,7 @@ mod tests {
                 PortForwardFrame::Open {
                     stream_id: rejected,
                     remote_port: port,
+                    remote_host: None,
                 }
                 .encode(),
             )
@@ -779,6 +846,7 @@ mod tests {
                 PortForwardFrame::Open {
                     stream_id: rejected + 1,
                     remote_port: port,
+                    remote_host: None,
                 }
                 .encode(),
             )

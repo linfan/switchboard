@@ -3,8 +3,14 @@
 //! ```text
 //! [kind:1][stream_id:u64][payload...]
 //! ```
+//!
+//! An `Open` payload is `[port:u16][host?]`, where the trailing host is UTF-8.
+//! A payload of exactly two bytes means the default loopback host, so frames
+//! from builds that predate configurable remote hosts keep decoding unchanged.
 
 use std::fmt;
+
+pub const DEFAULT_REMOTE_HOST: &str = "127.0.0.1";
 
 pub const KIND_OPEN: u8 = 0x01;
 pub const KIND_OPEN_OK: u8 = 0x02;
@@ -15,17 +21,35 @@ pub const KIND_RST: u8 = 0x12;
 
 const STREAM_LEN: usize = 8;
 const PORT_LEN: usize = 2;
+/// Plenty for any IPv4/IPv6 literal; also keeps a malicious frame bounded.
+pub const MAX_HOST_LEN: usize = 255;
 pub const MAX_ERROR_LEN: usize = 1024;
 pub const MAX_DATA_LEN: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortForwardFrame {
-    Open { stream_id: u64, remote_port: u16 },
-    OpenOk { stream_id: u64 },
-    OpenErr { stream_id: u64, message: String },
-    Data { stream_id: u64, data: Vec<u8> },
-    Fin { stream_id: u64 },
-    Rst { stream_id: u64 },
+    Open {
+        stream_id: u64,
+        remote_port: u16,
+        remote_host: Option<String>,
+    },
+    OpenOk {
+        stream_id: u64,
+    },
+    OpenErr {
+        stream_id: u64,
+        message: String,
+    },
+    Data {
+        stream_id: u64,
+        data: Vec<u8>,
+    },
+    Fin {
+        stream_id: u64,
+    },
+    Rst {
+        stream_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +60,8 @@ pub enum PortForwardError {
     DataTooLong,
     ErrorTooLong,
     InvalidErrorText,
+    HostTooLong,
+    InvalidHostText,
 }
 
 impl fmt::Display for PortForwardError {
@@ -47,6 +73,8 @@ impl fmt::Display for PortForwardError {
             Self::DataTooLong => write!(f, "port-forward data frame exceeds the limit"),
             Self::ErrorTooLong => write!(f, "port-forward error message exceeds the limit"),
             Self::InvalidErrorText => write!(f, "port-forward error message is not UTF-8"),
+            Self::HostTooLong => write!(f, "port-forward remote host exceeds the limit"),
+            Self::InvalidHostText => write!(f, "port-forward remote host is not UTF-8"),
         }
     }
 }
@@ -70,9 +98,12 @@ impl PortForwardFrame {
             Self::Open {
                 stream_id,
                 remote_port,
+                remote_host,
             } => {
-                let mut out = header(KIND_OPEN, *stream_id, PORT_LEN);
+                let host = remote_host.as_deref().unwrap_or_default();
+                let mut out = header(KIND_OPEN, *stream_id, PORT_LEN + host.len());
                 out.extend_from_slice(&remote_port.to_be_bytes());
+                out.extend_from_slice(host.as_bytes());
                 out
             }
             Self::OpenOk { stream_id } => header(KIND_OPEN_OK, *stream_id, 0),
@@ -103,14 +134,27 @@ impl PortForwardFrame {
 
         match kind {
             KIND_OPEN => {
-                if payload.len() != PORT_LEN {
+                if payload.len() < PORT_LEN {
                     return Err(PortForwardError::InvalidPayload);
                 }
                 let mut port = [0; PORT_LEN];
-                port.copy_from_slice(payload);
+                port.copy_from_slice(&payload[..PORT_LEN]);
+                let host = &payload[PORT_LEN..];
+                let remote_host = if host.is_empty() {
+                    None
+                } else {
+                    if host.len() > MAX_HOST_LEN {
+                        return Err(PortForwardError::HostTooLong);
+                    }
+                    Some(
+                        String::from_utf8(host.to_vec())
+                            .map_err(|_| PortForwardError::InvalidHostText)?,
+                    )
+                };
                 Ok(Self::Open {
                     stream_id,
                     remote_port: u16::from_be_bytes(port),
+                    remote_host,
                 })
             }
             KIND_OPEN_OK if payload.is_empty() => Ok(Self::OpenOk { stream_id }),
@@ -154,6 +198,17 @@ mod tests {
             PortForwardFrame::Open {
                 stream_id: STREAM,
                 remote_port: 5432,
+                remote_host: None,
+            },
+            PortForwardFrame::Open {
+                stream_id: STREAM,
+                remote_port: 5432,
+                remote_host: Some("10.1.2.3".into()),
+            },
+            PortForwardFrame::Open {
+                stream_id: STREAM,
+                remote_port: 5432,
+                remote_host: Some("::1".into()),
             },
             PortForwardFrame::OpenOk { stream_id: STREAM },
             PortForwardFrame::OpenErr {
@@ -185,6 +240,27 @@ mod tests {
         assert_eq!(
             PortForwardFrame::decode(&[KIND_OPEN, 0, 0, 0, 0, 0, 0, 0, 1]),
             Err(PortForwardError::InvalidPayload)
+        );
+        // A two-byte Open payload predates remote hosts and means loopback.
+        let legacy = [KIND_OPEN, 0, 0, 0, 0, 0, 0, 0, 1, 0x15, 0x38];
+        assert_eq!(
+            PortForwardFrame::decode(&legacy),
+            Ok(PortForwardFrame::Open {
+                stream_id: 1,
+                remote_port: 5432,
+                remote_host: None,
+            })
+        );
+        let mut oversized = vec![KIND_OPEN, 0, 0, 0, 0, 0, 0, 0, 1, 0, 53];
+        oversized.extend(vec![b'a'; MAX_HOST_LEN + 1]);
+        assert_eq!(
+            PortForwardFrame::decode(&oversized),
+            Err(PortForwardError::HostTooLong)
+        );
+        let invalid = [KIND_OPEN, 0, 0, 0, 0, 0, 0, 0, 1, 0, 53, 0xff];
+        assert_eq!(
+            PortForwardFrame::decode(&invalid),
+            Err(PortForwardError::InvalidHostText)
         );
     }
 }

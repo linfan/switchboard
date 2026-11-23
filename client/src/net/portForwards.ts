@@ -7,6 +7,7 @@ const POLL_MS = 2000;
 export interface NativePortForwardConfig {
   id: string;
   localPort: number;
+  remoteHost: string;
   remotePort: number;
   serviceUrl: string;
   token: string;
@@ -44,6 +45,7 @@ export function nativeConfig(
   return {
     id: forward.id,
     localPort: forward.localPort,
+    remoteHost: forward.remoteHost,
     remotePort: forward.remotePort,
     serviceUrl: service.url,
     token: service.token,
@@ -55,6 +57,7 @@ export function nativeConfig(
 function configKey(forward: PortForward, service: Service): string {
   return [
     forward.localPort,
+    forward.remoteHost,
     forward.remotePort,
     service.url,
     service.token,

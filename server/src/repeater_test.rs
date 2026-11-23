@@ -646,6 +646,7 @@ async fn tcp_forwarding_through_repeater() {
         PortForwardFrame::Open {
             stream_id,
             remote_port: port,
+            remote_host: None,
         }
         .encode(),
     ))
@@ -721,6 +722,7 @@ async fn tcp_forwarding_is_isolated_by_tag() {
             PortForwardFrame::Open {
                 stream_id: 17,
                 remote_port,
+                remote_host: None,
             }
             .encode(),
         ))

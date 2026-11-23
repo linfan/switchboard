@@ -21,6 +21,7 @@ const forward: PortForward = {
   id: "f1",
   serviceId: service.id,
   localPort: 5433,
+  remoteHost: "127.0.0.1",
   remotePort: 5432,
   enabled: true,
 };
@@ -47,12 +48,19 @@ describe("nativeConfig", () => {
     expect(nativeConfig(forward, service)).toEqual({
       id: "f1",
       localPort: 5433,
+      remoteHost: "127.0.0.1",
       remotePort: 5432,
       serviceUrl: "https://worker.test",
       token: "secret",
       tag: "worker-a",
       certFingerprint: "aabb",
     });
+  });
+
+  it("passes a configured non-loopback remote host to the native listener", () => {
+    expect(
+      nativeConfig({ ...forward, remoteHost: "10.0.0.12" }, service).remoteHost,
+    ).toBe("10.0.0.12");
   });
 
   it("keeps TAG absent for direct services", () => {
@@ -140,6 +148,41 @@ describe("PortForwardCoordinator", () => {
     expect(bridge.stop).toHaveBeenCalledWith("f1");
     expect(bridge.start).toHaveBeenLastCalledWith(
       expect.objectContaining({ tag: "worker-b" }),
+    );
+    coordinator.stop();
+  });
+
+  it("stops and rebuilds the native session when the remote host changes", async () => {
+    const bridge: PortForwardBridge = {
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+      list: vi.fn(async () => [
+        {
+          id: "f1",
+          localPort: 5433,
+          remotePort: 5432,
+          activeConnections: 0,
+          connected: true,
+          lastError: null,
+        },
+      ]),
+    };
+    const coordinator = new PortForwardCoordinator({
+      bridge,
+      desktop: () => true,
+      pollMs: 60_000,
+    });
+    useStore.getState().addService(service);
+    useStore.getState().addPortForward(forward);
+    coordinator.start();
+    await settle();
+
+    useStore.getState().updatePortForward("f1", { remoteHost: "10.0.0.12" });
+    await settle();
+
+    expect(bridge.stop).toHaveBeenCalledWith("f1");
+    expect(bridge.start).toHaveBeenLastCalledWith(
+      expect.objectContaining({ remoteHost: "10.0.0.12" }),
     );
     coordinator.stop();
   });
