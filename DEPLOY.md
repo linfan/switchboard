@@ -424,6 +424,10 @@ directories, then write a daemon plist,
     </array>
     <key>WorkingDirectory</key>
     <string>/opt/switchboard</string>
+    <key>StandardErrorPath</key>
+    <string>/opt/switchboard/logs/error.log</string>
+    <key>StandardOutPath</key>
+    <string>/opt/switchboard/logs/output.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>SWITCHBOARD_ADDR</key>
