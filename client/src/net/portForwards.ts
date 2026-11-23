@@ -24,6 +24,10 @@ export interface NativePortForwardStatus {
   connected: boolean;
   /** Last connect/open/auth failure, kept until the link recovers. */
   lastError?: string | null;
+  /** Cumulative application bytes local→remote since the listener started. */
+  bytesUp: number;
+  /** Cumulative application bytes remote→local since the listener started. */
+  bytesDown: number;
 }
 
 export interface PortForwardBridge {
@@ -86,6 +90,11 @@ export class PortForwardCoordinator {
   private started = false;
   private syncing = false;
   private resync = false;
+  /** Last cumulative counters per forward, so each poll can derive a rate. */
+  private counters = new Map<
+    string,
+    { at: number; up: number; down: number }
+  >();
 
   constructor({
     bridge = nativeBridge,
@@ -121,6 +130,7 @@ export class PortForwardCoordinator {
     this.poll = null;
     const ids = [...this.active.keys()];
     this.active.clear();
+    this.counters.clear();
     if (this.desktop()) void Promise.all(ids.map((id) => this.bridge.stop(id)));
   }
 
@@ -239,11 +249,13 @@ export class PortForwardCoordinator {
     }
 
     const byId = new Map(statuses.map((status) => [status.id, status]));
+    const now = Date.now();
     let restart = false;
     for (const [id] of this.active) {
       const status = byId.get(id);
       if (!status) {
         this.active.delete(id);
+        this.counters.delete(id);
         useStore.getState().setPortForwardRuntime(id, {
           status: "stopped",
           activeConnections: 0,
@@ -251,9 +263,32 @@ export class PortForwardCoordinator {
         restart = true;
         continue;
       }
+      // A restarted listener begins at zero; drop the stale baseline instead
+      // of reporting a negative or wildly spurious rate.
+      const prev = this.counters.get(id);
+      const valid =
+        prev !== undefined &&
+        status.bytesUp >= prev.up &&
+        status.bytesDown >= prev.down;
+      const span = prev ? now - prev.at : 0;
+      const upBps =
+        valid && span > 0
+          ? Math.round(((status.bytesUp - prev.up) * 1000) / span)
+          : 0;
+      const downBps =
+        valid && span > 0
+          ? Math.round(((status.bytesDown - prev.down) * 1000) / span)
+          : 0;
+      this.counters.set(id, {
+        at: now,
+        up: status.bytesUp,
+        down: status.bytesDown,
+      });
       const runtime: PortForwardRuntime = {
         status: status.connected ? "active" : "reconnecting",
         activeConnections: status.activeConnections,
+        upBps,
+        downBps,
       };
       if (status.lastError) runtime.error = status.lastError;
       useStore.getState().setPortForwardRuntime(id, runtime);

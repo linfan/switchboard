@@ -81,6 +81,10 @@ export interface PortForwardRuntime {
   status: PortForwardStatus;
   activeConnections: number;
   error?: string;
+  /** Live remote→local rate in bytes/sec, from the native byte counters. */
+  downBps?: number;
+  /** Live local→remote rate in bytes/sec, from the native byte counters. */
+  upBps?: number;
 }
 
 /** Live connection state for a service (not persisted). */

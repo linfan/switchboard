@@ -84,6 +84,12 @@ export interface StatusMeta {
   downlinkBps?: number;
 }
 
+/** Cumulative application bytes over the life of one connection manager. */
+export interface TrafficSnapshot {
+  inBytes: number;
+  outBytes: number;
+}
+
 export interface ConnectionDeps {
   clientId: string;
   /** HTTP base URL, e.g. `http://127.0.0.1:8787`. */
@@ -210,6 +216,9 @@ export class ConnectionManager {
   /** Inbound frames seen since the last ping, and when the last one arrived. */
   private inboundSincePing = 0;
   private inboundBytesSincePing = 0;
+  /** Lifetime link bytes, read by the status page to derive rates. */
+  private inboundBytesTotal = 0;
+  private outboundBytesTotal = 0;
   private lastInboundAt = 0;
   private lastRttMs: number | null = null;
   /** Consecutive pongs that arrived too late; drives status and log throttling. */
@@ -268,13 +277,16 @@ export class ConnectionManager {
   /** Send a client message if the connection is live. Returns whether it went. */
   send(msg: ClientMsg): boolean {
     if (!this.canSend()) return false;
-    this.ws!.send(JSON.stringify(msg));
+    const payload = JSON.stringify(msg);
+    this.outboundBytesTotal += payload.length;
+    this.ws!.send(payload);
     return true;
   }
 
   /** Send a raw binary data-plane frame (e.g. an INPUT keystroke frame). */
   sendBytes(bytes: Uint8Array): boolean {
     if (!this.canSend()) return false;
+    this.outboundBytesTotal += bytes.length;
     this.ws!.send(bytes);
     return true;
   }
@@ -315,6 +327,14 @@ export class ConnectionManager {
 
   getStatus(): ConnStatus {
     return this.status;
+  }
+
+  /** Cumulative bytes over this link; the status page differences them. */
+  trafficSnapshot(): TrafficSnapshot {
+    return {
+      inBytes: this.inboundBytesTotal,
+      outBytes: this.outboundBytesTotal,
+    };
   }
 
   // --- internals ----------------------------------------------------------
@@ -358,7 +378,9 @@ export class ConnectionManager {
   private onData(data: unknown): void {
     this.lastInboundAt = this.now();
     this.inboundSincePing += 1;
-    this.inboundBytesSincePing += dataBytes(data);
+    const size = dataBytes(data);
+    this.inboundBytesSincePing += size;
+    this.inboundBytesTotal += size;
     // Binary frames are the terminal data plane; hand them off untouched.
     if (data instanceof ArrayBuffer) {
       this.d.onBinary(new Uint8Array(data));

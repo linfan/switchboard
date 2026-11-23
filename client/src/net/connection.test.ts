@@ -269,6 +269,33 @@ describe("handshake", () => {
     mgr.stop();
   });
 
+  it("counts link bytes in both directions for the status page", async () => {
+    const { mgr } = mkManager();
+    mgr.start();
+    const s = FakeSocket.last();
+    await driveSession(s);
+    const base = mgr.trafficSnapshot();
+
+    const input = new Uint8Array([1, 2, 3]);
+    expect(mgr.sendInput("11111111-2222-3333-4444-555555555555", input)).toBe(
+      true,
+    );
+    mgr.send({ type: "ping", ts: 123 });
+    s.emitBinary(new Uint8Array(5));
+
+    const after = mgr.trafficSnapshot();
+    // An INPUT frame is one kind byte, the 16-byte task id, then the payload.
+    expect(after.outBytes - base.outBytes).toBe(
+      1 + 16 + input.length + JSON.stringify({ type: "ping", ts: 123 }).length,
+    );
+    expect(after.inBytes - base.inBytes).toBe(5);
+
+    // Counters stop moving once the link is torn down.
+    mgr.stop();
+    expect(mgr.sendBytes(new Uint8Array([9]))).toBe(false);
+    expect(mgr.trafficSnapshot()).toEqual(after);
+  });
+
   it("refuses data-plane frames on an open but unauthenticated socket", () => {
     // The server discards binary frames until Hello completes, so writing here
     // would lose the keystrokes silently rather than deliver them early.

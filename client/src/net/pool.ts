@@ -5,7 +5,7 @@
 import type { ClientMsg, ServerMsg } from "../protocol";
 import type { Settings } from "../store/settings";
 import { useStore } from "../store/store";
-import { ConnectionManager } from "./connection";
+import { ConnectionManager, type TrafficSnapshot } from "./connection";
 import { decode } from "./frame";
 import { isTauri } from "./tauri";
 import { makeTauriWsFactory } from "./tauriSocket";
@@ -201,6 +201,11 @@ export class ConnectionPool {
 
   reconnect(serviceId: string): void {
     this.managers.get(serviceId)?.reconnectNow();
+  }
+
+  /** Cumulative link bytes for a service, sampled by the status page. */
+  traffic(serviceId: string): TrafficSnapshot | undefined {
+    return this.managers.get(serviceId)?.trafficSnapshot();
   }
 
   private send(serviceId: string, msg: ClientMsg): boolean {

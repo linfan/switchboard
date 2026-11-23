@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import { pool } from "../net/pool";
 import { isTauri } from "../net/tauri";
 import { useStore } from "../store/store";
 import type {
@@ -112,6 +113,12 @@ function ForwardRow({
             {connections} {connections === 1 ? "connection" : "connections"}
           </span>
         )}
+        {(status === "active" || status === "reconnecting") && (
+          <span className="forward-row__traffic">
+            ↓ {formatRate(runtime?.downBps ?? 0)} · ↑{" "}
+            {formatRate(runtime?.upBps ?? 0)}
+          </span>
+        )}
         {runtime?.error && (
           <span className="forward-row__error" title={runtime.error}>
             {runtime.error}
@@ -170,6 +177,65 @@ function formatRate(bps?: number): string {
   return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
 }
 
+const RATE_INTERVAL_MS = 1000;
+/** Rates average over a ~3 s window, so one burst doesn't pin the readout. */
+const RATE_WINDOW_MS = 3000;
+const RATE_MIN_SPAN_MS = 500;
+
+interface LinkRates {
+  downBps: number;
+  upBps: number;
+}
+
+/**
+ * Live up/down rate of the service's main link, resumed from the manager's
+ * cumulative byte counters. Sampled here (only while the page is open) so an
+ * idle panel never touches the store or the connection.
+ */
+function useLinkRates(serviceId: string): LinkRates {
+  const samples = useRef<{ at: number; down: number; up: number }[]>([]);
+  const [rates, setRates] = useState<LinkRates>({ downBps: 0, upBps: 0 });
+
+  useEffect(() => {
+    samples.current = [];
+    const sample = () => {
+      const snap = pool.traffic(serviceId);
+      if (!snap) {
+        samples.current = [];
+        return;
+      }
+      const at = Date.now();
+      const list = samples.current;
+      const last = list[list.length - 1];
+      // A rebuilt manager restarts its counters; drop the stale baseline.
+      if (last && (snap.inBytes < last.down || snap.outBytes < last.up)) {
+        list.length = 0;
+      }
+      list.push({ at, down: snap.inBytes, up: snap.outBytes });
+      while (list.length > 2 && at - list[0].at > RATE_WINDOW_MS) list.shift();
+      const base = list[0];
+      const span = at - base.at;
+      const next: LinkRates =
+        span >= RATE_MIN_SPAN_MS
+          ? {
+              downBps: Math.round(((snap.inBytes - base.down) * 1000) / span),
+              upBps: Math.round(((snap.outBytes - base.up) * 1000) / span),
+            }
+          : { downBps: 0, upBps: 0 };
+      setRates((prev) =>
+        prev.downBps === next.downBps && prev.upBps === next.upBps
+          ? prev
+          : next,
+      );
+    };
+    sample();
+    const timer = setInterval(sample, RATE_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [serviceId]);
+
+  return rates;
+}
+
 /** Re-render once a second while `active`, so countdowns stay live. */
 function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -191,6 +257,7 @@ export function ServicePanel({ service }: { service: Service }) {
   const status = rt?.status ?? "offline";
   const dotKind = rt?.degraded ? "degraded" : status;
   const now = useNow(status === "reconnecting");
+  const rates = useLinkRates(service.id);
 
   const forwards = portForwards.filter(
     (forward) => forward.serviceId === service.id,
@@ -244,9 +311,20 @@ export function ServicePanel({ service }: { service: Service }) {
                 {rt?.degraded && " · downlink congested"}
               </dd>
             </div>
+            <div className="service-panel__row">
+              <dt>Traffic</dt>
+              <dd className="service-panel__traffic">
+                <span title="downlink: server → this device">
+                  ↓ {formatRate(rates.downBps)}
+                </span>
+                <span title="uplink: this device → server">
+                  ↑ {formatRate(rates.upBps)}
+                </span>
+              </dd>
+            </div>
             {rt?.degraded && (
               <div className="service-panel__row">
-                <dt>Downlink</dt>
+                <dt>Congestion</dt>
                 <dd>~{formatRate(rt.downlinkBps)} received</dd>
               </div>
             )}

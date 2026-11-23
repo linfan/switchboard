@@ -1638,6 +1638,14 @@ audio.weditor__media {
 .service-panel__conn--offline {
   color: #f85149;
 }
+.service-panel__traffic {
+  display: flex;
+  gap: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.service-panel__traffic span {
+  white-space: nowrap;
+}
 .service-panel__row--error dd {
   color: #f85149;
 }
@@ -1822,6 +1830,13 @@ audio.weditor__media {
   color: var(--fg-dim);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10px;
+  white-space: nowrap;
+}
+.forward-row__traffic {
+  color: var(--fg-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 .forward-row__actions {

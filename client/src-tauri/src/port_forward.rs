@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -75,6 +75,10 @@ pub struct PortForwardStatus {
     pub active_connections: usize,
     pub connected: bool,
     pub last_error: Option<String>,
+    /// Cumulative application bytes local → remote (the client's upload).
+    pub bytes_up: u64,
+    /// Cumulative application bytes remote → local (the client's download).
+    pub bytes_down: u64,
 }
 
 #[derive(Default)]
@@ -88,11 +92,31 @@ pub fn new_state() -> PortForwardState {
     Arc::new(PortForwardInner::default())
 }
 
+/// Live counters for one forward. Cloned by reference into the session and each
+/// local bridge, so `list_port_forwards` can report them without joining tasks.
+#[derive(Clone)]
+struct ForwardStats {
+    active_connections: Arc<AtomicUsize>,
+    connected: Arc<AtomicBool>,
+    bytes_up: Arc<AtomicU64>,
+    bytes_down: Arc<AtomicU64>,
+}
+
+impl ForwardStats {
+    fn new() -> Self {
+        Self {
+            active_connections: Arc::new(AtomicUsize::new(0)),
+            connected: Arc::new(AtomicBool::new(false)),
+            bytes_up: Arc::new(AtomicU64::new(0)),
+            bytes_down: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
 struct ForwardHandle {
     local_port: u16,
     remote_port: u16,
-    active_connections: Arc<AtomicUsize>,
-    connected: Arc<AtomicBool>,
+    stats: ForwardStats,
     last_error: LastError,
     stop_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
@@ -114,15 +138,13 @@ pub async fn start_port_forward(
     }
 
     let (stop_tx, stop_rx) = watch::channel(false);
-    let active_connections = Arc::new(AtomicUsize::new(0));
-    let connected = Arc::new(AtomicBool::new(false));
+    let stats = ForwardStats::new();
     let last_error: LastError = Arc::new(StdMutex::new(None));
     let task = tokio::spawn(run_listener(
         listener,
         config.clone(),
         stop_rx,
-        active_connections.clone(),
-        connected.clone(),
+        stats.clone(),
         last_error.clone(),
     ));
     forwards.insert(
@@ -130,8 +152,7 @@ pub async fn start_port_forward(
         ForwardHandle {
             local_port: config.local_port,
             remote_port: config.remote_port,
-            active_connections,
-            connected,
+            stats,
             last_error,
             stop_tx,
             task,
@@ -169,9 +190,11 @@ pub async fn list_port_forwards(
             id: id.clone(),
             local_port: handle.local_port,
             remote_port: handle.remote_port,
-            active_connections: handle.active_connections.load(Ordering::Relaxed),
-            connected: handle.connected.load(Ordering::Relaxed),
+            active_connections: handle.stats.active_connections.load(Ordering::Relaxed),
+            connected: handle.stats.connected.load(Ordering::Relaxed),
             last_error: handle.last_error.lock().unwrap().clone(),
+            bytes_up: handle.stats.bytes_up.load(Ordering::Relaxed),
+            bytes_down: handle.stats.bytes_down.load(Ordering::Relaxed),
         })
         .collect())
 }
@@ -202,8 +225,7 @@ async fn run_listener(
     listener: TcpListener,
     config: PortForwardConfig,
     mut stop_rx: watch::Receiver<bool>,
-    active_connections: Arc<AtomicUsize>,
-    connected: Arc<AtomicBool>,
+    stats: ForwardStats,
     last_error: LastError,
 ) {
     let (accepted_tx, accepted_rx) = mpsc::channel(ACCEPT_BUF);
@@ -211,8 +233,7 @@ async fn run_listener(
         accepted_rx,
         config,
         stop_rx.clone(),
-        active_connections,
-        connected,
+        stats,
         last_error,
     ));
 
@@ -258,8 +279,7 @@ async fn run_session_manager(
     mut accepted_rx: mpsc::Receiver<TcpStream>,
     config: PortForwardConfig,
     mut stop_rx: watch::Receiver<bool>,
-    active_connections: Arc<AtomicUsize>,
-    connected: Arc<AtomicBool>,
+    stats: ForwardStats,
     last_error: LastError,
 ) {
     let mut backoff = RECONNECT_DELAY;
@@ -309,7 +329,7 @@ async fn run_session_manager(
         };
 
         if let Some(socket) = socket {
-            connected.store(true, Ordering::Relaxed);
+            stats.connected.store(true, Ordering::Relaxed);
             clear_error(&last_error);
             backoff = RECONNECT_DELAY;
             tracing::info!(forward = %config.id, "port-forward link connected");
@@ -319,11 +339,11 @@ async fn run_session_manager(
                 &mut stop_rx,
                 &config.remote_host,
                 config.remote_port,
-                active_connections.clone(),
+                stats.clone(),
                 last_error.clone(),
             )
             .await;
-            connected.store(false, Ordering::Relaxed);
+            stats.connected.store(false, Ordering::Relaxed);
             tracing::info!(forward = %config.id, "port-forward link disconnected");
             continue;
         }
@@ -373,13 +393,20 @@ enum Outbound {
     Ping,
 }
 
+/// The link-side channels one local bridge writes through: frames to the
+/// socket writer, and its own id to the session when the bridge finishes.
+struct StreamOut {
+    out_tx: mpsc::Sender<Outbound>,
+    ended_tx: mpsc::Sender<u64>,
+}
+
 async fn run_connected(
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     accepted_rx: &mut mpsc::Receiver<TcpStream>,
     stop_rx: &mut watch::Receiver<bool>,
     remote_host: &str,
     remote_port: u16,
-    active_connections: Arc<AtomicUsize>,
+    stats: ForwardStats,
     last_error: LastError,
 ) {
     let (mut sink, mut source) = socket.split();
@@ -433,15 +460,19 @@ async fn run_connected(
                         break;
                     }
                     let (in_tx, in_rx) = mpsc::channel(STREAM_BUF);
-                    active_connections.fetch_add(1, Ordering::Relaxed);
+                    stats.active_connections.fetch_add(1, Ordering::Relaxed);
+                    let out = StreamOut {
+                        out_tx: out_tx.clone(),
+                        ended_tx: ended_tx.clone(),
+                    };
                     let task = tokio::spawn(bridge_local(
                         stream,
                         stream_id,
                         remote_host.to_string(),
                         remote_port,
                         in_rx,
-                        out_tx.clone(),
-                        ended_tx.clone(),
+                        out,
+                        stats.clone(),
                         last_error.clone(),
                     ));
                     streams.insert(stream_id, LocalStream { in_tx, task });
@@ -451,7 +482,7 @@ async fn run_connected(
             ended = ended_rx.recv() => {
                 if let Some(stream_id) = ended {
                     if streams.remove(&stream_id).is_some() {
-                        active_connections.fetch_sub(1, Ordering::Relaxed);
+                        stats.active_connections.fetch_sub(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -475,7 +506,7 @@ async fn run_connected(
                                 // stopped reading; abort instead of queueing.
                                 if let Some(stream) = streams.remove(&stream_id) {
                                     stream.task.abort();
-                                    active_connections.fetch_sub(1, Ordering::Relaxed);
+                                    stats.active_connections.fetch_sub(1, Ordering::Relaxed);
                                 }
                                 continue;
                             }
@@ -483,7 +514,7 @@ async fn run_connected(
                                 if stream.in_tx.send(frame).await.is_err() {
                                     if let Some(stream) = streams.remove(&stream_id) {
                                         stream.task.abort();
-                                        active_connections.fetch_sub(1, Ordering::Relaxed);
+                                        stats.active_connections.fetch_sub(1, Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -500,7 +531,9 @@ async fn run_connected(
     // Every stream still in the map is owned by this incarnation of the
     // connection; aborting them skips `bridge_local`'s tail, so release their
     // slots here — the counter must return to zero for the next reconnect.
-    active_connections.fetch_sub(streams.len(), Ordering::Relaxed);
+    stats
+        .active_connections
+        .fetch_sub(streams.len(), Ordering::Relaxed);
     streams.clear();
     drop(out_tx);
     writer.abort();
@@ -526,8 +559,8 @@ async fn bridge_local(
     remote_host: String,
     remote_port: u16,
     mut remote_rx: mpsc::Receiver<PortForwardFrame>,
-    out_tx: mpsc::Sender<Outbound>,
-    ended_tx: mpsc::Sender<u64>,
+    out: StreamOut,
+    stats: ForwardStats,
     last_error: LastError,
 ) {
     let (mut read, mut write) = stream.into_split();
@@ -542,7 +575,8 @@ async fn bridge_local(
     let remote_host = (remote_host != switchboard_shared::port_forward::DEFAULT_REMOTE_HOST)
         .then_some(remote_host);
 
-    if out_tx
+    if out
+        .out_tx
         .send(Outbound::Frame(PortForwardFrame::Open {
             stream_id,
             remote_port,
@@ -551,7 +585,7 @@ async fn bridge_local(
         .await
         .is_err()
     {
-        let _ = ended_tx.send(stream_id).await;
+        let _ = out.ended_tx.send(stream_id).await;
         return;
     }
 
@@ -564,7 +598,7 @@ async fn bridge_local(
                 let message = format!("open timed out after {}s", OPEN_TIMEOUT.as_secs());
                 set_error(&last_error, message.clone());
                 tracing::warn!(stream = stream_id, %message, "resetting the local connection");
-                let _ = out_tx
+                let _ = out.out_tx
                     .send(Outbound::Frame(PortForwardFrame::Rst { stream_id }))
                     .await;
                 break;
@@ -575,12 +609,12 @@ async fn bridge_local(
                     clear_error(&last_error);
                 }
                 Some(PortForwardFrame::OpenErr { message, .. }) => {
-                    tracing::warn!(stream = stream_id, %message, "remote open failed");
                     set_error(&last_error, message);
                     break;
                 }
                 Some(PortForwardFrame::Rst { .. }) => break,
                 Some(PortForwardFrame::Data { data, .. }) if opened => {
+                    stats.bytes_down.fetch_add(data.len() as u64, Ordering::Relaxed);
                     if write.write_all(&data).await.is_err() {
                         reset = true;
                         break;
@@ -598,7 +632,7 @@ async fn bridge_local(
             },
             local = read.read(&mut buffer), if opened && !local_finished => match local {
                 Ok(0) => {
-                    if out_tx
+                    if out.out_tx
                         .send(Outbound::Frame(PortForwardFrame::Fin { stream_id }))
                         .await
                         .is_err()
@@ -608,7 +642,8 @@ async fn bridge_local(
                     local_finished = true;
                 }
                 Ok(count) => {
-                    if out_tx
+                    stats.bytes_up.fetch_add(count as u64, Ordering::Relaxed);
+                    if out.out_tx
                         .send(Outbound::Frame(PortForwardFrame::Data {
                             stream_id,
                             data: buffer[..count].to_vec(),
@@ -628,11 +663,12 @@ async fn bridge_local(
     }
 
     if reset {
-        let _ = out_tx
+        let _ = out
+            .out_tx
             .send(Outbound::Frame(PortForwardFrame::Rst { stream_id }))
             .await;
     }
-    let _ = ended_tx.send(stream_id).await;
+    let _ = out.ended_tx.send(stream_id).await;
 }
 
 async fn connect_forward(
@@ -738,10 +774,14 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::{mpsc, oneshot, watch};
+    use tokio_tungstenite::tungstenite::protocol::Message;
 
-    use super::{forward_url, run_connected, validate_config, with_jitter};
+    use super::{forward_url, run_connected, validate_config, with_jitter, ForwardStats};
+    use switchboard_shared::port_forward::PortForwardFrame;
     use switchboard_shared::tunnel::Tag;
 
     #[test]
@@ -837,12 +877,12 @@ mod tests {
         });
 
         let (stop_tx, mut stop_rx) = watch::channel(false);
-        let counter = Arc::new(AtomicUsize::new(0));
+        let stats = ForwardStats::new();
+        let counter = stats.active_connections.clone();
         let last_error = Arc::new(std::sync::Mutex::new(None));
         let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{ws_addr}"))
             .await
             .unwrap();
-        let session_counter = counter.clone();
         let session = tokio::spawn(async move {
             run_connected(
                 socket,
@@ -850,7 +890,7 @@ mod tests {
                 &mut stop_rx,
                 "127.0.0.1",
                 1,
-                session_counter,
+                stats,
                 last_error,
             )
             .await;
@@ -870,6 +910,91 @@ mod tests {
 
         drop(stop_tx);
         drop(clients);
+        acceptor.abort();
+        server.await.unwrap();
+    }
+
+    /// Bytes written by the local app and bytes delivered back to it are both
+    /// counted, which is what the status page diffs into up/down rates.
+    #[tokio::test]
+    async fn counts_forwarded_bytes_in_both_directions() {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_addr = ws_listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = ws_listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while let Some(message) = ws.next().await {
+                let Ok(Message::Binary(bytes)) = message else {
+                    break;
+                };
+                match PortForwardFrame::decode(&bytes).unwrap() {
+                    PortForwardFrame::Open { stream_id, .. } => {
+                        let reply = PortForwardFrame::OpenOk { stream_id }.encode();
+                        ws.send(Message::Binary(reply)).await.unwrap();
+                    }
+                    PortForwardFrame::Data { stream_id, data } if data == b"hello" => {
+                        let reply = PortForwardFrame::Data {
+                            stream_id,
+                            data: b"pong".to_vec(),
+                        }
+                        .encode();
+                        ws.send(Message::Binary(reply)).await.unwrap();
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = local_listener.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::channel(8);
+        // Keep `accepted_tx` alive: a closed channel makes run_connected tear
+        // everything down, and the acceptor task exits after one connection.
+        let accept_tx = accepted_tx.clone();
+        let acceptor = tokio::spawn(async move {
+            let (stream, _) = local_listener.accept().await.unwrap();
+            let _ = accept_tx.send(stream).await;
+        });
+
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let stats = ForwardStats::new();
+        let bytes_up = stats.bytes_up.clone();
+        let bytes_down = stats.bytes_down.clone();
+        let last_error = Arc::new(std::sync::Mutex::new(None));
+        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{ws_addr}"))
+            .await
+            .unwrap();
+        let session = tokio::spawn(async move {
+            run_connected(
+                socket,
+                &mut accepted_rx,
+                &mut stop_rx,
+                "127.0.0.1",
+                1,
+                stats,
+                last_error,
+            )
+            .await;
+        });
+
+        let mut client = TcpStream::connect(local_addr).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        let mut reply = [0u8; 4];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"pong");
+
+        for _ in 0..200 {
+            if bytes_up.load(Ordering::Relaxed) == 5 && bytes_down.load(Ordering::Relaxed) == 4 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(bytes_up.load(Ordering::Relaxed), 5);
+        assert_eq!(bytes_down.load(Ordering::Relaxed), 4);
+
+        let _ = stop_tx.send(true);
+        session.await.unwrap();
+        drop(client);
         acceptor.abort();
         server.await.unwrap();
     }

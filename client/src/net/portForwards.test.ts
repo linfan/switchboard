@@ -83,6 +83,8 @@ describe("PortForwardCoordinator", () => {
           activeConnections: 3,
           connected: true,
           lastError: null,
+          bytesUp: 0,
+          bytesDown: 0,
         },
       ]),
     };
@@ -102,6 +104,8 @@ describe("PortForwardCoordinator", () => {
     expect(useStore.getState().portForwardRuntime.f1).toEqual({
       status: "active",
       activeConnections: 3,
+      upBps: 0,
+      downBps: 0,
     });
 
     useStore.getState().updatePortForward("f1", { enabled: false });
@@ -127,6 +131,8 @@ describe("PortForwardCoordinator", () => {
           activeConnections: 0,
           connected: true,
           lastError: null,
+          bytesUp: 0,
+          bytesDown: 0,
         },
       ]),
     };
@@ -164,6 +170,8 @@ describe("PortForwardCoordinator", () => {
           activeConnections: 0,
           connected: true,
           lastError: null,
+          bytesUp: 0,
+          bytesDown: 0,
         },
       ]),
     };
@@ -221,6 +229,67 @@ describe("PortForwardCoordinator", () => {
     expect(bridge.stop).toHaveBeenCalledWith("f1");
   });
 
+  it("turns cumulative byte counters into per-forward rates", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(10_000));
+      let bytesUp = 0;
+      let bytesDown = 0;
+      const bridge: PortForwardBridge = {
+        start: vi.fn(async () => {}),
+        stop: vi.fn(async () => {}),
+        list: vi.fn(async () => [
+          {
+            id: "f1",
+            localPort: 5433,
+            remotePort: 5432,
+            activeConnections: 1,
+            connected: true,
+            lastError: null,
+            bytesUp,
+            bytesDown,
+          },
+        ]),
+      };
+      const coordinator = new PortForwardCoordinator({
+        bridge,
+        desktop: () => true,
+        pollMs: 1000,
+      });
+      const state = useStore.getState();
+      state.addService(service);
+      state.addPortForward(forward);
+
+      coordinator.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(useStore.getState().portForwardRuntime.f1).toMatchObject({
+        upBps: 0,
+        downBps: 0,
+      });
+
+      bytesUp = 300;
+      bytesDown = 1000;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(useStore.getState().portForwardRuntime.f1).toMatchObject({
+        status: "active",
+        upBps: 300,
+        downBps: 1000,
+      });
+
+      // A restarted listener resets the counters; the rate must not go negative.
+      bytesUp = 0;
+      bytesDown = 0;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(useStore.getState().portForwardRuntime.f1).toMatchObject({
+        upBps: 0,
+        downBps: 0,
+      });
+      coordinator.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks mappings unavailable outside the desktop shell", async () => {
     const bridge: PortForwardBridge = {
       start: vi.fn(async () => {}),
@@ -259,6 +328,8 @@ describe("PortForwardCoordinator", () => {
           activeConnections: 2,
           connected: false,
           lastError: "connect timed out after 10s",
+          bytesUp: 0,
+          bytesDown: 0,
         },
       ]),
     };
@@ -278,6 +349,8 @@ describe("PortForwardCoordinator", () => {
       status: "reconnecting",
       activeConnections: 2,
       error: "connect timed out after 10s",
+      upBps: 0,
+      downBps: 0,
     });
     coordinator.stop();
   });
