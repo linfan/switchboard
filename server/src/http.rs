@@ -9,7 +9,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -61,6 +62,7 @@ pub fn router(state: SharedState, require_auth: bool) -> Router {
             post(git_worktree).delete(git_worktree_remove),
         )
         .route("/tasks", get(list_tasks).post(create_task))
+        .route("/tasks/{id}/history", get(task_history))
         .route("/tasks/{id}", axum::routing::delete(terminate_task))
         .route(
             "/admin/upgrade/upload",
@@ -366,6 +368,97 @@ async fn git_worktree_remove(Query(q): Query<WorktreeRemoveQuery>) -> AppResult<
 
 async fn list_tasks(State(state): State<SharedState>) -> AppResult<Json<Vec<TaskInfo>>> {
     Ok(Json(state.tasks.list().await?))
+}
+
+const HISTORY_PAGE_MAX_CHUNKS: u32 = 8;
+const HISTORY_PAGE_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    after: u64,
+    through: u64,
+}
+
+#[derive(Serialize)]
+struct HistoryChunk {
+    seq: u64,
+    data_b64: String,
+}
+
+#[derive(Serialize)]
+struct HistoryPage {
+    chunks: Vec<HistoryChunk>,
+    next_after: u64,
+}
+
+/// Return one bounded page of the durable terminal byte stream. Unlike the live
+/// WS plane, this transport is request/response and therefore cannot overflow a
+/// repeater stream with an unbounded scrollback replay.
+async fn task_history(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Query(q): Query<HistoryQuery>,
+) -> AppResult<Json<HistoryPage>> {
+    let task = state
+        .store
+        .get_task(&id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("task {id}")))?;
+    if q.after >= q.through {
+        return Err(AppError::BadRequest(
+            "history requires after < through".into(),
+        ));
+    }
+    if q.through > task.last_seq {
+        return Err(AppError::BadRequest(format!(
+            "history through {} exceeds task last_seq {}",
+            q.through, task.last_seq
+        )));
+    }
+
+    let stored = state
+        .tasks
+        .chunks_window(&id, q.after, q.through, HISTORY_PAGE_MAX_CHUNKS)
+        .await?;
+    if stored.is_empty() {
+        return Err(AppError::Other(anyhow::anyhow!(
+            "missing history chunk after {} before {}",
+            q.after,
+            q.through
+        )));
+    }
+    for (index, (seq, _)) in stored.iter().enumerate() {
+        let expected = q.after + index as u64 + 1;
+        if *seq != expected {
+            return Err(AppError::Other(anyhow::anyhow!(
+                "non-contiguous history chunk {seq}, expected {expected}"
+            )));
+        }
+    }
+
+    let mut chunks = Vec::with_capacity(stored.len());
+    let mut decoded_bytes = 0usize;
+    let mut next_after = q.after;
+    for (seq, data) in stored {
+        let would_exceed = data.len() > HISTORY_PAGE_MAX_BYTES
+            || decoded_bytes.saturating_add(data.len()) > HISTORY_PAGE_MAX_BYTES;
+        if would_exceed {
+            if chunks.is_empty() {
+                return Err(AppError::Other(anyhow::anyhow!(
+                    "history chunk {seq} is larger than the {HISTORY_PAGE_MAX_BYTES}-byte page limit"
+                )));
+            }
+            break;
+        }
+        decoded_bytes += data.len();
+        next_after = seq;
+        chunks.push(HistoryChunk {
+            seq,
+            data_b64: BASE64_STANDARD.encode(data),
+        });
+    }
+
+    Ok(Json(HistoryPage { chunks, next_after }))
 }
 
 #[derive(Deserialize)]

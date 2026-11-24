@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ServiceRef } from "../store/types";
-import { listDir, probeService } from "./rest";
+import { getHistoryPage, listDir, probeService } from "./rest";
 import { cbFromPin, fromHex, restSignHeaders, sha256 } from "./swbauth";
 
 const bridge = vi.hoisted(() => ({
@@ -14,6 +14,16 @@ vi.mock("./tauri", () => ({
     bridge.calls.push({ cmd, args });
     if (String(args?.url).includes("/health")) {
       return { status: 200, body: "{}", cert_fp: "aabb" };
+    }
+    if (String(args?.url).includes("/history")) {
+      return {
+        status: 200,
+        body: JSON.stringify({
+          chunks: [{ seq: 1, data_b64: "AP8=" }],
+          next_after: 1,
+        }),
+        cert_fp: "aabb",
+      };
     }
     return {
       status: 200,
@@ -85,6 +95,26 @@ describe("native probeService", () => {
     const args = bridge.calls[0].args!;
     const target = "/api/fs?path=%2Ftmp&tag=worker-A";
     expect(args.url).toBe(`https://host:8787${target}`);
+    await expectMac(args, service, target);
+  });
+
+  it("uses the pinned native JSON bridge for binary-safe history pages", async () => {
+    const service = {
+      url: "https://host:8787",
+      token: "tok",
+      tag: "worker-A",
+      certFingerprint: "aabb",
+    };
+    await expect(getHistoryPage(service, "t1", 0, 1)).resolves.toEqual({
+      chunks: [{ seq: 1, data: new Uint8Array([0, 255]) }],
+      nextAfter: 1,
+    });
+
+    const args = bridge.calls[0].args!;
+    const target = "/api/tasks/t1/history?after=0&through=1&tag=worker-A";
+    expect(args.url).toBe(`https://host:8787${target}`);
+    expect(args.pin).toBe("aabb");
+    expect(args.timeoutMs).toBe(30000);
     await expectMac(args, service, target);
   });
 });

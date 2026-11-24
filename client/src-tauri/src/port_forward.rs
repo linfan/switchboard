@@ -468,8 +468,7 @@ async fn run_connected(
                     let task = tokio::spawn(bridge_local(
                         stream,
                         stream_id,
-                        remote_host.to_string(),
-                        remote_port,
+                        (remote_host.to_string(), remote_port),
                         in_rx,
                         out,
                         stats.clone(),
@@ -556,13 +555,13 @@ impl Drop for LocalStream {
 async fn bridge_local(
     stream: TcpStream,
     stream_id: u64,
-    remote_host: String,
-    remote_port: u16,
+    remote: (String, u16),
     mut remote_rx: mpsc::Receiver<PortForwardFrame>,
     out: StreamOut,
     stats: ForwardStats,
     last_error: LastError,
 ) {
+    let (remote_host, remote_port) = remote;
     let (mut read, mut write) = stream.into_split();
     let mut buffer = vec![0; MAX_DATA_LEN.min(32 * 1024)];
     let mut opened = false;

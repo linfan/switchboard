@@ -25,8 +25,17 @@ export type ResizeSink = (
   cols: number,
   rows: number,
 ) => void;
-type HistoryAckSink = (serviceId: string, taskId: string, seq: number) => void;
-type HistoryCancelSink = (serviceId: string, taskId: string) => void;
+type HistoryCommitSink = (
+  serviceId: string,
+  taskId: string,
+  throughSeq: number,
+) => void;
+export interface HistorySession {
+  id: number;
+  serviceId: string;
+  taskId: string;
+  throughSeq: number;
+}
 
 interface Entry {
   term: Terminal;
@@ -82,23 +91,28 @@ type HistoryLiveEvent =
   | { kind: "output"; seq: number; data: Uint8Array }
   | { kind: "resize"; cols: number; rows: number };
 
-interface HistoryRestore {
+interface HistoryRestore extends HistorySession {
   term: Terminal;
   fit: FitAddon;
   el: HTMLDivElement;
-  throughSeq: number;
   nextHistorySeq: number;
   nextLiveSeq: number;
   liveQueue: HistoryLiveEvent[];
   liveBytes: number;
   done: boolean;
   draining: boolean;
+  pendingWrite: ((error: Error) => void) | null;
+  completion: {
+    resolve: () => void;
+    reject: (error: Error) => void;
+  } | null;
 }
 
 const MAX_HISTORY_LIVE_BYTES = 16 * 1024 * 1024;
 
 const entries = new Map<string, Entry>();
 const encoder = new TextEncoder();
+let nextHistoryId = 1;
 
 const now = () => performance.now();
 
@@ -379,20 +393,17 @@ let fontSize = 13;
 
 let inputSink: InputSink | null = null;
 let resizeSink: ResizeSink | null = null;
-let historyAckSink: HistoryAckSink | null = null;
-let historyCancelSink: HistoryCancelSink | null = null;
+let historyCommitSink: HistoryCommitSink | null = null;
 
 /** Wire the send callbacks (the pool provides these once, at startup). */
 export function setSinks(
   input: InputSink,
   resize: ResizeSink,
-  historyAck: HistoryAckSink,
-  historyCancel: HistoryCancelSink,
+  historyCommit: HistoryCommitSink,
 ): void {
   inputSink = input;
   resizeSink = resize;
-  historyAckSink = historyAck;
-  historyCancelSink = historyCancel;
+  historyCommitSink = historyCommit;
 }
 
 function createParts(
@@ -463,8 +474,8 @@ function ensure(serviceId: string, taskId: string): Entry {
 export function write(serviceId: string, taskId: string, frame: Frame): void {
   const e = ensure(serviceId, taskId);
   if (frame.kind === "snapshot") {
-    cancelHistory(e, false);
-    e.lastSnapshot = { seq: frame.seq, data: frame.data };
+    if (e.history?.throughSeq !== frame.seq) cancelHistory(e);
+    e.lastSnapshot = e.history ? null : { seq: frame.seq, data: frame.data };
     cancelResizeRestore(e);
     const term = e.term;
     term.reset();
@@ -660,7 +671,7 @@ function queueHistoryEvent(
         "warn",
         `history restore cancelled for ${e.taskId}: live sequence ${event.seq}, expected ${restore.nextLiveSeq}`,
       );
-      cancelHistory(e, true);
+      cancelHistory(e);
       return;
     }
     restore.nextLiveSeq++;
@@ -670,7 +681,7 @@ function queueHistoryEvent(
         "warn",
         `history restore cancelled for ${e.taskId}: live catch-up exceeded ${MAX_HISTORY_LIVE_BYTES} bytes`,
       );
-      cancelHistory(e, true);
+      cancelHistory(e);
       return;
     }
   }
@@ -694,20 +705,23 @@ export function beginHistory(
   serviceId: string,
   taskId: string,
   throughSeq: number,
-): void {
-  const e = entries.get(convKey(serviceId, taskId));
-  const snapshot = e?.lastSnapshot;
-  if (!e || !snapshot || snapshot.seq !== throughSeq) return;
-  cancelHistory(e, false);
+): HistorySession | null {
+  const e = ensure(serviceId, taskId);
+  const snapshot = e.lastSnapshot;
+  if (snapshot && snapshot.seq !== throughSeq) return null;
+  cancelHistory(e);
   const parts = createParts(serviceId, taskId, e.term.cols, e.term.rows, false);
   try {
     parts.term.open(parts.el);
   } catch {
     parts.term.dispose();
-    return;
+    return null;
   }
-  e.history = {
+  const restore: HistoryRestore = {
     ...parts,
+    id: nextHistoryId++,
+    serviceId,
+    taskId,
     throughSeq,
     nextHistorySeq: 1,
     nextLiveSeq: throughSeq + 1,
@@ -715,39 +729,69 @@ export function beginHistory(
     liveBytes: 0,
     done: false,
     draining: false,
+    pendingWrite: null,
+    completion: null,
   };
+  e.history = restore;
   e.lastSnapshot = null;
+  return restore;
 }
 
 export function writeHistory(
-  serviceId: string,
-  taskId: string,
-  frame: Extract<Frame, { kind: "history" }>,
-): void {
-  const e = entries.get(convKey(serviceId, taskId));
-  const restore = e?.history;
-  if (!e || !restore) return;
-  if (frame.seq !== restore.nextHistorySeq || frame.seq > restore.throughSeq) {
-    cancelHistory(e, true);
-    return;
-  }
-  restore.nextHistorySeq++;
-  try {
-    restore.term.write(frame.data, () => {
-      if (e.history !== restore) return;
-      historyAckSink?.(serviceId, taskId, frame.seq);
-    });
-  } catch {
-    cancelHistory(e, true);
-  }
+  session: HistorySession,
+  seq: number,
+  data: Uint8Array,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const e = entries.get(convKey(session.serviceId, session.taskId));
+    const restore = e?.history;
+    if (!e || restore !== session) {
+      reject(new Error("History restore is no longer active."));
+      return;
+    }
+    if (seq !== restore.nextHistorySeq || seq > restore.throughSeq) {
+      cancelHistory(e);
+      reject(new Error(`Unexpected history sequence ${seq}.`));
+      return;
+    }
+    restore.nextHistorySeq++;
+    restore.pendingWrite = reject;
+    try {
+      restore.term.write(data, () => {
+        restore.pendingWrite = null;
+        if (e.history !== restore) {
+          reject(new Error("History restore is no longer active."));
+          return;
+        }
+        resolve();
+      });
+    } catch (error) {
+      restore.pendingWrite = null;
+      cancelHistory(e);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
 }
 
-export function finishHistory(serviceId: string, taskId: string): void {
-  const e = entries.get(convKey(serviceId, taskId));
-  const restore = e?.history;
-  if (!e || !restore || restore.done) return;
-  restore.done = true;
-  drainHistoryLive(e, restore);
+export function finishHistory(session: HistorySession): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const e = entries.get(convKey(session.serviceId, session.taskId));
+    const restore = e?.history;
+    if (!e || restore !== session || restore.done) {
+      reject(new Error("History restore is no longer active."));
+      return;
+    }
+    if (restore.nextHistorySeq !== restore.throughSeq + 1) {
+      cancelHistory(e);
+      reject(
+        new Error("History restore finished before its snapshot sequence."),
+      );
+      return;
+    }
+    restore.completion = { resolve, reject };
+    restore.done = true;
+    drainHistoryLive(e, restore);
+  });
 }
 
 function drainHistoryLive(e: Entry, restore: HistoryRestore): void {
@@ -771,7 +815,7 @@ function drainHistoryLive(e: Entry, restore: HistoryRestore): void {
     try {
       restore.term.write(event.data, step);
     } catch {
-      cancelHistory(e, true);
+      cancelHistory(e);
     }
   };
   step();
@@ -825,31 +869,39 @@ function commitHistory(e: Entry, restore: HistoryRestore): void {
   if (hadFocus) e.term.focus();
   oldTerm.dispose();
   oldEl.remove();
+  historyCommitSink?.(e.serviceId, e.taskId, restore.nextLiveSeq - 1);
   logToBackend(
     "info",
     `history restored for ${e.taskId} through ${restore.throughSeq}`,
   );
+  const completion = restore.completion;
+  restore.completion = null;
+  completion?.resolve();
 }
 
-function cancelHistory(e: Entry, notify: boolean): void {
+function cancelHistory(e: Entry): void {
   const restore = e.history;
   if (!restore) return;
   e.history = null;
   e.lastSnapshot = null;
+  const error = new Error("History restore cancelled.");
+  restore.pendingWrite?.(error);
+  restore.pendingWrite = null;
+  restore.completion?.reject(error);
+  restore.completion = null;
   restore.term.dispose();
   restore.el.remove();
-  if (notify) historyCancelSink?.(e.serviceId, e.taskId);
 }
 
 export function cancelHistoryForService(serviceId: string): void {
   for (const e of entries.values()) {
-    if (e.serviceId === serviceId && e.history) cancelHistory(e, true);
+    if (e.serviceId === serviceId && e.history) cancelHistory(e);
   }
 }
 
-export function failHistory(serviceId: string, taskId: string): void {
-  const e = entries.get(convKey(serviceId, taskId));
-  if (e) cancelHistory(e, false);
+export function cancelHistorySession(session: HistorySession): void {
+  const e = entries.get(convKey(session.serviceId, session.taskId));
+  if (e?.history === session) cancelHistory(e);
 }
 
 /** Detach the terminal's element without destroying it (scrollback survives). */
@@ -875,7 +927,7 @@ export function refit(serviceId: string, taskId: string): void {
 export function setFontSize(size: number): void {
   fontSize = size;
   for (const e of entries.values()) {
-    cancelHistory(e, true);
+    cancelHistory(e);
     e.term.options.fontSize = size;
     if (!e.opened) continue;
     fitAndRestore(e, true);
@@ -904,7 +956,7 @@ export function dispose(serviceId: string, taskId: string): void {
   const key = convKey(serviceId, taskId);
   const e = entries.get(key);
   if (!e) return;
-  cancelHistory(e, true);
+  cancelHistory(e);
   detach(serviceId, taskId);
   e.term.dispose();
   entries.delete(key);

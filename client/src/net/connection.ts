@@ -479,7 +479,8 @@ export class ConnectionManager {
       client_id: this.d.clientId,
       cursors: this.d.getCursors(),
       acks: true,
-      history: true,
+      history: false,
+      history_http: true,
     });
     this.startHeartbeat();
     // Let the app re-assert per-task state that must survive a drop (e.g. the

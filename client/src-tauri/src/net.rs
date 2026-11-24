@@ -307,6 +307,7 @@ pub async fn http_request(
     headers: Vec<(String, String)>,
     body: Option<String>,
     pin: Option<String>,
+    timeout_ms: Option<u64>,
 ) -> Result<HttpResponse, String> {
     log_err(
         "http_request",
@@ -315,6 +316,9 @@ pub async fn http_request(
             let method =
                 reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
             let mut req = apply_headers(client.request(method, &url), &headers);
+            if let Some(ms) = timeout_ms {
+                req = req.timeout(Duration::from_millis(ms));
+            }
             if let Some(b) = body {
                 req = req
                     .header(reqwest::header::CONTENT_TYPE, "application/json")

@@ -17,3 +17,10 @@ export function bytesToBase64(data: ArrayBufferLike | ArrayBufferView): string {
   }
   return btoa(bin);
 }
+
+export function base64ToBytes(data: string): Uint8Array {
+  const bin = atob(data);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}

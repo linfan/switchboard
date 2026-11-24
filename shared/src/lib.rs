@@ -238,9 +238,12 @@ pub enum ClientMsg {
         /// in older clients (`false`), which keep the unpaced behaviour.
         #[serde(default)]
         acks: bool,
-        /// Restore scrollback in a separate history stream after a fresh snapshot.
+        /// Legacy in-band history request. Retained for wire compatibility.
         #[serde(default)]
         history: bool,
+        /// Restore scrollback with paginated, signed HTTP history requests.
+        #[serde(default)]
+        history_http: bool,
     },
     /// Create a new task (conversation) running the given tool on a PTY sized
     /// `cols` × `rows` (the client's initial terminal size).
@@ -374,14 +377,21 @@ mod tests {
             client_id: "c1".into(),
             cursors,
             acks: true,
-            history: true,
+            history: false,
+            history_http: true,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"hello\""));
         match serde_json::from_str::<ClientMsg>(&json).unwrap() {
-            ClientMsg::Hello { acks, history, .. } => {
+            ClientMsg::Hello {
+                acks,
+                history,
+                history_http,
+                ..
+            } => {
                 assert!(acks);
-                assert!(history);
+                assert!(!history);
+                assert!(history_http);
             }
             other => panic!("expected hello, got {other:?}"),
         }
@@ -392,9 +402,15 @@ mod tests {
         // Builds no `acks` field, exactly as builds before pacing did.
         let json = r#"{"type":"hello","client_id":"c1","cursors":{}}"#;
         match serde_json::from_str::<ClientMsg>(json).unwrap() {
-            ClientMsg::Hello { acks, history, .. } => {
+            ClientMsg::Hello {
+                acks,
+                history,
+                history_http,
+                ..
+            } => {
                 assert!(!acks);
                 assert!(!history);
+                assert!(!history_http);
             }
             other => panic!("expected hello, got {other:?}"),
         }

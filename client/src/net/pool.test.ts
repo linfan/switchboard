@@ -36,6 +36,10 @@ vi.mock("./connection", () => ({
     stop() {
       this.stopped = true;
     }
+
+    send() {
+      return true;
+    }
   },
 }));
 
@@ -55,6 +59,8 @@ vi.mock("./tauriSocket", () => ({ makeTauriWsFactory: vi.fn() }));
 
 import { useStore } from "../store/store";
 import { ConnectionPool } from "./pool";
+import { encode } from "./frame";
+import * as terminals from "./terminals";
 
 let pool: ConnectionPool | undefined;
 
@@ -116,5 +122,41 @@ describe("ConnectionPool service TAGs", () => {
     expect(fake.managers).toHaveLength(2);
     expect(fake.managers[1].deps.tag).toBe("worker-B");
     expect(fake.managers[1].started).toBe(true);
+  });
+
+  it("does not advertise snapshot or live cursors before HTTP history commits", () => {
+    const taskId = "00000000-0000-0000-0000-000000000001";
+    useStore.getState().addService({
+      id: "svc",
+      name: "Service",
+      url: "http://same",
+      token: "t",
+    });
+    pool = new ConnectionPool();
+    pool.start();
+    const { deps } = fake.managers[0];
+    deps.onMessage({
+      type: "welcome",
+      service: { name: "Service", version: "1", tools: [] },
+      tasks: [
+        {
+          id: taskId,
+          tool: "claude",
+          title: "Task",
+          status: { state: "running" },
+          created_at: 0,
+          last_seq: 100,
+        },
+      ],
+    });
+    deps.onMessage({ type: "history_start", task_id: taskId, last_seq: 100 });
+    deps.onBinary(
+      encode({ kind: "snapshot", taskId, seq: 100, data: new Uint8Array() }),
+    );
+
+    expect(deps.getCursors()).toEqual({});
+    const sinks = vi.mocked(terminals.setSinks).mock.calls.at(-1)!;
+    sinks[2]("svc", taskId, 100);
+    expect(deps.getCursors()).toEqual({ [taskId]: 100 });
   });
 });

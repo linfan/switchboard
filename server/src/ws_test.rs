@@ -137,6 +137,7 @@ async fn hello(ws: &mut WsStream, cursors: HashMap<String, u64>) {
             cursors,
             acks: false,
             history: false,
+            history_http: false,
         },
     )
     .await;
@@ -151,19 +152,21 @@ async fn hello_paced(ws: &mut WsStream, cursors: HashMap<String, u64>) {
             cursors,
             acks: true,
             history: false,
+            history_http: false,
         },
     )
     .await;
 }
 
-async fn hello_history(ws: &mut WsStream) {
+async fn hello_history_http(ws: &mut WsStream) {
     send(
         ws,
         &ClientMsg::Hello {
             client_id: "c1".into(),
             cursors: HashMap::new(),
             acks: true,
-            history: true,
+            history: false,
+            history_http: true,
         },
     )
     .await;
@@ -573,7 +576,134 @@ async fn large_backlog_without_pacing_keeps_snapshot() {
 }
 
 #[tokio::test]
-async fn history_replay_interleaves_live_output() {
+async fn history_http_uses_snapshot_without_raw_ws_history() {
+    for count in [0u64, 3, 301] {
+        let (addr, state) = start_server().await;
+        seed(&state, T1).await;
+        for i in 0..count {
+            state
+                .tasks
+                .inject_chunk(T1, format!("chunk-{i}").as_bytes())
+                .await
+                .unwrap();
+        }
+
+        let mut ws = connect(addr).await;
+        hello_history_http(&mut ws).await;
+        let mut snapshot_seq = None;
+        let mut history_start = None;
+        let mut order = Vec::new();
+        loop {
+            match next_rx(&mut ws).await {
+                Rx::Bin(Frame::Snapshot { seq, .. }) => {
+                    snapshot_seq = Some(seq);
+                    order.push("snapshot");
+                }
+                Rx::Bin(Frame::Output { seq, .. }) => {
+                    panic!("historical OUTPUT {seq} sent for {count}-chunk HTTP history")
+                }
+                Rx::Bin(Frame::History { seq, .. }) => {
+                    panic!("legacy HISTORY {seq} sent for HTTP history")
+                }
+                Rx::Ctrl(ServerMsg::HistoryStart { task_id, last_seq }) if task_id == T1 => {
+                    history_start = Some(last_seq);
+                    order.push("history_start");
+                }
+                Rx::Ctrl(ServerMsg::ReplayDone { task_id, last_seq }) if task_id == T1 => {
+                    assert_eq!(last_seq, count);
+                    break;
+                }
+                Rx::Ctrl(ServerMsg::HistoryDone { .. }) => {
+                    panic!("legacy history completion sent for HTTP history")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(snapshot_seq, Some(count));
+        assert_eq!(history_start, (count > 0).then_some(count));
+        if count > 0 {
+            assert_eq!(order, ["history_start", "snapshot"]);
+        }
+
+        // The bytes omitted from WS are recoverable through bounded REST pages.
+        let mut after = 0;
+        let mut sequences = Vec::new();
+        while after < count {
+            let (status, page) = history_page(&state, T1, after, count).await;
+            assert_eq!(status, StatusCode::OK);
+            let next = page["next_after"].as_u64().unwrap();
+            assert!(next > after && next <= count);
+            for chunk in page["chunks"].as_array().unwrap() {
+                sequences.push(chunk["seq"].as_u64().unwrap());
+            }
+            after = next;
+        }
+        assert_eq!(sequences, (1..=count).collect::<Vec<_>>());
+
+        state.tasks.inject_chunk(T1, b"live").await.unwrap();
+        assert_eq!(next_output(&mut ws).await, (count + 1, b"live".to_vec()));
+    }
+}
+
+#[tokio::test]
+async fn history_http_without_screen_uses_rest_and_survives_rest_failure() {
+    let (addr, state) = start_server().await;
+    let info = TaskInfo {
+        id: T1.into(),
+        tool: "claude".into(),
+        title: "no screen".into(),
+        status: TaskStatus::Exited { code: Some(0) },
+        created_at: now_millis(),
+        last_seq: 0,
+    };
+    state.store.create_task(&info).await.unwrap();
+    state.tasks.inject_chunk(T1, b"one").await.unwrap();
+    state.tasks.inject_chunk(T1, b"two").await.unwrap();
+
+    let mut ws = connect(addr).await;
+    hello_history_http(&mut ws).await;
+    let mut history_start = None;
+    loop {
+        match next_rx(&mut ws).await {
+            Rx::Bin(Frame::Output { seq, .. }) | Rx::Bin(Frame::History { seq, .. }) => {
+                panic!("no-screen HTTP history leaked raw WS chunk {seq}")
+            }
+            Rx::Bin(Frame::Snapshot { .. }) => panic!("no-screen task produced a snapshot"),
+            Rx::Ctrl(ServerMsg::HistoryStart { task_id, last_seq }) if task_id == T1 => {
+                history_start = Some(last_seq)
+            }
+            Rx::Ctrl(ServerMsg::ReplayDone { task_id, last_seq }) if task_id == T1 => {
+                assert_eq!(last_seq, 2);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(history_start, Some(2));
+
+    let (status, page) = history_page(&state, T1, 0, 2).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["next_after"], 2);
+    assert_eq!(page["chunks"][0]["data_b64"], "b25l");
+    assert_eq!(page["chunks"][1]["data_b64"], "dHdv");
+
+    // A failed independent REST request must not tear down or stall the WS.
+    let (status, _) = history_page(&state, T1, 0, 3).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    send(&mut ws, &ClientMsg::Ping { ts: 9876 }).await;
+    state.tasks.inject_chunk(T1, b"live").await.unwrap();
+    loop {
+        match next_rx(&mut ws).await {
+            Rx::Ctrl(ServerMsg::Pong { ts: 9876 }) => break,
+            Rx::Bin(Frame::Output { .. }) => panic!("live output arrived before its pong check"),
+            _ => {}
+        }
+    }
+    assert_eq!(next_output(&mut ws).await, (3, b"live".to_vec()));
+}
+
+#[tokio::test]
+async fn legacy_history_flag_does_not_start_in_band_history() {
     let (addr, state) = start_server().await;
     seed(&state, T1).await;
     for _ in 0..301 {
@@ -581,154 +711,44 @@ async fn history_replay_interleaves_live_output() {
     }
 
     let mut ws = connect(addr).await;
-    hello_history(&mut ws).await;
+    send(
+        &mut ws,
+        &ClientMsg::Hello {
+            client_id: "legacy".into(),
+            cursors: HashMap::new(),
+            acks: true,
+            history: true,
+            history_http: false,
+        },
+    )
+    .await;
     let mut snapshot = false;
-    let mut started = false;
     loop {
         match next_rx(&mut ws).await {
             Rx::Bin(Frame::Snapshot { seq: 301, .. }) => snapshot = true,
-            Rx::Ctrl(ServerMsg::HistoryStart {
-                task_id,
-                last_seq: 301,
-            }) if task_id == T1 => started = true,
+            Rx::Bin(Frame::History { .. }) => panic!("legacy client started a history worker"),
+            Rx::Ctrl(ServerMsg::HistoryStart { .. } | ServerMsg::HistoryDone { .. }) => {
+                panic!("legacy history control sent without history_http")
+            }
             Rx::Ctrl(ServerMsg::ReplayDone { task_id, .. }) if task_id == T1 => break,
             _ => {}
         }
     }
-    assert!(snapshot && started);
+    assert!(snapshot);
 
-    assert!(matches!(
-        next_rx(&mut ws).await,
-        Rx::Bin(Frame::History { seq: 1, .. })
-    ));
     state.tasks.inject_chunk(T1, b"live").await.unwrap();
-
-    let mut history = vec![1];
-    let live_seq = loop {
-        match next_rx(&mut ws).await {
-            Rx::Bin(Frame::History { seq, .. }) => history.push(seq),
-            Rx::Bin(Frame::Output { seq, data, .. }) => {
-                assert_eq!(data, b"live");
-                break seq;
-            }
-            Rx::Ctrl(ServerMsg::HistoryDone { .. }) => {
-                panic!("history completed before live output")
-            }
-            _ => {}
-        }
-    };
-    assert_eq!(live_seq, 302);
-    assert!(history.len() <= super::ws::REPLAY_WINDOW as usize);
-
-    for seq in &history {
-        send(
-            &mut ws,
-            &ClientMsg::HistoryAck {
-                task_id: T1.into(),
-                seq: *seq,
-            },
-        )
-        .await;
-    }
-    loop {
-        match next_rx(&mut ws).await {
-            Rx::Bin(Frame::History { seq, .. }) => {
-                history.push(seq);
-                send(
-                    &mut ws,
-                    &ClientMsg::HistoryAck {
-                        task_id: T1.into(),
-                        seq,
-                    },
-                )
-                .await;
-            }
-            Rx::Ctrl(ServerMsg::HistoryDone {
-                task_id,
-                last_seq: 301,
-            }) if task_id == T1 => break,
-            _ => {}
-        }
-    }
-    assert_eq!(history, (1..=301).collect::<Vec<_>>());
-}
-
-#[tokio::test]
-async fn history_cancel_keeps_live_output() {
-    let (addr, state) = start_server().await;
-    seed(&state, T1).await;
-    for _ in 0..301 {
-        state.tasks.inject_chunk(T1, b".").await.unwrap();
-    }
-
-    let mut ws = connect(addr).await;
-    hello_history(&mut ws).await;
-    loop {
-        if matches!(
-            next_rx(&mut ws).await,
-            Rx::Ctrl(ServerMsg::ReplayDone { task_id, .. }) if task_id == T1
-        ) {
-            break;
-        }
-    }
-    assert!(matches!(
-        next_rx(&mut ws).await,
-        Rx::Bin(Frame::History { seq: 1, .. })
-    ));
-    send(&mut ws, &ClientMsg::HistoryCancel { task_id: T1.into() }).await;
-    state.tasks.inject_chunk(T1, b"live").await.unwrap();
-
     loop {
         match next_rx(&mut ws).await {
             Rx::Bin(Frame::Output { seq: 302, data, .. }) => {
                 assert_eq!(data, b"live");
                 break;
             }
-            Rx::Ctrl(ServerMsg::HistoryDone { .. }) => {
-                panic!("cancelled history reported completion")
+            Rx::Bin(Frame::History { .. }) => panic!("legacy client received raw history"),
+            Rx::Ctrl(ServerMsg::HistoryStart { .. } | ServerMsg::HistoryDone { .. }) => {
+                panic!("legacy history control sent without history_http")
             }
             _ => {}
         }
-    }
-}
-
-#[tokio::test]
-async fn concurrent_history_workers_both_finish() {
-    let (addr, state) = start_server().await;
-    for task in [T1, T2] {
-        seed(&state, task).await;
-        for _ in 0..301 {
-            state.tasks.inject_chunk(task, b".").await.unwrap();
-        }
-    }
-
-    let mut ws = connect(addr).await;
-    hello_history(&mut ws).await;
-    let mut replay_done = 0;
-    while replay_done < 2 {
-        if matches!(
-            next_rx(&mut ws).await,
-            Rx::Ctrl(ServerMsg::ReplayDone { .. })
-        ) {
-            replay_done += 1;
-        }
-    }
-
-    let mut sequences: HashMap<String, Vec<u64>> = HashMap::new();
-    let mut history_done = 0;
-    while history_done < 2 {
-        match next_rx(&mut ws).await {
-            Rx::Bin(Frame::History { task_id, seq, .. }) => {
-                let task_id = task_id.to_string();
-                sequences.entry(task_id.clone()).or_default().push(seq);
-                send(&mut ws, &ClientMsg::HistoryAck { task_id, seq }).await;
-            }
-            Rx::Ctrl(ServerMsg::HistoryDone { .. }) => history_done += 1,
-            _ => {}
-        }
-    }
-    for task in [T1, T2] {
-        assert_eq!(sequences.get(task).unwrap(), &(1..=301).collect::<Vec<_>>());
     }
 }
 
@@ -872,6 +892,8 @@ async fn ws_handshake_rejects_wrong_token() {
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use http_body_util::BodyExt;
 use switchboard_shared::auth::{rest_mac, sha256, H_MAC, H_NONCE, H_TS};
 use tower::ServiceExt;
 
@@ -906,6 +928,186 @@ fn signed_request_at(
         .header(H_MAC, hex(&mac))
         .body(Body::from(body.to_vec()))
         .unwrap()
+}
+
+async fn rest_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
+async fn history_page(
+    state: &Arc<AppState>,
+    task_id: &str,
+    after: u64,
+    through: u64,
+) -> (StatusCode, serde_json::Value) {
+    history_page_with_token(state, TOKEN.as_bytes(), task_id, after, through).await
+}
+
+async fn history_page_with_token(
+    state: &Arc<AppState>,
+    token: &[u8],
+    task_id: &str,
+    after: u64,
+    through: u64,
+) -> (StatusCode, serde_json::Value) {
+    let path = format!("/api/tasks/{task_id}/history?after={after}&through={through}");
+    let req = signed_request(token, "GET", &path, b"");
+    let resp = crate::http::router(state.clone(), true)
+        .oneshot(req)
+        .await
+        .unwrap();
+    rest_json(resp).await
+}
+
+#[tokio::test]
+async fn history_rest_pages_preserve_binary_bytes() {
+    let state = build_state().await;
+    seed(&state, T1).await;
+    let payloads: Vec<Vec<u8>> = (0..10)
+        .map(|i| match i {
+            0 => vec![0, 0xff, 0x80, 0],
+            1 => vec![0, 0xff],
+            _ => format!("chunk-{i}\0").into_bytes(),
+        })
+        .collect();
+    for bytes in &payloads {
+        state.tasks.inject_chunk(T1, bytes).await.unwrap();
+    }
+
+    let (status, first) = history_page(&state, T1, 0, 10).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["next_after"], 8);
+    assert_eq!(first["chunks"].as_array().unwrap().len(), 8);
+    for (index, chunk) in first["chunks"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(chunk["seq"], index as u64 + 1);
+        let encoded = chunk["data_b64"].as_str().unwrap();
+        assert_eq!(BASE64_STANDARD.decode(encoded).unwrap(), payloads[index]);
+        assert_eq!(encoded, BASE64_STANDARD.encode(&payloads[index]));
+    }
+
+    let (status, second) = history_page(&state, T1, 8, 10).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["next_after"], 10);
+    assert_eq!(second["chunks"].as_array().unwrap().len(), 2);
+    for (index, chunk) in second["chunks"].as_array().unwrap().iter().enumerate() {
+        let payload_index = index + 8;
+        assert_eq!(chunk["seq"], payload_index as u64 + 1);
+        assert_eq!(
+            BASE64_STANDARD
+                .decode(chunk["data_b64"].as_str().unwrap())
+                .unwrap(),
+            payloads[payload_index]
+        );
+    }
+}
+
+#[tokio::test]
+async fn history_rest_page_respects_decoded_byte_limit() {
+    let state = build_state().await;
+    seed(&state, T1).await;
+    state
+        .tasks
+        .inject_chunk(T1, &vec![0x5a; 40_000])
+        .await
+        .unwrap();
+    state
+        .tasks
+        .inject_chunk(T1, &vec![0xa5; 40_000])
+        .await
+        .unwrap();
+
+    let (status, first) = history_page(&state, T1, 0, 2).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["next_after"], 1);
+    assert_eq!(first["chunks"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        BASE64_STANDARD
+            .decode(first["chunks"][0]["data_b64"].as_str().unwrap())
+            .unwrap()
+            .len(),
+        40_000
+    );
+
+    let (status, second) = history_page(&state, T1, 1, 2).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["next_after"], 2);
+    assert_eq!(second["chunks"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn history_rest_validates_bounds_existence_and_contiguity() {
+    let state = build_state().await;
+    seed(&state, T1).await;
+    state.tasks.inject_chunk(T1, b"one").await.unwrap();
+    state.tasks.inject_chunk(T1, b"two").await.unwrap();
+
+    for (after, through) in [(0, 0), (2, 2), (2, 1), (0, 3)] {
+        let (status, _) = history_page(&state, T1, after, through).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "after={after}, through={through}"
+        );
+    }
+    let (status, _) = history_page(&state, T2, 0, 1).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Metadata promises two chunks but the durable log is empty: never return a
+    // successful empty page that would make the client's pagination loop stall.
+    state
+        .store
+        .create_task(&TaskInfo {
+            id: T2.into(),
+            tool: "claude".into(),
+            title: "missing chunks".into(),
+            status: TaskStatus::Failed {
+                error: "test".into(),
+            },
+            created_at: now_millis(),
+            last_seq: 2,
+        })
+        .await
+        .unwrap();
+    let (status, _) = history_page(&state, T2, 0, 2).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn history_rest_requires_a_valid_signature() {
+    let state = build_state().await;
+    seed(&state, T1).await;
+    state.tasks.inject_chunk(T1, b"secret").await.unwrap();
+    let path = format!("/api/tasks/{T1}/history?after=0&through=1");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(&path)
+        .body(Body::empty())
+        .unwrap();
+    let resp = crate::http::router(state.clone(), true)
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let (status, _) = history_page_with_token(&state, b"wrong-token", T1, 0, 1).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn history_rest_rejects_an_unpageable_oversized_chunk() {
+    let state = build_state().await;
+    seed(&state, T1).await;
+    state
+        .tasks
+        .inject_chunk(T1, &vec![0x5a; 64 * 1024 + 1])
+        .await
+        .unwrap();
+    let (status, _) = history_page(&state, T1, 0, 1).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]

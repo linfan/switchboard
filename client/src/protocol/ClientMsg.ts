@@ -12,9 +12,13 @@ export type ClientMsg = { "type": "hello", client_id: string, cursors: Record<st
  */
 acks: boolean,
 /**
- * Restore scrollback in a separate history stream after a fresh snapshot.
+ * Legacy in-band history request. Retained for wire compatibility.
  */
-history: boolean, } | { "type": "create_task", request_id: string | null, tool: string, title: string | null,
+history: boolean,
+/**
+ * Restore scrollback with paginated, signed HTTP history requests.
+ */
+history_http: boolean, } | { "type": "create_task", request_id: string | null, tool: string, title: string | null,
 /**
  * Working directory for the agent process (server-validated).
  */

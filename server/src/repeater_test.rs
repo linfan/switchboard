@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures::{SinkExt, StreamExt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{
@@ -557,6 +558,7 @@ async fn hello(ws: &mut WsStream, cursors: HashMap<String, u64>) {
             cursors,
             acks: false,
             history: false,
+            history_http: false,
         },
     )
     .await;
@@ -971,6 +973,60 @@ async fn rest_info_through_repeater() {
         info.name, "worker-test",
         "REST response must come from the worker"
     );
+}
+
+#[tokio::test]
+async fn tagged_history_rest_preserves_bytes_and_ws_survives_failure() {
+    let h = boot().await;
+    seed(&h.worker, T1).await;
+    let payloads = [vec![0, 0xff, 0x80, 0], b"second\0chunk".to_vec()];
+    for bytes in &payloads {
+        h.worker.tasks.inject_chunk(T1, bytes).await.unwrap();
+    }
+
+    let mut ws = connect_ws(&h.client_addr, &h.cb, TAG_A).await;
+    send(
+        &mut ws,
+        &ClientMsg::Hello {
+            client_id: "http-history".into(),
+            cursors: HashMap::new(),
+            acks: true,
+            history: false,
+            history_http: true,
+        },
+    )
+    .await;
+    let replay = read_through_replay(&mut ws, T1).await;
+    assert!(outputs(&replay).is_empty());
+    assert!(replay
+        .iter()
+        .any(|frame| matches!(frame, Frame::Snapshot { seq: 2, .. })));
+
+    let path = tagged(&format!("/api/tasks/{T1}/history?after=0&through=2"), TAG_A);
+    let (status, body) = https_request(&h.client_addr, "GET", &path, Some(&h.cb), b"")
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(page["next_after"], 2);
+    for (index, chunk) in page["chunks"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(chunk["seq"], index as u64 + 1);
+        assert_eq!(
+            BASE64_STANDARD
+                .decode(chunk["data_b64"].as_str().unwrap())
+                .unwrap(),
+            payloads[index]
+        );
+    }
+
+    let failed = tagged(&format!("/api/tasks/{T1}/history?after=0&through=3"), TAG_A);
+    let (status, _) = https_request(&h.client_addr, "GET", &failed, Some(&h.cb), b"")
+        .await
+        .unwrap();
+    assert_eq!(status, 400);
+
+    h.worker.tasks.inject_chunk(T1, b"live").await.unwrap();
+    assert_eq!(next_output(&mut ws).await, (3, b"live".to_vec()));
 }
 
 #[tokio::test]

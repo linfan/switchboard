@@ -11,6 +11,7 @@ function persisted(): {
   cursors?: unknown;
   editorState?: Record<string, unknown>;
   selectedWorkspaceId?: string;
+  selectedKey?: string;
   taskOrder?: Record<string, string[]>;
 } {
   return JSON.parse(localStorage.getItem(KEY) ?? '{"state":{"services":[]}}')
@@ -73,6 +74,11 @@ describe("persist round-trip through localStorage", () => {
     useStore.getState().setCursor("s1", "t1", 42);
     expect(useStore.getState().cursors[convKey("s1", "t1")]).toBe(42);
     expect(persisted().cursors).toBeUndefined();
+  });
+
+  it("persists the selected task so restart can prioritize its history", () => {
+    useStore.getState().select("s1::t1");
+    expect(persisted().selectedKey).toBe("s1::t1");
   });
 
   it("persists workspace editor state and selection so the editor restores on restart", () => {

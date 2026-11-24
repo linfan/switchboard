@@ -92,12 +92,12 @@ export interface AppState {
    * buffer doesn't survive a full reload, so a stale cursor would tell the server
    * the client is caught up and leave the reopened screen blank (or paint a
    * mid-stream slice of escapes over a blank screen). Starting fresh at 0 makes
-   * the server reconstruct each screen (snapshot or full replay) on reopen.
+   * the server reconstruct each screen and request HTTP history on reopen.
    */
   cursors: Record<string, number>;
   /** Recently used task commands per service (most-recent first, persisted). */
   recentTools: Record<string, string[]>;
-  /** Currently focused conversation key, if any. */
+  /** Focused conversation, persisted so its history restores first on reopen. */
   selectedKey?: string;
   /**
    * Currently focused workspace (its file editor fills the right pane). Mutually
@@ -804,6 +804,7 @@ export const useStore = create<AppState>()(
         editorFontSize: s.editorFontSize,
         editorWrapDefault: s.editorWrapDefault,
         settings: s.settings,
+        selectedKey: s.selectedKey,
         selectedWorkspaceId: s.selectedWorkspaceId,
         editorState: s.editorState,
       }),

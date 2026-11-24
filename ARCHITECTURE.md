@@ -33,12 +33,20 @@ transport security, repeater mode, and self-upgrade.
 3. Every client keeps an **in-memory live cursor** per task (`highest applied
    chunk seq`). On (re)connect it sends `Hello { cursors }`; a nonzero cursor
    means the page still owns the matching xterm, so the server byte fast-forwards
-   at any gap size. A fresh client starts at zero and uses a screen snapshot for
-   a large backlog. Each snapshot carries the emulator's exact applied seq.
-4. Fresh clients that negotiate history recovery receive the snapshot immediately,
-   then rebuild scrollback in an offscreen xterm from an independently paced
-   HISTORY stream while the visible terminal continues live OUTPUT. Once the
-   candidate catches up it replaces the visible terminal without a reset.
+   at any gap size. A fresh client starts at zero. With `history_http`, every
+   backlog size uses a screen snapshot when available plus HTTP history; legacy
+   clients use a snapshot only for a large backlog. Each snapshot carries the
+   emulator's exact applied seq.
+4. Fresh clients that negotiate `history_http` receive the snapshot immediately,
+   then rebuild scrollback in an offscreen xterm from bounded, signed HTTP pages
+   while the visible terminal continues live OUTPUT. One page is in flight per
+   service: the selected task goes first, background tasks are duty-cycled and
+   yield to live activity, and a new selection is promoted at the next page
+   boundary. Once the candidate catches up it replaces the visible terminal
+   without a reset. Snapshot/live cursors stay at zero until that commit, so a
+   reconnect before completion (or after failure) requests history again instead
+   of permanently skipping it. History HTTP failure cancels only that candidate;
+   it never reconnects or resets the live terminal WebSocket.
 5. Live delivery **dedups by seq**, so a client that just replayed never double-
    applies an in-flight chunk. No loss, no duplicates, no gaps.
 6. The `INPUT` data-plane frame carries raw keystrokes straight to the PTY;
@@ -63,10 +71,16 @@ exported to TypeScript via `ts-rs` (`client/src/protocol/`), so client and serve
 can never drift.
 
 - `ClientMsg`: `hello` · `create_task` (with `cols`/`rows`) · `resize` ·
-  `terminate_task` · `delete_task` · `ack` · `history_ack` · `history_cancel` ·
-  `ping`
+  `terminate_task` · `delete_task` · `ack` · `ping`
 - `ServerMsg`: `welcome` · `task_created` · `task_state` · `task_deleted` ·
-  `replay_done` · `history_start` · `history_done` · `pong` · `error`
+  `replay_done` · `history_start` · `pong` · `error`
+
+The old `history_ack` / `history_cancel` / `history_done` and binary `HISTORY`
+types remain reserved for wire compatibility, but `history_http` connections do
+not use them. Raw scrollback is fetched from signed
+`GET /api/tasks/{id}/history?after=N&through=M` pages (at most 8 chunks and
+64 KiB of decoded bytes per page, base64 in JSON). HTTP and the live WS use
+separate Repeater streams, so a history-route reset is scoped to that request.
 
 `terminate_task` stops a task's process but keeps its history (so it can still be
 replayed); `delete_task` terminates it *and* removes the task plus all its
@@ -81,7 +95,7 @@ big-endian with a 16-byte raw-UUID task id:
 |-------|--------|-----------|
 | `OUTPUT` | `[0x01][task_id:16][seq:u64][data]` | server → client |
 | `SNAPSHOT` | `[0x02][task_id:16][seq:u64][data]` | server → client |
-| `HISTORY` | `[0x03][task_id:16][seq:u64][data]` | server → client |
+| `HISTORY` (legacy, reserved) | `[0x03][task_id:16][seq:u64][data]` | server → client |
 | `INPUT` | `[0x10][task_id:16][data]` | client → server |
 
 ## Transport security (`SWB-v1`)

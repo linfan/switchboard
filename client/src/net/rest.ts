@@ -14,6 +14,7 @@ import type {
   ServiceInfo,
 } from "../protocol";
 import type { ServiceRef } from "../store/types";
+import { base64ToBytes } from "./b64";
 import { invoke, isTauri } from "./tauri";
 import { cbFromPin, restSignHeaders, sha256 } from "./swbauth";
 import { withServiceTag } from "./url";
@@ -63,6 +64,7 @@ function bridge(
   headers: Record<string, string>,
   body: string | null,
   pin: string | undefined,
+  timeoutMs?: number,
 ): Promise<BridgeResponse> {
   return invoke<BridgeResponse>("http_request", {
     method,
@@ -70,6 +72,7 @@ function bridge(
     headers: Object.entries(headers),
     body,
     pin: pin ?? null,
+    timeoutMs: timeoutMs ?? null,
   });
 }
 
@@ -110,6 +113,11 @@ function interpret<T>(res: BridgeResponse): T {
   return JSON.parse(res.body) as T;
 }
 
+interface RequestOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 /**
  * Signed JSON request against a service, transparently using the Tauri native
  * bridge (cert-pinning) or `fetch` in the browser. Shared by every editor REST
@@ -120,6 +128,7 @@ async function apiRequest<T>(
   method: string,
   path: string,
   body?: unknown,
+  options: RequestOptions = {},
 ): Promise<T> {
   const base = service.url.replace(/\/+$/, "");
   const target = withServiceTag(path, service.tag);
@@ -128,38 +137,106 @@ async function apiRequest<T>(
   const bodyBytes = payload === null ? null : new TextEncoder().encode(payload);
   const headers = await signHeaders(service, method, target, bodyBytes);
   if (isTauri) {
+    // Native IPC cannot abort; its matching timeout must settle before another page starts.
     const res = await bridge(
       method,
       url,
       headers,
       payload,
       service.certFingerprint,
+      options.timeoutMs,
     );
     // 204 (e.g. a successful save) has no body for `interpret` to parse.
     if (res.status === 204) return undefined as T;
     return interpret<T>(res);
   }
-  const res = await fetch(url, {
-    method,
-    headers: {
-      ...headers,
-      ...(payload !== null ? { "Content-Type": "application/json" } : {}),
-    },
-    body: payload,
-  });
-  if (res.status === 401) throw new Error("Invalid token.");
-  if (!res.ok) {
-    let message = res.statusText || `HTTP ${res.status}`;
-    try {
-      message = (await res.json()).message ?? message;
-    } catch {
-      // non-JSON body; keep the status text
+  const controller = new AbortController();
+  const abort = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) abort();
+  else options.signal?.addEventListener("abort", abort, { once: true });
+  const timeout =
+    options.timeoutMs === undefined
+      ? null
+      : setTimeout(() => controller.abort(TIMEOUT), options.timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: {
+        ...headers,
+        ...(payload !== null ? { "Content-Type": "application/json" } : {}),
+      },
+      body: payload,
+      signal: controller.signal,
+    });
+    if (res.status === 401) throw new Error("Invalid token.");
+    if (!res.ok) {
+      let message = res.statusText || `HTTP ${res.status}`;
+      try {
+        message = (await res.json()).message ?? message;
+      } catch {
+        // non-JSON body; keep the status text
+      }
+      throw new Error(message);
     }
-    throw new Error(message);
+    // 204 (e.g. a successful save) has no body to parse.
+    if (res.status === 204) return undefined as T;
+    return res.json() as Promise<T>;
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abort);
   }
-  // 204 (e.g. a successful save) has no body to parse.
-  if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+}
+
+export interface HistoryChunk {
+  seq: number;
+  data: Uint8Array;
+}
+
+export interface HistoryPage {
+  chunks: HistoryChunk[];
+  nextAfter: number;
+}
+
+interface WireHistoryPage {
+  chunks: Array<{ seq: number; data_b64: string }>;
+  next_after: number;
+}
+
+const HISTORY_PAGE_TIMEOUT_MS = 30000;
+
+export async function getHistoryPage(
+  service: ServiceRef,
+  taskId: string,
+  after: number,
+  through: number,
+  signal?: AbortSignal,
+): Promise<HistoryPage> {
+  const query = new URLSearchParams({
+    after: String(after),
+    through: String(through),
+  });
+  let page: WireHistoryPage;
+  try {
+    page = await apiRequest<WireHistoryPage>(
+      service,
+      "GET",
+      `/api/tasks/${encodeURIComponent(taskId)}/history?${query}`,
+      undefined,
+      { signal, timeoutMs: HISTORY_PAGE_TIMEOUT_MS },
+    );
+  } catch (error) {
+    if (error === TIMEOUT) {
+      throw new Error("History request timed out.", { cause: error });
+    }
+    throw error;
+  }
+  return {
+    chunks: page.chunks.map((chunk) => ({
+      seq: chunk.seq,
+      data: base64ToBytes(chunk.data_b64),
+    })),
+    nextAfter: page.next_after,
+  };
 }
 
 /** A probed service's info plus the leaf-cert fingerprint captured to pin it. */

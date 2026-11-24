@@ -110,7 +110,7 @@ Server → Client:
 ```
 OUTPUT    [0x01][task_id:16][seq:u64][data: raw PTY bytes]
 SNAPSHOT  [0x02][task_id:16][seq:u64][data: ANSI to reconstruct current screen]
-HISTORY   [0x03][task_id:16][seq:u64][data: raw PTY bytes for offscreen scrollback]
+HISTORY   [0x03][task_id:16][seq:u64][data: legacy/reserved; not used by history_http]
 ```
 Client → Server:
 ```
@@ -143,14 +143,21 @@ Server pipeline for each PTY chunk (in order, before broadcast):
 On (re)connect the client sends `Hello { cursors: {task_id: last_seq} }`. Per
 task the server picks a replay strategy:
 
-- **Snapshot (fresh or legacy client, large backlog).** If `tail - cursor > N`
-  and the client either starts from zero or lacks Ack pacing, render the current
-  screen via `vt100::Screen::contents_formatted()` and send a SNAPSHOT frame
-  carrying the emulator's exact applied `seq`. Client does `term.reset()` then
-  `term.write(snapshot)`. Cost is O(screen), independent of session length.
-- **Byte fast-forward (live buffer or small backlog).** Replay raw OUTPUT chunks
-  `seq > cursor` for a small gap, or for any gap when a paced client has a live
-  buffer (`cursor > 0`). This is byte-exact and preserves scrollback with no reset.
+- **Snapshot (fresh `history_http` client, any backlog).** Render the current
+  screen via `vt100::Screen::contents_formatted()`, advertise its exact applied
+  `seq` in `HistoryStart`, then send a SNAPSHOT frame. Sending the metadata first
+  ensures a disconnect before the snapshot cannot advance the cursor past an
+  incomplete restore. Client does `term.reset()` then `term.write(snapshot)`. Cost is
+  O(screen), independent of session length. If no emulator exists, send only
+  `HistoryStart` at the durable tail and let HTTP rebuild the terminal offscreen;
+  never dump the byte log onto the live WS.
+- **Snapshot (legacy fresh client, large backlog).** If `tail - cursor > N` and
+  the client either starts from zero or lacks Ack pacing, use the same O(screen)
+  snapshot path without HTTP scrollback recovery.
+- **Byte fast-forward (live buffer or legacy small backlog).** Replay raw OUTPUT
+  chunks `seq > cursor` for a small legacy gap, or for any gap when a paced client
+  has a live buffer (`cursor > 0`). This is byte-exact and preserves scrollback
+  with no reset. A fresh `history_http` client never takes this path.
 
 Either path ends with `ReplayDone{task_id, last_seq}`. `Ack{task_id, seq}`
 persists the delivery cursor (used to pick fast-forward vs snapshot and to bound
@@ -158,15 +165,26 @@ log growth). Because the emulator state is a pure function of the ordered chunk
 log, snapshot and fast-forward converge to the identical screen — and multiple
 concurrent viewers of one task all converge on the server's authoritative state.
 
-Clients that send `Hello.history = true` also recover scrollback after a fresh
-large snapshot. The server sends `Snapshot(S)` and `ReplayDone(S)` immediately,
-then interleaves ordinary live OUTPUT after `S` with HISTORY chunks `1..=S` on a
-bounded, independently acknowledged stream. The visible terminal stays live. An
-offscreen xterm parses HISTORY through `S`, then drains queued live output and
-resizes in order before replacing the visible terminal in place.
-`HistoryAck` never advances the live cursor. `HistoryDone` is sent only after the
-candidate parsed `S`; cancellation or failure discards only the candidate and
-leaves the visible snapshot-plus-live terminal untouched.
+Clients that send `Hello { history: false, history_http: true }` recover
+scrollback through signed `GET /api/tasks/{id}/history?after=N&through=S` pages.
+Each page contains at most 8 chunks and 64 KiB of decoded terminal bytes, encoded
+as standard base64 in JSON, plus `next_after`. The server validates exact
+contiguous sequences and bounds; the client validates them again and requests
+the next page only after the offscreen xterm has parsed the current one.
+
+The selected task recovers first. A per-service scheduler keeps one HTTP page in
+flight, then recovers background tasks sequentially with a bounded duty cycle and
+a bounded live-activity quiet period that cannot postpone background work
+indefinitely. Selecting another task promotes it at the next page boundary
+without discarding pages already parsed by the preempted task. An offscreen xterm
+parses history through `S`, then drains queued live output and resizes in order
+before replacing the visible terminal in place. Snapshot/live cursors remain
+zero until that commit, so reconnecting an incomplete or failed restore retries
+it rather than skipping history. HTTP failure or cancellation discards only the
+candidate and leaves the visible snapshot-plus-live terminal and its WebSocket
+untouched. Repeater HTTP and WS traffic use
+independent streams, so a history-route reset does not reset the live terminal;
+the physical link and worker tunnel bandwidth are still shared.
 
 Retention: keep the full `pty_chunks` log for audit + scrollback by default;
 optional trimming of chunks below the min delivered cursor beyond a byte budget
@@ -180,13 +198,13 @@ now flow as keystrokes in INPUT frames; structured events are gone.)
 Add / change:
 ```
 ClientMsg (text/JSON):
-  Hello         { client_id, cursors, acks, history }       // + replay/history capabilities
+  Hello         { client_id, cursors, acks, history, history_http } // replay/recovery capabilities
   CreateTask    { tool, title?, cwd?, cols, rows }         // + initial PTY size; initial_prompt dropped
   Resize        { task_id, cols, rows }                    // NEW
   TerminateTask { task_id }                                // unchanged
   Ack           { task_id, seq }                           // unchanged (now chunk seq)
-  HistoryAck    { task_id, seq }                           // parsed history, independent of live Ack
-  HistoryCancel { task_id }                                // optional history-only abort
+  HistoryAck    { task_id, seq }                           // legacy/reserved
+  HistoryCancel { task_id }                                // legacy/reserved
   Ping          { ts }                                     // unchanged
 
 ServerMsg (text/JSON):
@@ -194,7 +212,8 @@ ServerMsg (text/JSON):
   TaskCreated { task }                                     // unchanged
   TaskState   { task_id, status }                          // unchanged
   ReplayDone  { task_id, last_seq }                        // unchanged
-  HistoryStart / HistoryDone { task_id, last_seq }          // fresh scrollback recovery
+  HistoryStart { task_id, last_seq }                       // HTTP recovery snapshot/tail
+  HistoryDone  { task_id, last_seq }                       // legacy/reserved
   Pong        { ts }                                       // unchanged
   Error       { task_id?, code?, message }                 // unchanged
 ```

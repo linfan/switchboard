@@ -7,6 +7,7 @@ import type { Settings } from "../store/settings";
 import { useStore } from "../store/store";
 import { ConnectionManager, type TrafficSnapshot } from "./connection";
 import { decode } from "./frame";
+import { ServiceHistoryRecovery } from "./history";
 import { isTauri } from "./tauri";
 import { makeTauriWsFactory } from "./tauriSocket";
 import * as terminals from "./terminals";
@@ -57,6 +58,7 @@ function ensureClientId(): string {
 
 export class ConnectionPool {
   private managers = new Map<string, ConnectionManager>();
+  private recoveries = new Map<string, ServiceHistoryRecovery>();
   /** Last-synced connection config per service, to detect edits (url/token). */
   private configs = new Map<string, string>();
   private unsub: (() => void) | null = null;
@@ -81,9 +83,10 @@ export class ConnectionPool {
     terminals.setSinks(
       (sid, tid, bytes) => this.sendInput(sid, tid, bytes),
       (sid, tid, cols, rows) => this.sendResize(sid, tid, cols, rows),
-      (sid, tid, seq) =>
-        this.send(sid, { type: "history_ack", task_id: tid, seq }),
-      (sid, tid) => this.send(sid, { type: "history_cancel", task_id: tid }),
+      (sid, tid, seq) => {
+        this.recoveries.get(sid)?.committed(tid);
+        this.queueCursor(sid, tid, seq);
+      },
     );
     const sync = (services: ServiceConfig[], settings: Settings) => {
       const live = new Set(services.map((s) => s.id));
@@ -97,6 +100,8 @@ export class ConnectionPool {
         if (!live.has(sid)) {
           this.managers.delete(sid);
           this.configs.delete(sid);
+          this.recoveries.get(sid)?.cancel();
+          this.recoveries.delete(sid);
           mgr.stop();
         }
       }
@@ -108,6 +113,8 @@ export class ConnectionPool {
         if (mgr && this.configs.get(svc.id) !== configKey(svc, settings)) {
           this.managers.delete(svc.id);
           this.configs.delete(svc.id);
+          this.recoveries.get(svc.id)?.cancel();
+          this.recoveries.delete(svc.id);
           mgr.stop();
         }
       }
@@ -115,6 +122,12 @@ export class ConnectionPool {
       for (const svc of services) {
         if (this.managers.has(svc.id)) continue;
         this.configs.set(svc.id, configKey(svc, settings));
+        const recovery = new ServiceHistoryRecovery(
+          svc.id,
+          svc,
+          useStore.getState().selectedKey,
+        );
+        this.recoveries.set(svc.id, recovery);
         const mgr = new ConnectionManager({
           clientId: id,
           url: svc.url,
@@ -148,7 +161,7 @@ export class ConnectionPool {
           // match the client's viewport.
           onReady: () => terminals.resync(svc.id),
           onStatus: (status, meta) => {
-            if (status !== "online") terminals.cancelHistoryForService(svc.id);
+            if (status !== "online") recovery.cancel();
             useStore.getState().setRuntime(svc.id, {
               status,
               lastError: meta?.error,
@@ -179,6 +192,11 @@ export class ConnectionPool {
       if (s.services !== prev.services || s.settings !== prev.settings) {
         sync(s.services, s.settings);
       }
+      if (s.selectedKey !== prev.selectedKey) {
+        for (const recovery of this.recoveries.values()) {
+          recovery.selectionChanged(s.selectedKey);
+        }
+      }
     });
 
     if (typeof window !== "undefined") {
@@ -191,6 +209,8 @@ export class ConnectionPool {
     this.unsub?.();
     this.unsub = null;
     this.flushCursors();
+    for (const recovery of this.recoveries.values()) recovery.cancel();
+    this.recoveries.clear();
     for (const mgr of this.managers.values()) mgr.stop();
     this.managers.clear();
     if (typeof window !== "undefined") {
@@ -214,13 +234,15 @@ export class ConnectionPool {
 
   /** Apply a control message, disposing a deleted task's terminal first. */
   private onControl(serviceId: string, msg: ServerMsg): void {
-    if (msg.type === "history_start") {
-      terminals.beginHistory(serviceId, msg.task_id, msg.last_seq);
-    } else if (msg.type === "history_done") {
-      terminals.finishHistory(serviceId, msg.task_id);
-    } else if (msg.type === "error" && msg.code === "history_failed") {
-      if (msg.task_id) terminals.failHistory(serviceId, msg.task_id);
+    const recovery = this.recoveries.get(serviceId);
+    if (msg.type === "welcome") {
+      recovery?.start(msg.tasks.map((task) => task.id));
+    } else if (msg.type === "history_start") {
+      recovery?.add(msg.task_id, msg.last_seq);
+    } else if (msg.type === "replay_done") {
+      recovery?.replayDone(msg.task_id);
     } else if (msg.type === "task_deleted") {
+      recovery?.remove(msg.task_id);
       terminals.dispose(serviceId, msg.task_id);
     }
     useStore.getState().applyServerMsg(serviceId, msg);
@@ -236,12 +258,15 @@ export class ConnectionPool {
     }
     // The terminal write is applied immediately (xterm queues its own parse);
     // the cursor advance is buffered and coalesced — see `pendingCursors`.
-    if (frame.kind === "history") {
-      terminals.writeHistory(serviceId, frame.taskId, frame);
-      return;
+    if (frame.kind === "history") return;
+    if (frame.kind === "output") {
+      this.recoveries.get(serviceId)?.liveActivity();
     }
     terminals.write(serviceId, frame.taskId, frame);
-    if (frame.kind === "output" || frame.kind === "snapshot") {
+    if (
+      (frame.kind === "output" || frame.kind === "snapshot") &&
+      !this.recoveries.get(serviceId)?.blocksCursor(frame.taskId)
+    ) {
       this.queueCursor(serviceId, frame.taskId, frame.seq);
     }
   }
@@ -269,6 +294,7 @@ export class ConnectionPool {
     this.pendingCursors = new Map();
     const setCursor = useStore.getState().setCursor;
     for (const { serviceId, taskId, seq } of pending.values()) {
+      if (this.recoveries.get(serviceId)?.blocksCursor(taskId)) continue;
       setCursor(serviceId, taskId, seq);
       // Tell the worker how far this client has applied the replay, so it can
       // pace a long backlog instead of dumping it into the repeater's bounded
@@ -303,6 +329,7 @@ export class ConnectionPool {
    * {@link sendResize}, which `onReady` re-asserts from the live terminal.
    */
   sendInput(serviceId: string, taskId: string, bytes: Uint8Array): boolean {
+    this.recoveries.get(serviceId)?.liveActivity();
     return this.managers.get(serviceId)?.sendInput(taskId, bytes) ?? false;
   }
 

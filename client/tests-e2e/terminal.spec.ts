@@ -13,18 +13,18 @@ interface TerminalProbe {
 
 interface StreamProbe {
   snapshots: Array<{ taskId: string; seq: number }>;
+  outputs: Array<{ taskId: string; seq: number }>;
+  hellos: Array<{ cursors: Record<string, number> }>;
   replayDone: Array<{ taskId: string; lastSeq: number }>;
   historyStarts: Array<{ taskId: string; lastSeq: number }>;
-  historyDone: Array<{ taskId: string; lastSeq: number }>;
   historyFrames: number;
   tasks: Array<{ id: string; title: string }>;
   topSamples: Array<{ at: number; top: number; max: number }>;
   pauseTopSamples: boolean;
   dropData: boolean;
   droppedFrames: number;
-  holdHistoryAck: boolean;
-  heldHistoryAcks: Array<{ socket: WebSocket; data: string }>;
-  releaseHistoryAcks: () => void;
+  serviceWebSocketsConstructed: number;
+  serviceWebSocketsClosed: number;
 }
 
 type ProbeWindow = Window & {
@@ -33,25 +33,22 @@ type ProbeWindow = Window & {
 };
 
 async function installStreamProbe(page: Page) {
-  await page.addInitScript(() => {
+  await page.addInitScript((serviceHttp) => {
+    const serviceHost = new URL(serviceHttp).host;
     const probe: StreamProbe = {
       snapshots: [],
+      outputs: [],
+      hellos: [],
       replayDone: [],
       historyStarts: [],
-      historyDone: [],
       historyFrames: 0,
       tasks: [],
       topSamples: [],
       pauseTopSamples: false,
       dropData: false,
       droppedFrames: 0,
-      holdHistoryAck: false,
-      heldHistoryAcks: [],
-      releaseHistoryAcks: () => {
-        probe.holdHistoryAck = false;
-        for (const { socket, data } of probe.heldHistoryAcks) socket.send(data);
-        probe.heldHistoryAcks = [];
-      },
+      serviceWebSocketsConstructed: 0,
+      serviceWebSocketsClosed: 0,
     };
     (window as ProbeWindow).__streamProbe = probe;
     const NativeWebSocket = window.WebSocket;
@@ -62,21 +59,30 @@ async function installStreamProbe(page: Page) {
     window.WebSocket = new Proxy(NativeWebSocket, {
       construct(target, args) {
         const socket = Reflect.construct(target, args) as WebSocket;
-        const send = socket.send.bind(socket);
-        socket.send = (data) => {
-          if (typeof data === "string") {
-            try {
-              const message = JSON.parse(data) as { type?: string };
-              if (message.type === "history_ack" && probe.holdHistoryAck) {
-                probe.heldHistoryAcks.push({ socket, data });
-                return;
+        const url = new URL(String(args[0]));
+        if (url.host === serviceHost && url.pathname === "/ws") {
+          probe.serviceWebSocketsConstructed++;
+          socket.addEventListener("close", () => {
+            probe.serviceWebSocketsClosed++;
+          });
+          const send = socket.send.bind(socket);
+          socket.send = (data) => {
+            if (typeof data === "string") {
+              try {
+                const message = JSON.parse(data) as {
+                  type?: string;
+                  cursors?: Record<string, number>;
+                };
+                if (message.type === "hello" && message.cursors) {
+                  probe.hellos.push({ cursors: message.cursors });
+                }
+              } catch {
+                // Authentication and non-JSON frames are not Hello messages.
               }
-            } catch {
-              // Non-JSON control messages do not affect the probe.
             }
-          }
-          send(data);
-        };
+            send(data);
+          };
+        }
         Object.defineProperty(socket, "onmessage", {
           configurable: true,
           get: () => onmessage.get?.call(socket) ?? null,
@@ -97,16 +103,6 @@ async function installStreamProbe(page: Page) {
                     message.last_seq !== undefined
                   ) {
                     probe.historyStarts.push({
-                      taskId: message.task_id,
-                      lastSeq: message.last_seq,
-                    });
-                  }
-                  if (
-                    message.type === "history_done" &&
-                    message.task_id &&
-                    message.last_seq !== undefined
-                  ) {
-                    probe.historyDone.push({
                       taskId: message.task_id,
                       lastSeq: message.last_seq,
                     });
@@ -138,7 +134,7 @@ async function installStreamProbe(page: Page) {
                   return;
                 }
                 if (kind === 3) probe.historyFrames++;
-                if (kind === 2) {
+                if (kind === 1 || kind === 2) {
                   const hex = Array.from(bytes.subarray(1, 17), (byte) =>
                     byte.toString(16).padStart(2, "0"),
                   ).join("");
@@ -147,7 +143,8 @@ async function installStreamProbe(page: Page) {
                   const seq =
                     view.getUint32(17, false) * 0x1_0000_0000 +
                     view.getUint32(21, false);
-                  probe.snapshots.push({ taskId, seq });
+                  if (kind === 1) probe.outputs.push({ taskId, seq });
+                  else probe.snapshots.push({ taskId, seq });
                 }
               }
               handler?.call(socket, event);
@@ -157,7 +154,128 @@ async function installStreamProbe(page: Page) {
         return socket;
       },
     });
+  }, HTTP);
+}
+
+interface HistoryRouteRequest {
+  taskId: string;
+  after: number;
+  through: number;
+}
+
+interface HistoryRouteResponse extends HistoryRouteRequest {
+  nextAfter: number;
+  final: boolean;
+}
+
+/** Observe signed HTTP history paging, optionally holding the first response. */
+async function installHistoryRoute(
+  page: Page,
+  options: { holdFirst?: boolean; onlyTaskId?: string } = {},
+) {
+  const requests: HistoryRouteRequest[] = [];
+  const responses: HistoryRouteResponse[] = [];
+  const heldRequests: HistoryRouteRequest[] = [];
+  let held = false;
+  let releaseHeld: (() => void) | undefined;
+
+  await page.route("**/api/tasks/*/history?*", async (route) => {
+    const url = new URL(route.request().url());
+    const afterText = url.searchParams.get("after");
+    const throughText = url.searchParams.get("through");
+    const request: HistoryRouteRequest = {
+      taskId: decodeURIComponent(url.pathname.split("/")[3] ?? ""),
+      after: afterText === null ? Number.NaN : Number(afterText),
+      through: throughText === null ? Number.NaN : Number(throughText),
+    };
+    requests.push(request);
+    if (options.onlyTaskId && request.taskId !== options.onlyTaskId) {
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ message: "unrelated background task" }),
+      });
+      return;
+    }
+
+    const response = await route.fetch();
+    const body = (await response.json().catch(() => null)) as {
+      next_after?: number;
+    } | null;
+    if (options.holdFirst && !held) {
+      held = true;
+      heldRequests.push(request);
+      await new Promise<void>((resolve) => {
+        releaseHeld = resolve;
+      });
+    }
+    // route.fetch only obtains the response; fulfill actually delivers it.
+    await route.fulfill({ response });
+
+    if (typeof body?.next_after === "number") {
+      responses.push({
+        ...request,
+        nextAfter: body.next_after,
+        final: body.next_after === request.through,
+      });
+    }
   });
+
+  return {
+    requests,
+    responses,
+    heldRequests,
+    releaseFirst() {
+      releaseHeld?.();
+      releaseHeld = undefined;
+    },
+    async waitForHeldResponse(taskId: string) {
+      await expect
+        .poll(() => heldRequests.some((request) => request.taskId === taskId), {
+          timeout: 15000,
+        })
+        .toBe(true);
+    },
+    async waitForFinalPage(taskId: string, timeout = 15000) {
+      await expect
+        .poll(
+          () =>
+            responses.some(
+              (response) => response.taskId === taskId && response.final,
+            ),
+          { timeout },
+        )
+        .toBe(true);
+    },
+  };
+}
+
+async function streamTaskId(page: Page, title: string) {
+  const taskId = await page.evaluate(
+    (title) =>
+      (window as ProbeWindow).__streamProbe!.tasks.find(
+        (candidate) => candidate.title === title,
+      )?.id,
+    title,
+  );
+  if (!taskId) throw new Error(`No streamed task named ${title}`);
+  return taskId;
+}
+
+async function streamProbeCounts(page: Page, taskId: string) {
+  return page.evaluate((taskId) => {
+    const probe = (window as ProbeWindow).__streamProbe!;
+    return {
+      snapshots: probe.snapshots.filter((frame) => frame.taskId === taskId)
+        .length,
+      historyStarts: probe.historyStarts.filter(
+        (frame) => frame.taskId === taskId,
+      ).length,
+      historyFrames: probe.historyFrames,
+      serviceWebSocketsConstructed: probe.serviceWebSocketsConstructed,
+      serviceWebSocketsClosed: probe.serviceWebSocketsClosed,
+    };
+  }, taskId);
 }
 
 async function sampleStreamingTop(page: Page) {
@@ -576,13 +694,16 @@ for (const detached of [false, true]) {
         () => (window as ProbeWindow).__streamProbe!.droppedFrames,
       ),
     ).toBeGreaterThan(256);
-    const before = await page.evaluate(() => {
+    const taskId = await streamTaskId(page, title);
+    const before = await page.evaluate((taskId) => {
       const probe = (window as ProbeWindow).__streamProbe!;
       return {
-        snapshots: probe.snapshots.length,
+        snapshots: probe.snapshots.filter(
+          (snapshot) => snapshot.taskId === taskId,
+        ).length,
         replays: probe.replayDone.length,
       };
-    });
+    }, taskId);
     await reconnect(page);
     await page.evaluate(() => {
       (window as ProbeWindow).__streamProbe!.dropData = false;
@@ -612,7 +733,9 @@ for (const detached of [false, true]) {
     const probe = await page.evaluate(
       () => (window as ProbeWindow).__streamProbe!,
     );
-    expect(probe.snapshots).toHaveLength(before.snapshots);
+    expect(
+      probe.snapshots.filter((snapshot) => snapshot.taskId === taskId),
+    ).toHaveLength(before.snapshots);
     expect(probe.topSamples).toEqual([]);
 
     const box = await page.locator(".xterm-screen").boundingBox();
@@ -628,56 +751,66 @@ test("full reload keeps the snapshot live while history restores", async ({
   await installStreamProbe(page);
   const title = await createTerminalTask(page, "restart-history-task");
   await fillScrollback(page, 150);
+  const taskId = await streamTaskId(page, title);
+  const rows = page.locator(".xterm-rows");
+  const visibleTick = () =>
+    rows.evaluate((el) => {
+      const ticks = Array.from(
+        (el.textContent ?? "").matchAll(/tick:(\d+)(?!:)/g),
+      );
+      return Math.max(0, ...ticks.map((match) => Number(match[1])));
+    });
   await page.locator(".xterm-screen").click();
-  await page.keyboard.type("tick:2:4000");
+  await page.keyboard.type("tick:100:250");
   await page.keyboard.press("Enter");
-  await expect(page.locator(".xterm-rows")).toContainText("tick:1");
-  await page.addInitScript(() => {
-    const probe = (window as ProbeWindow).__streamProbe;
-    if (probe) probe.holdHistoryAck = true;
-  });
+  await expect.poll(visibleTick).toBeGreaterThan(0);
+  const history = await installHistoryRoute(page, { holdFirst: true });
 
   await page.reload();
   await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
   const conv = page.locator(".conv", { hasText: title });
-  await conv.click();
-  const rows = page.locator(".xterm-rows");
-  await expect(rows).toContainText("tick:", { timeout: 15000 });
+  await expect(conv).toBeVisible();
+  await expect(page.locator(".xterm-screen")).toBeVisible();
+  await expect.poll(visibleTick, { timeout: 15000 }).toBeGreaterThan(0);
+  await history.waitForHeldResponse(taskId);
   await sampleStreamingTop(page);
-  const historyCount = (title: string, kind: "start" | "done") =>
-    page.evaluate(
-      ({ title, kind }) => {
-        const probe = (window as ProbeWindow).__streamProbe!;
-        const task = probe.tasks.find((candidate) => candidate.title === title);
-        const frames =
-          kind === "start" ? probe.historyStarts : probe.historyDone;
-        return frames.filter((frame) => frame.taskId === task?.id).length;
-      },
-      { title, kind },
-    );
-  await expect.poll(() => historyCount(title, "start")).toBe(1);
 
-  const visibleTick = () =>
-    rows.evaluate((el) => {
-      const ticks = Array.from((el.textContent ?? "").matchAll(/tick:(\d+)/g));
-      return Math.max(0, ...ticks.map((match) => Number(match[1])));
-    });
-  await expect.poll(visibleTick).toBeGreaterThan(0);
+  const expectedStream = await streamProbeCounts(page, taskId);
+  expect(expectedStream).toMatchObject({
+    snapshots: 1,
+    historyStarts: 1,
+    historyFrames: 0,
+  });
+  // React StrictMode's mount cleanup creates one short-lived socket in dev.
+  // Once recovery starts there must be one live session and no further cycling.
+  expect(
+    expectedStream.serviceWebSocketsConstructed -
+      expectedStream.serviceWebSocketsClosed,
+  ).toBe(1);
   const firstTick = await visibleTick();
   await expect.poll(visibleTick).toBeGreaterThan(firstTick);
-  expect(await historyCount(title, "done")).toBe(0);
-  expect(
-    await page.evaluate(
-      () => (window as ProbeWindow).__streamProbe!.heldHistoryAcks.length,
-    ),
-  ).toBeGreaterThan(0);
 
-  await page.evaluate(() =>
-    (window as ProbeWindow).__streamProbe!.releaseHistoryAcks(),
-  );
+  // The snapshot remains a fully usable live terminal even though its HTTP
+  // history response is still held by the route above.
+  const command = `held-command-${Date.now()}`;
+  await page.locator(".xterm-screen").click();
+  await page.keyboard.type(command);
+  await page.keyboard.press("Enter");
+  await expect(rows).toContainText(`reply:${command}`, { timeout: 15000 });
+  expect(await streamProbeCounts(page, taskId)).toEqual(expectedStream);
+  expect(history.responses).toEqual([]);
+
+  history.releaseFirst();
+  await history.waitForFinalPage(taskId);
   await expect
-    .poll(() => historyCount(title, "done"), { timeout: 15000 })
-    .toBe(1);
+    .poll(() =>
+      page
+        .locator(".xterm-viewport")
+        .evaluate((viewport) => viewport.scrollHeight - viewport.clientHeight),
+    )
+    .toBeGreaterThan(500);
+  expect(await streamProbeCounts(page, taskId)).toEqual(expectedStream);
+
   await page.evaluate(() => {
     (window as ProbeWindow).__streamProbe!.pauseTopSamples = true;
   });
@@ -700,7 +833,97 @@ test("full reload keeps the snapshot live while history restores", async ({
       () => (window as ProbeWindow).__streamProbe!.topSamples,
     ),
   ).toEqual([]);
+  expect(await streamProbeCounts(page, taskId)).toEqual(expectedStream);
 
+  await page.keyboard.type("quit");
+  await page.keyboard.press("Enter");
+  await expect(conv).toContainText("exited", { timeout: 10000 });
+});
+
+test("reconnect retries unfinished HTTP history instead of skipping it", async ({
+  page,
+}) => {
+  await installStreamProbe(page);
+  const title = await createTerminalTask(page, "retry-history-task");
+  await fillScrollback(page, 150);
+  const taskId = await streamTaskId(page, title);
+  const rows = page.locator(".xterm-rows");
+  await page.locator(".xterm-screen").click();
+  await page.keyboard.type("tick:200:3");
+  await page.keyboard.press("Enter");
+  const history = await installHistoryRoute(page, { holdFirst: true });
+
+  await page.reload();
+  await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
+  await history.waitForHeldResponse(taskId);
+  expect(await streamProbeCounts(page, taskId)).toMatchObject({
+    snapshots: 1,
+    historyStarts: 1,
+    historyFrames: 0,
+  });
+
+  await reconnect(page);
+  await expect
+    .poll(async () => (await streamProbeCounts(page, taskId)).historyStarts)
+    .toBe(2);
+  expect(await streamProbeCounts(page, taskId)).toMatchObject({
+    snapshots: 2,
+    historyFrames: 0,
+  });
+  await history.waitForFinalPage(taskId);
+  history.releaseFirst();
+  await expect(rows).toContainText("tick:3", { timeout: 15000 });
+  await expect
+    .poll(() =>
+      page
+        .locator(".xterm-viewport")
+        .evaluate((viewport) => viewport.scrollHeight - viewport.clientHeight),
+    )
+    .toBeGreaterThan(500);
+
+  const beforeReconnect = await page.evaluate((taskId) => {
+    const probe = (window as ProbeWindow).__streamProbe!;
+    return {
+      hellos: probe.hellos.length,
+      replayDone: probe.replayDone.filter((frame) => frame.taskId === taskId)
+        .length,
+      highestOutput: Math.max(
+        0,
+        ...probe.outputs
+          .filter((frame) => frame.taskId === taskId)
+          .map((frame) => frame.seq),
+      ),
+    };
+  }, taskId);
+  await reconnect(page);
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as ProbeWindow).__streamProbe!.hellos.length),
+    )
+    .toBe(beforeReconnect.hellos + 1);
+  await expect
+    .poll(() =>
+      page.evaluate((taskId) => {
+        const probe = (window as ProbeWindow).__streamProbe!;
+        return probe.replayDone.filter((frame) => frame.taskId === taskId)
+          .length;
+      }, taskId),
+    )
+    .toBe(beforeReconnect.replayDone + 1);
+  const committed = await page.evaluate((taskId) => {
+    const probe = (window as ProbeWindow).__streamProbe!;
+    return {
+      cursor: probe.hellos.at(-1)?.cursors[taskId],
+      historyStarts: probe.historyStarts.filter(
+        (frame) => frame.taskId === taskId,
+      ).length,
+    };
+  }, taskId);
+  expect(committed.cursor).toBe(beforeReconnect.highestOutput);
+  expect(committed.historyStarts).toBe(2);
+
+  const conv = page.locator(".conv", { hasText: title });
+  await page.locator(".xterm-screen").click();
   await page.keyboard.type("quit");
   await page.keyboard.press("Enter");
   await expect(conv).toContainText("exited", { timeout: 10000 });
@@ -709,25 +932,28 @@ test("full reload keeps the snapshot live while history restores", async ({
 test("full reload restores history before a background task is selected", async ({
   page,
 }) => {
+  // Fail unrelated persistent tasks fast so this checks background recovery
+  // without minutes of timing dependence on earlier tests' scrollback.
+  test.setTimeout(120000);
   await installStreamProbe(page);
   const title = await createTerminalTask(page, "detached-restart-history-task");
   await fillScrollback(page, 150);
+  const taskId = await streamTaskId(page, title);
+  const history = await installHistoryRoute(page, { onlyTaskId: taskId });
+
+  // Keep this a background recovery rather than letting persisted selection
+  // prioritize the task and mount its terminal during startup.
+  await page.evaluate(() => {
+    const stored = JSON.parse(localStorage.getItem("switchboard")!);
+    delete stored.state.selectedKey;
+    localStorage.setItem("switchboard", JSON.stringify(stored));
+  });
   await page.reload();
   await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
-
-  const historyCount = (kind: "start" | "done") =>
-    page.evaluate(
-      ({ title, kind }) => {
-        const probe = (window as ProbeWindow).__streamProbe!;
-        const task = probe.tasks.find((candidate) => candidate.title === title);
-        const frames =
-          kind === "start" ? probe.historyStarts : probe.historyDone;
-        return frames.filter((frame) => frame.taskId === task?.id).length;
-      },
-      { title, kind },
-    );
-  await expect.poll(() => historyCount("start")).toBe(1);
-  await expect.poll(() => historyCount("done"), { timeout: 15000 }).toBe(1);
+  await expect
+    .poll(async () => (await streamProbeCounts(page, taskId)).historyStarts)
+    .toBe(1);
+  await history.waitForFinalPage(taskId, 110000);
 
   const conv = page.locator(".conv", { hasText: title });
   await conv.click();
@@ -743,6 +969,7 @@ test("full reload restores history before a background task is selected", async 
       { timeout: 15000 },
     )
     .toContain("AGENT-READY");
+  await page.locator(".xterm-screen").click();
   await page.keyboard.type("quit");
   await page.keyboard.press("Enter");
   await expect(conv).toContainText("exited", { timeout: 10000 });
@@ -754,31 +981,20 @@ test("full reload preserves alternate-screen modes during history restoration", 
   await installStreamProbe(page);
   const title = await createTerminalTask(page, "tui-restart-history-task");
   await fillScrollback(page, 150);
+  const taskId = await streamTaskId(page, title);
   await page.keyboard.type("tui:2:5");
   await page.keyboard.press("Enter");
   const rows = page.locator(".xterm-rows");
   await expect(rows).toContainText("FRAME:5");
   const before = await rows.textContent();
+  const history = await installHistoryRoute(page);
 
   await page.reload();
   await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
   const conv = page.locator(".conv", { hasText: title });
-  await conv.click();
+  await expect(conv).toBeVisible();
   await expect(rows).toContainText("FRAME:5");
-  await expect
-    .poll(
-      () =>
-        page.evaluate((title) => {
-          const probe = (window as ProbeWindow).__streamProbe!;
-          const task = probe.tasks.find(
-            (candidate) => candidate.title === title,
-          );
-          return probe.historyDone.filter((frame) => frame.taskId === task?.id)
-            .length;
-        }, title),
-      { timeout: 15000 },
-    )
-    .toBe(1);
+  await history.waitForFinalPage(taskId);
   await expect.poll(() => rows.textContent()).toBe(before);
 
   await page.keyboard.type("quit");
@@ -788,6 +1004,77 @@ test("full reload preserves alternate-screen modes during history restoration", 
   await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
   await page.mouse.wheel(0, -100000);
   await expect(rows).toContainText("AGENT-READY");
+});
+
+test("failed HTTP history leaves the visible snapshot and live terminal usable", async ({
+  page,
+}) => {
+  await installStreamProbe(page);
+  const title = await createTerminalTask(page, "failed-history-task");
+  await fillScrollback(page, 150);
+  const taskId = await streamTaskId(page, title);
+  const rows = page.locator(".xterm-rows");
+  const visibleTick = () =>
+    rows.evaluate((el) => {
+      const ticks = Array.from(
+        (el.textContent ?? "").matchAll(/tick:(\d+)(?!:)/g),
+      );
+      return Math.max(0, ...ticks.map((match) => Number(match[1])));
+    });
+  const marker = `snapshot-marker-${Date.now()}`;
+  await page.locator(".xterm-screen").click();
+  await page.keyboard.type(marker);
+  await page.keyboard.press("Enter");
+  await expect(rows).toContainText(`reply:${marker}`);
+  await page.keyboard.type("tick:100:250");
+  await page.keyboard.press("Enter");
+  await expect.poll(visibleTick).toBeGreaterThan(0);
+
+  let failedRequests = 0;
+  await page.route("**/api/tasks/*/history?*", async (route) => {
+    const url = new URL(route.request().url());
+    if (decodeURIComponent(url.pathname.split("/")[3] ?? "") !== taskId) {
+      await route.continue();
+      return;
+    }
+    failedRequests++;
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "injected history failure" }),
+    });
+  });
+
+  await page.reload();
+  await expect(page.locator(".dot--online")).toBeVisible({ timeout: 15000 });
+  const conv = page.locator(".conv", { hasText: title });
+  await expect(conv).toBeVisible();
+  await expect(page.locator(".xterm-screen")).toBeVisible();
+  await expect(rows).toContainText(`reply:${marker}`, { timeout: 15000 });
+  await expect.poll(() => failedRequests).toBe(1);
+  const expectedStream = await streamProbeCounts(page, taskId);
+  expect(expectedStream).toMatchObject({
+    snapshots: 1,
+    historyStarts: 1,
+    historyFrames: 0,
+  });
+  expect(
+    expectedStream.serviceWebSocketsConstructed -
+      expectedStream.serviceWebSocketsClosed,
+  ).toBe(1);
+
+  const firstTick = await visibleTick();
+  await expect.poll(visibleTick).toBeGreaterThan(firstTick);
+  const command = `after-history-failure-${Date.now()}`;
+  await page.locator(".xterm-screen").click();
+  await page.keyboard.type(command);
+  await page.keyboard.press("Enter");
+  await expect(rows).toContainText(`reply:${command}`, { timeout: 15000 });
+  expect(await streamProbeCounts(page, taskId)).toEqual(expectedStream);
+
+  await page.keyboard.type("quit");
+  await page.keyboard.press("Enter");
+  await expect(conv).toContainText("exited", { timeout: 10000 });
 });
 
 test("streaming output does not pull a scrolled-up viewport back to the bottom", async ({

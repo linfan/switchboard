@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ServiceRef } from "../store/types";
-import { listDir, probeService } from "./rest";
+import { getHistoryPage, listDir, probeService } from "./rest";
 import { cbFromPin, fromHex, restSignHeaders, sha256 } from "./swbauth";
 
 const svc = { url: "http://host:8787", token: "tok" };
@@ -155,5 +155,50 @@ describe("apiRequest", () => {
     const [url, init] = fetchCalls()[0];
     expect(url).toBe("http://host:8787/api/fs");
     await expectMacTarget(init, svc, "/api/fs");
+  });
+
+  it("signs history pagination and decodes arbitrary terminal bytes", async () => {
+    const tagged = { ...svc, tag: "worker-A" };
+    mockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            chunks: [{ seq: 1, data_b64: "AP8=" }],
+            next_after: 1,
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(getHistoryPage(tagged, "task 1", 0, 2)).resolves.toEqual({
+      chunks: [{ seq: 1, data: new Uint8Array([0, 255]) }],
+      nextAfter: 1,
+    });
+    const [url, init] = fetchCalls()[0];
+    const target = "/api/tasks/task%201/history?after=0&through=2&tag=worker-A";
+    expect(url).toBe(`http://host:8787${target}`);
+    await expectMacTarget(init, tagged, target);
+  });
+
+  it("aborts the underlying history fetch on cancellation", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: { signal: AbortSignal }) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal.addEventListener(
+              "abort",
+              () => reject(init.signal.reason),
+              { once: true },
+            );
+          }),
+      ),
+    );
+    const pending = getHistoryPage(svc, "t1", 0, 1, controller.signal);
+    await settleCrypto();
+    controller.abort(new Error("cancelled"));
+
+    await expect(pending).rejects.toThrow("cancelled");
   });
 });
